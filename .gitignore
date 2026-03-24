@@ -1,0 +1,13 @@
+# Image data — too large for version control
+data/raw/
+data/processed/
+data/flatfield/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# OS
+.DS_Store
