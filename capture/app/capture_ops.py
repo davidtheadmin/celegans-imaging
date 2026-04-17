@@ -1,3 +1,4 @@
+import logging
 import subprocess
 import sys
 import time
@@ -10,6 +11,8 @@ from fastapi import HTTPException
 from PIL import Image
 
 from .config import settings
+
+log = logging.getLogger(__name__)
 
 # capture.py lives at capture/capture.py (sibling of this package's parent dir).
 # WorkingDirectory for the service is capture/, so parents[1] = capture/.
@@ -102,7 +105,9 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
     ts = _ts()
     filename = f"{ts}_still.jpg"
     path = _free_dir() / filename
+    t0 = time.perf_counter()
     save_jpeg(arr, path)
+    log.info("[TIMING] free_still: save_jpeg=%.3fs", time.perf_counter() - t0)
     return {"path": str(path), "filename": filename}
 
 
@@ -156,7 +161,9 @@ def plate_survival(
     ts = _ts()
     filename = f"{ts}_{quadrant.upper()}.jpg" if quadrant else f"{ts}_still.jpg"
     path = plate_dir / filename
+    t0 = time.perf_counter()
     save_jpeg(arr, path)
+    log.info("[TIMING] plate_survival: save_jpeg=%.3fs", time.perf_counter() - t0)
     return {
         "path": str(path),
         "filename": filename,

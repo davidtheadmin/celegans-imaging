@@ -164,10 +164,16 @@ class CameraManager:
     def capture_still(self) -> np.ndarray:
         """Return full-res RGB array. Raises HTTPException(409) if recording."""
         from fastapi import HTTPException
+        t0 = time.perf_counter()
         with self._capture_lock:
+            t1 = time.perf_counter()
             if self._recording:
                 raise HTTPException(409, "Video recording in progress")
-            return self._cam.capture_array("main")
+            arr = self._cam.capture_array("main")
+            t2 = time.perf_counter()
+        log.info("[TIMING] capture_still: lock_wait=%.3fs capture_array=%.3fs",
+                 t1 - t0, t2 - t1)
+        return arr
 
     def start_video_recording(self, path: Path, bitrate_bps: int) -> None:
         from fastapi import HTTPException
