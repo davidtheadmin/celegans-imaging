@@ -1,0 +1,14 @@
+[Unit]
+Description=C. elegans Imaging Station API
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/celegans-imaging/capture
+EnvironmentFile=/home/pi/celegans-imaging/capture/.env
+ExecStart=/home/pi/celegans-imaging/.venv/bin/uvicorn app.main:app --host ${CELEGANS_HOST} --port ${CELEGANS_PORT}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
