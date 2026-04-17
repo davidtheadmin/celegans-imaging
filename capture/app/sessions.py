@@ -76,6 +76,20 @@ def create_session(req: CreateSessionRequest) -> Session:
     return session
 
 
+def get_plate(session_id: str, plate_id: str):
+    from fastapi import HTTPException
+    from typing import Tuple
+    session = get_session(session_id)
+    for plate in session.plates:
+        if plate.id == plate_id:
+            return session, plate
+    raise HTTPException(404, "Plate not found")
+
+
+def get_plate_dir(session_id: str, folder_name: str) -> Path:
+    return _session_dir(session_id) / "plates" / folder_name
+
+
 def add_plate(session_id: str, req: CreatePlateRequest) -> Session:
     session = get_session(session_id)
 
