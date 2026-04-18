@@ -245,6 +245,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
   width: 5px; height: 5px; border-radius: 50%;
   background: currentColor; flex-shrink: 0;
 }
+.plate-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plate-del-btn {
+  display: none; background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 14px; line-height: 1;
+  padding: 0 2px; flex-shrink: 0;
+}
+.plate-item:hover .plate-del-btn { display: block; }
+.plate-del-btn:hover { color: var(--danger); }
 
 .add-plate-btn {
   width: 100%; justify-content: flex-start; margin-top: 4px;

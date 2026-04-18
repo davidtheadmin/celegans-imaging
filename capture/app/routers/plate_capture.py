@@ -111,6 +111,14 @@ async def serve_plate_file(
 
 
 @router.delete(
+    "/sessions/{session_id}/plates/{plate_id}",
+    dependencies=[Depends(require_token)],
+)
+async def delete_plate_endpoint(session_id: str, plate_id: str):
+    return await asyncio.to_thread(session_store.delete_plate, session_id, plate_id)
+
+
+@router.delete(
     "/sessions/{session_id}/plates/{plate_id}/files/{filename}",
     dependencies=[Depends(require_token)],
 )

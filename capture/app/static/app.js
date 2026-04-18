@@ -429,9 +429,19 @@ function renderSessionSidebar() {
         const el = document.createElement('div');
         el.className = 'plate-item' + (isActive ? ' active' : '');
         el.setAttribute('tabindex', '0');
-        el.innerHTML = `<span class="plate-dot"></span>${esc(plate.folder_name)}`;
-        el.addEventListener('click', () => selectPlate(sess.id, plate.id));
+        el.innerHTML = `
+          <span class="plate-dot"></span>
+          <span class="plate-name">${esc(plate.folder_name)}</span>
+          <button class="plate-del-btn" aria-label="Delete ${esc(plate.folder_name)}" title="Delete plate">×</button>`;
+        el.addEventListener('click', e => {
+          if (e.target.classList.contains('plate-del-btn')) return;
+          selectPlate(sess.id, plate.id);
+        });
         el.addEventListener('keydown', e => { if (e.key === 'Enter') selectPlate(sess.id, plate.id); });
+        el.querySelector('.plate-del-btn').addEventListener('click', e => {
+          e.stopPropagation();
+          confirmDeletePlate(sess.id, plate);
+        });
         sec.appendChild(el);
       }
 
@@ -456,14 +466,30 @@ function renderSessionSidebar() {
         form.innerHTML = `
           <input class="ap-cond" type="text" placeholder="Condition ID" value="${esc(prevCond)}" required>
           <input class="ap-name" type="text" placeholder="Name" value="${esc(prevName)}" required>
-          <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0">
-            Plate #
-            <input class="ap-num mono" type="number" value="${nextNum}" min="1" style="width:52px">
-          </label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0;flex:1">
+              Start #<input class="ap-num mono" type="number" value="${nextNum}" min="1" style="width:52px">
+            </label>
+            <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0;flex:1">
+              ×<input class="ap-rep mono" type="number" value="1" min="1" max="50" style="width:44px">
+            </label>
+          </div>
+          <div class="ap-preview" style="font-size:10px;color:var(--text-dim);font-family:var(--mono);min-height:13px"></div>
           <div class="form-actions">
             <button class="btn btn-sm btn-primary ap-submit">Add</button>
             <button class="btn btn-sm ap-cancel">Cancel</button>
           </div>`;
+
+        const updatePreview = () => {
+          const n = parseInt(form.querySelector('.ap-num').value) || nextNum;
+          const r = Math.max(1, parseInt(form.querySelector('.ap-rep').value) || 1);
+          const el = form.querySelector('.ap-preview');
+          el.textContent = r > 1 ? `Plates ${n} – ${n + r - 1}` : `Plate ${n}`;
+        };
+        form.querySelector('.ap-num').addEventListener('input', updatePreview);
+        form.querySelector('.ap-rep').addEventListener('input', updatePreview);
+        updatePreview();
+
         form.querySelector('.ap-submit').addEventListener('click', () => submitAddPlate(sess.id, form));
         form.querySelector('.ap-cancel').addEventListener('click', () => {
           S.addingPlateFor = null; renderSessionSidebar();
@@ -521,10 +547,11 @@ async function submitAddPlate(sessionId, form) {
   const cond = form.querySelector('.ap-cond').value.trim();
   const name = form.querySelector('.ap-name').value.trim();
   const num = parseInt(form.querySelector('.ap-num').value) || 1;
+  const replicates = Math.max(1, parseInt(form.querySelector('.ap-rep').value) || 1);
   if (!cond || !name) return;
   try {
     const updated = await apiJson(`/sessions/${sessionId}/plates`, {
-      method: 'POST', body: { condition_id: cond, name, plate_number: num },
+      method: 'POST', body: { condition_id: cond, name, plate_number: num, replicates },
     });
     const idx = S.sessions.findIndex(s => s.id === sessionId);
     if (idx >= 0) S.sessions[idx] = updated;
@@ -533,6 +560,26 @@ async function submitAddPlate(sessionId, form) {
     announce('Plate added');
   } catch (err) {
     announce(`Failed: ${err.message}`);
+  }
+}
+
+async function confirmDeletePlate(sessionId, plate) {
+  const n = plate.folder_name;
+  const count = 0; // skip file count fetch for simplicity
+  const msg = `Delete plate ${n} and all its captures?\nThis can be undone manually from .trash on the Pi.`;
+  if (!confirm(msg)) return;
+  try {
+    const updated = await apiJson(`/sessions/${sessionId}/plates/${plate.id}`, { method: 'DELETE' });
+    const idx = S.sessions.findIndex(s => s.id === sessionId);
+    if (idx >= 0) S.sessions[idx] = updated;
+    if (S.activePlateId === plate.id && S.activeSessionId === sessionId) {
+      S.activePlateId = null;
+      renderSessionCapture();
+    }
+    renderSessionSidebar();
+    announce(`Plate ${n} deleted`);
+  } catch (err) {
+    announce(`Delete failed: ${err.message}`);
   }
 }
 

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
@@ -92,21 +93,45 @@ def get_plate_dir(session_id: str, folder_name: str) -> Path:
 
 def add_plate(session_id: str, req: CreatePlateRequest) -> Session:
     session = get_session(session_id)
-
+    count = max(1, min(50, req.replicates))
     now = datetime.now(timezone.utc)
-    plate_id = f"{req.condition_id}_{req.plate_number:02d}"
 
-    plate = Plate(
-        id=plate_id,
-        condition_id=req.condition_id,
-        name=req.name,
-        plate_number=req.plate_number,
-        created_at=now.isoformat(),
+    for i in range(count):
+        pnum = req.plate_number + i
+        plate_id = f"{req.condition_id}_{pnum:02d}"
+        plate = Plate(
+            id=plate_id,
+            condition_id=req.condition_id,
+            name=req.name,
+            plate_number=pnum,
+            created_at=now.isoformat(),
+        )
+        plate_dir = _session_dir(session_id) / "plates" / plate.folder_name
+        plate_dir.mkdir(parents=True, exist_ok=True)
+        session.plates.append(plate)
+
+    _write_manifest(session)
+    return session
+
+
+def delete_plate(session_id: str, plate_id: str) -> Session:
+    from fastapi import HTTPException
+    session = get_session(session_id)
+    plate = next((p for p in session.plates if p.id == plate_id), None)
+    if plate is None:
+        raise HTTPException(404, "Plate not found")
+
+    plate_dir = get_plate_dir(session_id, plate.folder_name)
+    trash_dest = (
+        Path(settings.DATA_ROOT) / ".trash" / "sessions" / session_id / "plates" / plate.folder_name
     )
+    trash_dest.parent.mkdir(parents=True, exist_ok=True)
+    if trash_dest.exists():
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        trash_dest = trash_dest.with_name(f"{trash_dest.name}_{ts}")
+    if plate_dir.exists():
+        shutil.move(str(plate_dir), str(trash_dest))
 
-    plate_dir = _session_dir(session_id) / "plates" / plate.folder_name
-    plate_dir.mkdir(parents=True, exist_ok=True)
-
-    session.plates.append(plate)
+    session.plates = [p for p in session.plates if p.id != plate_id]
     _write_manifest(session)
     return session

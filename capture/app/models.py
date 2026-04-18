@@ -35,3 +35,4 @@ class CreatePlateRequest(BaseModel):
     condition_id: str
     name: str
     plate_number: int
+    replicates: int = 1
