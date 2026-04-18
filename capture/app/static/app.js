@@ -147,7 +147,7 @@ async function magnifierLoop() {
     img.src = url;
     if (old.startsWith('blob:')) URL.revokeObjectURL(old);
   } catch {}
-  if (S.magnifierActive) S._magnifierTimer = setTimeout(magnifierLoop, 500);
+  if (S.magnifierActive) S._magnifierTimer = setTimeout(magnifierLoop, 100);
 }
 
 // ── AE Lock ────────────────────────────────────────────────────────────────────
