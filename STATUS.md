@@ -1,23 +1,35 @@
-# Phase 2 Status
+# Phase 2 Status — Complete
+
+## Performance (measured on Pi, 2026-04-18)
+
+| Operation | Wall clock |
+|-----------|-----------|
+| `POST /capture/free/still` | ~0.42s |
+| `POST /sessions/.../capture` (survival, single) | ~0.38s |
+| `POST /sessions/.../capture` (survival, quadrant) | ~0.38s |
+
+Breakdown: `capture_array("main")` = 0.106s, `save_jpeg()` = 0.132s.
+Survival is within 1.0× free-capture still — well under the 1.5× target.
 
 ## What's working
 
-- `GET /preview.mjpg` — MJPEG stream, ~10-20 fps, correct colors (YUV420 I420 path confirmed)
-- `GET /focus` — Laplacian variance score, live updates
-- `POST /camera/ae/lock` / `unlock` / `GET /camera/exposure` — AE lock reads and freezes real sensor values
-- `GET /status` — includes `camera_ready` and `ae_locked`
-- `POST /capture/free/still` — full-res still, ~0.42s wall clock (capture_array=0.106s, save_jpeg=0.132s)
-- `POST /capture/free/video` — H.264 recording, ffmpeg MP4 wrap confirmed working
-- `POST /sessions/.../capture` (motility) — video recording, correct plate folder, ~5s for 5s clip
-- `POST /sessions/.../capture` (survival) — fast, same code path as free/still
-- Quadrant guard: `POST .../capture` without `quadrant` on a `quadrants:true` session → 400 ✓
+- `GET /preview.mjpg` — MJPEG stream, ~10-20 fps
+- `GET /focus` — Laplacian variance score
+- `POST /camera/ae/lock` / `unlock` / `GET /camera/exposure`
+- `GET /status`
+- `POST /capture/free/still` — ~0.42s
+- `POST /capture/free/video` — H.264 + ffmpeg MP4 wrap
+- `POST /sessions/.../capture` (motility) — video, ~5s for 5s clip
+- `POST /sessions/.../capture` (survival, single still) — ~0.38s ✓
+- `POST /sessions/.../capture` (survival, quadrant NE/NW/SE/SW) — ~0.38s each ✓
+- Quadrant guard: missing `quadrant` on `quadrants:true` session → 400 ✓
 
 ## asyncio.to_thread coverage
 
-All endpoints that do camera I/O or disk I/O run in `asyncio.to_thread()`:
+All camera and disk I/O runs off the event loop:
 
-| Endpoint | Handler |
-|----------|---------|
+| Endpoint | Off-thread function |
+|----------|---------------------|
 | `POST /capture/free/still` | `capture_ops.free_still` |
 | `POST /capture/free/video` | `capture_ops.free_video` |
 | `POST /sessions/.../capture` (motility) | `capture_ops.plate_motility` |
@@ -26,15 +38,14 @@ All endpoints that do camera I/O or disk I/O run in `asyncio.to_thread()`:
 | `POST /camera/ae/lock` | `camera_manager.lock_ae` |
 | `POST /camera/ae/unlock` | `camera_manager.unlock_ae` |
 
-## Phase 2 complete
+## Root-cause note
 
-All Phase 2 scope delivered and confirmed on Pi:
-
-- Camera integration: preview, AE lock/unlock, focus score, magnifier
-- Full-res still capture (free and plate/survival): ~0.42s
-- Timelapse/video capture (free and plate/motility)
-- All capture endpoints use `asyncio.to_thread()` for I/O
-- Survival test suite: pending final run (see next steps)
+The 3m48s survival hang reported in the previous session was on the Phase 1
+skeleton (commit 5c2e646). Phase 2 was never actually deployed to the Pi due
+to `main` tracking the deleted `origin/master` branch — silent no-op on every
+`git pull`. Fixed by resetting upstream to `origin/main`. Phase 2 code paths
+for free/still and plate/survival are identical through `capture_still()` and
+`save_jpeg()`; both are fast once deployed.
 
 ## Next: Phase 3
 
