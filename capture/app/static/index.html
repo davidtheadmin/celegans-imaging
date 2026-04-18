@@ -4,15 +4,172 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>C. elegans Imaging Station</title>
-  <style>
-    body { font-family: monospace; max-width: 600px; margin: 80px auto; padding: 0 20px; color: #222; }
-    h1 { font-size: 1.4em; }
-    .status { background: #e8f5e9; border: 1px solid #a5d6a7; padding: 12px 16px; border-radius: 4px; }
-  </style>
+  <link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <h1>C. elegans Imaging Station</h1>
-  <div class="status">Imaging station is running.</div>
-  <p>API docs: <a href="/docs">/docs</a></p>
+
+<!-- Token prompt -->
+<div id="token-overlay" role="dialog" aria-modal="true" aria-label="Authentication">
+  <div class="token-card">
+    <h2>Imaging Station</h2>
+    <p>Paste the station token to connect.</p>
+    <form id="token-form" autocomplete="off">
+      <input id="token-input" type="password" placeholder="Station token" spellcheck="false" required>
+      <button type="submit" class="btn btn-primary btn-wide">Connect</button>
+    </form>
+    <p id="token-error" class="form-error" hidden>Invalid token.</p>
+  </div>
+</div>
+
+<!-- Magnifier overlay -->
+<div id="magnifier-overlay" hidden>
+  <img id="magnifier-img" alt="Magnified view">
+  <span class="magnifier-hint">Release to close</span>
+</div>
+
+<!-- Full-size image modal -->
+<div id="modal-overlay" hidden>
+  <button id="modal-close" aria-label="Close">&times;</button>
+  <img id="modal-img" alt="">
+</div>
+
+<!-- Accessibility announcements -->
+<div id="live-region" role="status" aria-live="polite" class="sr-only"></div>
+
+<!-- Main app (hidden until authenticated) -->
+<div id="app" hidden>
+
+  <header class="hdr">
+    <span class="hdr-title">C. elegans Imaging</span>
+    <div class="hdr-status">
+      <span id="conn-indicator" class="status-dot" aria-label="Connection status">
+        <svg class="dot-svg" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3.5"/></svg>
+        <span id="conn-label">Connecting</span>
+      </span>
+      <span id="camera-chip" class="status-chip">Camera</span>
+      <span id="ae-chip" class="status-chip mono">AE</span>
+      <span id="disk-chip" class="status-chip mono">Disk</span>
+    </div>
+  </header>
+
+  <div class="app-body">
+
+    <!-- Session sidebar -->
+    <aside class="sidebar" aria-label="Sessions">
+      <div class="sidebar-hdr">
+        <span class="sidebar-title">Sessions</span>
+        <button id="new-session-btn" class="btn btn-sm btn-accent">New</button>
+      </div>
+
+      <div id="new-session-form" class="inline-form" hidden>
+        <input id="ns-name" type="text" placeholder="Session name" required>
+        <div class="field-row">
+          <label class="radio-label"><input type="radio" name="ns-mode" value="motility" checked> Motility</label>
+          <label class="radio-label"><input type="radio" name="ns-mode" value="survival"> Survival</label>
+        </div>
+        <div id="ns-motility-cfg">
+          <label class="field-label">Duration (s)
+            <input id="ns-duration" type="number" value="30" min="1" max="600" class="mono" style="width:72px">
+          </label>
+        </div>
+        <div id="ns-survival-cfg" hidden>
+          <label class="checkbox-label">
+            <input id="ns-quadrants" type="checkbox"> Use four quadrants
+          </label>
+        </div>
+        <div class="form-actions">
+          <button id="ns-submit" class="btn btn-sm btn-primary">Create</button>
+          <button id="ns-cancel" class="btn btn-sm">Cancel</button>
+        </div>
+      </div>
+
+      <div id="session-list" class="session-list" role="list" aria-label="Session list"></div>
+    </aside>
+
+    <!-- Main content -->
+    <div class="main-content">
+      <div class="top-row">
+
+        <!-- Preview -->
+        <section class="preview-section" aria-label="Live preview">
+          <div class="preview-wrap">
+            <img id="preview-img" alt="Live camera preview" draggable="false">
+            <div class="preview-overlay">
+              <span id="focus-readout" class="readout mono">focus —</span>
+              <span id="ae-readout" class="readout mono" hidden></span>
+            </div>
+          </div>
+          <div class="preview-btns">
+            <button id="magnifier-btn" class="btn" aria-label="Hold for magnifier">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <circle cx="6.5" cy="6.5" r="4.5"/>
+                <line x1="10" y1="10" x2="14" y2="14"/>
+                <line x1="4.5" y1="6.5" x2="8.5" y2="6.5"/>
+                <line x1="6.5" y1="4.5" x2="6.5" y2="8.5"/>
+              </svg>
+              Magnifier
+            </button>
+            <button id="ae-lock-btn" class="btn" aria-pressed="false">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <rect x="3" y="7" width="10" height="8" rx="1.5"/>
+                <path d="M5 7V5a3 3 0 0 1 6 0v2"/>
+              </svg>
+              <span id="ae-lock-label">Lock AE</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Capture controls -->
+        <section class="ctrl-panel" aria-label="Capture controls">
+          <div class="mode-tabs" role="tablist" aria-label="Capture mode">
+            <button class="tab active" data-mode="free-still" role="tab" aria-selected="true">Free Still</button>
+            <button class="tab" data-mode="free-video" role="tab" aria-selected="false">Free Video</button>
+            <button class="tab" data-mode="session" role="tab" aria-selected="false">Session</button>
+          </div>
+
+          <!-- Free Still panel -->
+          <div class="mode-body" data-panel="free-still" role="tabpanel">
+            <p class="panel-hint">Capture a full-resolution still to the free-capture folder.</p>
+            <button id="still-btn" class="btn btn-primary btn-capture">Capture Still</button>
+            <p id="still-msg" class="capture-msg" hidden></p>
+          </div>
+
+          <!-- Free Video panel -->
+          <div class="mode-body" data-panel="free-video" role="tabpanel" hidden>
+            <p class="panel-hint">Record a video clip to the free-capture folder.</p>
+            <label class="field-label">Duration
+              <div class="input-affix">
+                <input id="video-dur" type="number" value="5" min="1" max="600" class="mono">
+                <span class="affix-unit">s</span>
+              </div>
+            </label>
+            <button id="video-btn" class="btn btn-primary btn-capture">Record 5s</button>
+            <div id="video-progress" hidden>
+              <div class="progress-track"><div id="video-bar" class="progress-fill"></div></div>
+              <span id="video-counter" class="progress-label mono"></span>
+            </div>
+          </div>
+
+          <!-- Session panel -->
+          <div class="mode-body" data-panel="session" role="tabpanel" hidden>
+            <div id="session-capture-body">
+              <p class="panel-hint">Select a plate in the sidebar to start capturing.</p>
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- Thumbnail strip -->
+      <section class="thumb-strip" aria-label="Recent captures">
+        <div id="thumb-list" class="thumb-list"></div>
+        <p id="thumb-empty" class="thumb-empty">No captures yet.</p>
+      </section>
+    </div>
+
+  </div>
+</div>
+
+<script src="app.js"></script>
 </body>
 </html>
