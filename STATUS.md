@@ -1,4 +1,4 @@
-# Phase 3 Status — Polish Complete
+# Phase 3 Status — Polish Complete (Round 2)
 
 ## What's working
 
@@ -9,41 +9,45 @@
 - `DELETE /sessions/{id}/plates/{plate_id}/files/{filename}` — soft delete (moves to `.trash/`)
 - `DELETE /capture/free/files/{date}/{filename}` — soft delete free-capture file
 - `DELETE /sessions/{id}/plates/{plate_id}` — moves entire plate folder to `.trash/`, removes from manifest
-- `POST /sessions/{id}/plates` now accepts `replicates: int` (1–50); creates N plates in one call
+- `POST /sessions/{id}/plates` accepts `replicates: int` (1–50); creates N plates; 409 on duplicate `(condition_id, name, plate_number)`
+- Plate id format: `{condition_id}_{name}_{NN:02d}` (changed from `{condition_id}_{NN}` for cross-condition uniqueness; old sessions remain accessible)
 - Video thumbnails: `make_thumb` extracts first frame via `ffmpeg -frames:v 1` for `.mp4/.h264/.mkv`
-- Magnifier endpoint (`/magnifier.jpg`): serves lores preview crop (no full-res capture); near-instant
-- Color fix: `capture_still()` flips BGR→RGB (libcamera delivers BGR despite RGB888 label on Pi 5)
+- Color fix: `capture_still()` flips BGR→RGB
+- **Video framerate fix**: `wrap_h264()` now uses `-r <fps>` (not `-framerate`, which is a V4L2-only flag silently ignored for file inputs); actual fps measured from `FrameDuration` camera metadata before recording; falls back to `DEFAULT_VIDEO_FPS = 30`
 
 ### Frontend (`capture/app/static/`)
 - Dark instrument-style UI — GitHub dark palette, monospace readouts, no framework
 - Status bar: connection dot, camera state, AE lock with exposure values, disk free (color-coded), **?** shortcut button
 - MJPEG live preview with focus score updated every 500ms
 - AE lock/unlock — locked values shown in header chip and preview overlay
-- Magnifier on M-hold (button + keyboard); 100ms polling against lores-based endpoint (fluid)
 - Free Still capture with filename feedback + thumbnail strip
 - Free Video capture with duration input and live countdown progress bar
-- Session sidebar: create session, expand/collapse (state persists in sessionStorage), add plates
-  - Add-plate form: pre-fills condition/name from last plate, auto-increments number
-  - **Replicates field**: create N plates of same condition in one submission (shows "Plates X–Y" preview)
+- Session sidebar: **3-level tree** — session → condition → plates
+  - Conditions emerge from grouping the flat plate list by `(condition_id, name)` client-side; no schema change
+  - Condition groups collapsible; expand state persists in `sessionStorage` separately from session expand state
+  - **Add condition form**: Name first, then Condition ID, then replicates count; shows "Name / CondID — plates 1 through N" preview; validates no duplicate `(condition_id, name)` before POST; inline error if duplicate
+  - **Add N plates** inline per condition: appends from `lastPlateNumber + 1`
   - **Delete plate**: × button on hover, confirm dialog, moves to `.trash/`
 - Session capture panel adapts to assay mode
-- Quadrant 2×2 grid: completion state derived from files on disk on every plate visit; captured quadrants green
+- Quadrant 2×2 grid: completion state derived from files on disk; captured quadrants green
 - Thumbnail strip: last 8 captures; click → full-size modal
-  - **Video tiles**: poster frame from ffmpeg + play circle overlay
-  - **× delete button** on hover; after delete: dashed tombstone tile stays in strip
-  - **Modal Delete button** for the open file
-  - **Video modal**: `<video controls>` for `.mp4` files
+  - Video tiles: poster frame + play circle overlay
+  - × delete button on hover; tombstone tile after delete
+  - Modal Delete button; `<video controls>` for `.mp4` files
 - Token prompt on load; `?token=` URL param captured and URL-cleaned
 - Polling pauses when tab is hidden
 - **Keyboard shortcuts** (disabled in form inputs):
   - `Space` — primary capture for current mode/plate
   - `1–4` — NW/NE/SW/SE quadrant capture
-  - `N` — open add-plate form
+  - `N` — open Add Condition form for active session
   - `L` — toggle AE lock
-  - `M` hold — magnifier
-  - `Esc` — close modal/magnifier/shortcuts (priority order)
+  - `Esc` — close modal / shortcuts overlay
   - `?` — shortcut reference overlay
-- **Inline kbd hints** `[Key]` on all capture buttons, quadrant labels, magnifier, AE lock
+
+### Removed / changed in round 2
+- **Magnifier removed**: the 100ms polling loop to `/magnifier.jpg` caused service hangs in real lab use. Endpoint, button, JS polling loop, CSS, and M hotkey all removed. Future rethink: CSS zoom on the existing MJPEG stream.
+- **Video playback speed fixed**: was 3–5× too fast because the H264 demuxer ignored `-framerate`; fixed with `-r` and measured actual camera fps.
+- **Add-plate form replaced by Add-condition form**: plate numbers now reset to 1 per condition; N hotkey updated.
 
 ## Performance (Phase 2 baseline)
 
@@ -52,6 +56,5 @@
 | `POST /capture/free/still` | ~0.42s |
 | `POST /sessions/.../capture` (survival, single) | ~0.38s |
 | `POST /sessions/.../capture` (survival, quadrant) | ~0.38s |
-| `GET /magnifier.jpg` (lores crop, no capture) | <10ms |
 
 ## Next: Phase 4
