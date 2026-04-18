@@ -126,8 +126,8 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
 
 
 def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> dict:
-    fps = cam_mgr.measure_fps()
-    log.debug("free_video: measured %.2f fps", fps)
+    fps = cam_mgr.video_fps
+    log.debug("free_video: using %.2f fps (measured at startup)", fps)
     ts = _ts()
     h264_path = _free_dir() / f"{ts}_video.h264"
     log.debug("free_video: starting recording -> %s", h264_path.name)
@@ -153,8 +153,8 @@ def plate_motility(
     duration_s: int,
     bitrate_bps: int = DEFAULT_BITRATE,
 ) -> dict:
-    fps = cam_mgr.measure_fps()
-    log.debug("plate_motility: measured %.2f fps", fps)
+    fps = cam_mgr.video_fps
+    log.debug("plate_motility: using %.2f fps (measured at startup)", fps)
     ts = _ts()
     h264_path = plate_dir / f"{ts}_video.h264"
     log.debug("plate_motility: starting recording -> %s", h264_path.name)

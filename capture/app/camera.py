@@ -1,4 +1,3 @@
-import io
 import logging
 import threading
 import time
@@ -35,6 +34,7 @@ class CameraManager:
         self._analogue_gain: Optional[float] = None
         self._recording = False
         self._encoder: Optional[H264Encoder] = None
+        self._video_fps: float = DEFAULT_VIDEO_FPS
 
     def start(self) -> None:
         try:
@@ -46,6 +46,26 @@ class CameraManager:
             cam.configure(config)
             cam.start()
             time.sleep(2.0)  # AE / AWB settle
+
+            # Measure actual fps while single-threaded (preview not yet started).
+            # We read FrameDuration here so we never need capture_request() at
+            # recording time — that call races with capture_array("lores") in the
+            # preview loop and deadlocks on picamera2's internal libcamera queue.
+            fps = DEFAULT_VIDEO_FPS
+            try:
+                req = cam.capture_request()
+                try:
+                    meta = req.get_metadata()
+                finally:
+                    req.release()
+                fd_us = meta.get("FrameDuration", 0)
+                if fd_us and fd_us > 0:
+                    fps = 1_000_000.0 / fd_us
+                    log.info("Camera: measured %.2f fps (FrameDuration=%d µs)", fps, fd_us)
+            except Exception as exc:
+                log.warning("Camera: fps measurement failed (%s) — using fallback %.0f fps", exc, fps)
+
+            self._video_fps = fps
             self._cam = cam
             self._running = True
             self._preview_thread = threading.Thread(
@@ -72,7 +92,14 @@ class CameraManager:
     def _preview_loop(self) -> None:
         while self._running:
             try:
-                yuv = self._cam.capture_array("lores")
+                # Hold _capture_lock only for the picamera2 call itself.
+                # All picamera2/libcamera calls must be serialized through this
+                # lock — concurrent capture_array / capture_request calls from
+                # different threads deadlock on libcamera's internal queue.
+                with self._capture_lock:
+                    yuv = self._cam.capture_array("lores")
+                # JPEG encoding and colour conversion are CPU-only; do them
+                # outside the lock so other camera operations aren't delayed.
                 # YUV420 I420 -> BGR for JPEG encoding.
                 # If preview looks green, change to COLOR_YUV2BGR_NV12.
                 bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
@@ -104,6 +131,11 @@ class CameraManager:
     @property
     def recording(self) -> bool:
         return self._recording
+
+    @property
+    def video_fps(self) -> float:
+        """Actual camera fps measured at startup. Safe to read from any thread."""
+        return self._video_fps
 
     # ------------------------------------------------------------------
     # Frame access
@@ -205,29 +237,6 @@ class CameraManager:
             self._encoder = None  # release encoder reference; prevents GC race on next start_recording
             self._recording = False
             log.info("Video recording stopped")
-        # Pause outside the lock: lets picamera2's encoder background thread fully drain
-        # before the next start_recording() call.  Without this the second recording can
-        # deadlock inside cam.start_recording() on Pi 5 / picamera2.
-        time.sleep(0.3)
-
-    def measure_fps(self) -> float:
-        """Sample FrameDuration from camera metadata to determine actual fps.
-        At full 4056×3040 resolution the IMX708 typically delivers ~10fps."""
-        try:
-            with self._capture_lock:
-                req = self._cam.capture_request()
-                try:
-                    meta = req.get_metadata()
-                finally:
-                    req.release()
-            fd_us = meta.get("FrameDuration", 0)
-            if fd_us and fd_us > 0:
-                fps = 1_000_000.0 / fd_us
-                log.debug("measure_fps: FrameDuration=%dus → %.2f fps", fd_us, fps)
-                return fps
-        except Exception as exc:
-            log.warning("measure_fps failed: %s", exc)
-        return DEFAULT_VIDEO_FPS
 
 
 camera_manager = CameraManager()

@@ -1,4 +1,4 @@
-# Phase 3 — COMPLETE
+# Phase 3 — COMPLETE (all bugs fixed)
 
 All backend and frontend work for Phase 3 is merged and pushed.
 
@@ -15,9 +15,10 @@ All backend and frontend work for Phase 3 is merged and pushed.
 - `DELETE /sessions/{id}/plates/{plate_id}` — moves entire plate folder to `.trash/`, removes from manifest
 - `POST /sessions/{id}/plates` accepts `replicates: int` (1–50); 409 on duplicate `(condition_id, name, plate_number)`
 - Plate id format: `{condition_id}_{name}_{NN:02d}` — unique across conditions; old `{condition_id}_{NN}` sessions remain accessible without migration
-- Video thumbnails: `make_thumb` extracts first frame via `ffmpeg -frames:v 1`
+- Video thumbnails: `make_thumb` extracts first frame via `ffmpeg -frames:v 1`; `.thumbs/` dir created before ffmpeg subprocess (was after, causing consistent failures on first use)
 - Color fix: `capture_still()` flips BGR→RGB (libcamera delivers BGR on Pi 5)
-- **Video framerate**: `wrap_h264()` uses `-r <fps>` (not `-framerate`); actual fps measured from `FrameDuration` metadata before recording; fallback `DEFAULT_VIDEO_FPS = 30`
+- **Video framerate**: `wrap_h264()` uses `-r <fps>`; fps measured once at camera startup (before preview thread starts) from `FrameDuration` metadata, stored as `camera_manager.video_fps`; no per-recording measurement
+- **Video deadlock fixed**: all picamera2 calls serialized through `_capture_lock`; `_preview_loop` holds lock during `capture_array("lores")` only (JPEG encode outside lock); `measure_fps()` removed — it called `capture_request()` which deadlocked against `capture_array("lores")` on libcamera's internal frame queue
 
 ### Frontend (`capture/app/static/`)
 - Dark instrument-style UI — GitHub dark palette, monospace readouts, no framework
