@@ -2,7 +2,6 @@ import asyncio
 import secrets
 from datetime import datetime, timezone
 
-import cv2
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
@@ -59,25 +58,3 @@ async def focus():
     return {"score": score, "at": datetime.now(timezone.utc).isoformat()}
 
 
-def _lores_magnifier() -> bytes:
-    """Crop center of the lores preview frame — no camera acquisition needed."""
-    lores = camera_manager.get_latest_lores()  # RGB uint8, 1280×960
-    if lores is None:
-        raise HTTPException(503, "No preview frame available")
-    h, w = lores.shape[:2]
-    crop_w, crop_h = w // 4, h // 4  # 320×240 — zoomed center region
-    cy, cx = h // 2, w // 2
-    crop = lores[cy - crop_h // 2: cy + crop_h // 2, cx - crop_w // 2: cx + crop_w // 2]
-    bgr = crop[:, :, ::-1].copy()
-    scaled = cv2.resize(bgr, (600, 450), interpolation=cv2.INTER_LINEAR)
-    ok, buf = cv2.imencode(".jpg", scaled, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ok:
-        raise HTTPException(500, "Encode failed")
-    return buf.tobytes()
-
-
-@router.get("/magnifier.jpg", dependencies=[Depends(require_token)])
-async def magnifier():
-    _require_camera()
-    data = await asyncio.to_thread(_lores_magnifier)
-    return Response(content=data, media_type="image/jpeg")

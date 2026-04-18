@@ -11,14 +11,14 @@ const S = {
   mode: 'free-still',
   sessions: [],
   expandedIds: new Set(),
+  expandedConditions: new Set(),
   activeSessionId: null,
   activePlateId: null,
-  addingPlateFor: null,
+  addingConditionFor: null,
+  addingPlatesFor: null,
   showNewSession: false,
   thumbnails: [],
   deletedFiles: new Set(),
-  magnifierActive: false,
-  _magnifierTimer: null,
 };
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -156,52 +156,19 @@ function captureQuadrantByIndex(idx) {
   captureQuadrant(sess.id, S.activePlateId, q, btn);
 }
 
-function openAddPlateForm() {
+function openAddConditionForm() {
   if (!S.activeSessionId) return;
   S.expandedIds.add(S.activeSessionId);
   saveExpandedIds();
-  S.addingPlateFor = S.activeSessionId;
+  S.addingConditionFor = S.activeSessionId;
   renderSessionSidebar();
-  setTimeout(() => document.querySelector('.ap-cond')?.focus(), 0);
+  setTimeout(() => document.querySelector('.ac-name')?.focus(), 0);
 }
 
 function toggleShortcutsOverlay() {
   const ov = document.getElementById('shortcuts-overlay');
   ov.hidden = !ov.hidden;
   if (!ov.hidden) document.getElementById('shortcuts-close').focus();
-}
-
-// ── Magnifier ─────────────────────────────────────────────────────────────────
-function startMagnifier(e) {
-  if (e?.preventDefault) e.preventDefault();
-  if (S.magnifierActive) return;
-  S.magnifierActive = true;
-  document.getElementById('magnifier-overlay').hidden = false;
-  magnifierLoop();
-}
-
-function stopMagnifier() {
-  if (!S.magnifierActive) return;
-  S.magnifierActive = false;
-  document.getElementById('magnifier-overlay').hidden = true;
-  clearTimeout(S._magnifierTimer);
-  const img = document.getElementById('magnifier-img');
-  if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
-  img.src = '';
-}
-
-async function magnifierLoop() {
-  if (!S.magnifierActive) return;
-  try {
-    const resp = await api('/magnifier.jpg');
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const img = document.getElementById('magnifier-img');
-    const old = img.src;
-    img.src = url;
-    if (old.startsWith('blob:')) URL.revokeObjectURL(old);
-  } catch {}
-  if (S.magnifierActive) S._magnifierTimer = setTimeout(magnifierLoop, 100);
 }
 
 // ── AE Lock ────────────────────────────────────────────────────────────────────
@@ -946,31 +913,22 @@ function bindEvents() {
 
   document.getElementById('ae-lock-btn').addEventListener('click', toggleAELock);
 
-  const magBtn = document.getElementById('magnifier-btn');
-  magBtn.addEventListener('mousedown', startMagnifier);
-  magBtn.addEventListener('touchstart', startMagnifier, { passive: false });
-  document.addEventListener('mouseup', stopMagnifier);
-  document.addEventListener('touchend', stopMagnifier);
-
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
-      if (S.magnifierActive) { stopMagnifier(); return; }
       if (!document.getElementById('modal-overlay').hidden) { closeModal(); return; }
       if (!document.getElementById('shortcuts-overlay').hidden) { toggleShortcutsOverlay(); return; }
       return;
     }
     if (isTyping()) return;
-    if (e.code === 'KeyM' && !e.repeat) { e.preventDefault(); startMagnifier(); return; }
     if (e.code === 'Space') { e.preventDefault(); primaryCapture(); return; }
     if (e.key === '1') captureQuadrantByIndex(0);
     if (e.key === '2') captureQuadrantByIndex(1);
     if (e.key === '3') captureQuadrantByIndex(2);
     if (e.key === '4') captureQuadrantByIndex(3);
-    if (e.code === 'KeyN') { e.preventDefault(); openAddPlateForm(); }
+    if (e.code === 'KeyN') { e.preventDefault(); openAddConditionForm(); }
     if (e.code === 'KeyL') { e.preventDefault(); toggleAELock(); }
     if (e.key === '?') { e.preventDefault(); toggleShortcutsOverlay(); }
   });
-  document.addEventListener('keyup', e => { if (e.code === 'KeyM') stopMagnifier(); });
 
   document.getElementById('still-btn').addEventListener('click', captureFreeStill);
   document.getElementById('video-btn').addEventListener('click', captureFreeVideo);
