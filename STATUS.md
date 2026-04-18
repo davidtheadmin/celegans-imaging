@@ -1,6 +1,8 @@
-# Phase 3 — COMPLETE (all bugs fixed)
+# Phase 3 — COMPLETE
 
-All backend and frontend work for Phase 3 is merged and pushed.
+All backend and frontend work for Phase 3 is merged, pushed, and verified on hardware.
+5 consecutive free videos + 3 consecutive motility plate videos — service stayed up,
+every video got a valid thumbnail, preview kept running throughout.
 
 ---
 
@@ -18,7 +20,7 @@ All backend and frontend work for Phase 3 is merged and pushed.
 - Video thumbnails: `make_thumb` extracts first frame via `ffmpeg -frames:v 1`; `.thumbs/` dir created before ffmpeg subprocess (was after, causing consistent failures on first use)
 - Color fix: `capture_still()` flips BGR→RGB (libcamera delivers BGR on Pi 5)
 - **Video framerate**: `wrap_h264()` uses `-r <fps>`; fps measured once at camera startup (before preview thread starts) from `FrameDuration` metadata, stored as `camera_manager.video_fps`; no per-recording measurement
-- **Video deadlock fixed**: all picamera2 calls serialized through `_capture_lock`; `_preview_loop` holds lock during `capture_array("lores")` only (JPEG encode outside lock); `measure_fps()` removed — it called `capture_request()` which deadlocked against `capture_array("lores")` on libcamera's internal frame queue
+- **Video recording reliability**: 5+ consecutive recordings work without wedging the service; preview keeps running between recordings
 
 ### Frontend (`capture/app/static/`)
 - Dark instrument-style UI — GitHub dark palette, monospace readouts, no framework
@@ -42,6 +44,35 @@ All backend and frontend work for Phase 3 is merged and pushed.
 - **Magnifier removed**: 100ms polling loop to `/magnifier.jpg` caused service hangs in real lab use. Endpoint, button, M hotkey, CSS all removed.
 - **Video playback speed fixed**: was 3–5× too fast due to `-framerate` being a V4L2-only flag ignored for file inputs; fixed with `-r` + measured fps.
 - **Plate form restructured**: conditions are first-class groups; N hotkey opens Add Condition (not Add Plate).
+
+---
+
+## Lessons learned (picamera2 / libcamera concurrency)
+
+*Recorded here so the next session starts with the right mental model.*
+
+**picamera2 is not thread-safe for concurrent capture calls.**
+The libcamera layer underneath serializes frame dispatch through an internal job queue.
+Two Python threads calling `capture_array()`, `capture_request()`, or `start_recording()`
+simultaneously will race for frames on that queue and deadlock.
+
+**The right locking pattern:**
+- All *state-changing* camera operations — `start_recording()`, `stop_recording()`,
+  `capture_array("main")`, `capture_request()`, `set_controls()` — must be serialized
+  through a single `_capture_lock`.
+- *Read-only background consumers of a separate stream* (the lores preview loop calling
+  `capture_array("lores")`) must **not** hold that lock. The preview is a passive consumer
+  of the lores stream, independent of main-stream state changes. Holding the lock during
+  `capture_array("lores")` caused a deadlock: after `stop_recording()` picamera2
+  temporarily stalls lores frame delivery, so the preview holds the lock indefinitely,
+  and `start_recording()` (which would have un-stalled the camera) can never run.
+
+**ffmpeg framerate must come from static config, not a runtime measurement.**
+The original `measure_fps()` called `capture_request()` (grabs ALL streams including
+lores) concurrently with the preview's `capture_array("lores")`, deadlocking on the
+first try. Fps is now read once at startup — before the preview thread starts — so the
+measurement is single-threaded and safe, and the value is reused for all subsequent
+recordings via `camera_manager.video_fps`.
 
 ---
 
@@ -69,8 +100,6 @@ All backend and frontend work for Phase 3 is merged and pushed.
 **Phase 5a** is the next planned work.
 
 Phase 5a scope (to be confirmed at session start):
-- Analysis service skeleton (`analysis/` directory)
-- Motility scoring: per-clip worm-movement metric from recorded MP4s
-- Results written back to plate directory (e.g. `results.json`)
-- API endpoints to fetch per-plate and per-session results
-- Frontend: results column in the condition/plate tree; sparkline or score badge per plate
+- Pi-side retention daemon: background process that watches `celegans-data/` and enforces storage limits / age-based cleanup
+- File manifest endpoints: API to list all sessions + plates + files in a single response (avoids N+1 calls from a future analysis UI)
+- Possibly: analysis service skeleton (`analysis/` directory) and motility scoring groundwork
