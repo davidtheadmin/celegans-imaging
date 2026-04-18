@@ -432,10 +432,13 @@ function renderSessionSidebar() {
       if (isAdding) {
         const form = document.createElement('div');
         form.className = 'add-plate-form';
-        const nextNum = sess.plates.length + 1;
+        const last = sess.plates.length > 0 ? sess.plates[sess.plates.length - 1] : null;
+        const nextNum = last ? last.plate_number + 1 : 1;
+        const prevCond = last?.condition_id ?? '';
+        const prevName = last?.name ?? '';
         form.innerHTML = `
-          <input class="ap-cond" type="text" placeholder="Condition ID" required>
-          <input class="ap-name" type="text" placeholder="Name" required>
+          <input class="ap-cond" type="text" placeholder="Condition ID" value="${esc(prevCond)}" required>
+          <input class="ap-name" type="text" placeholder="Name" value="${esc(prevName)}" required>
           <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0">
             Plate #
             <input class="ap-num mono" type="number" value="${nextNum}" min="1" style="width:52px">
@@ -448,6 +451,11 @@ function renderSessionSidebar() {
         form.querySelector('.ap-cancel').addEventListener('click', () => {
           S.addingPlateFor = null; renderSessionSidebar();
         });
+        // Focus plate number if pre-filled, otherwise condition field
+        setTimeout(() => {
+          const target = prevCond ? form.querySelector('.ap-num') : form.querySelector('.ap-cond');
+          target?.focus();
+        }, 0);
         sec.appendChild(form);
       }
 

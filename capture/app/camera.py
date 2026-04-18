@@ -173,7 +173,7 @@ class CameraManager:
             t2 = time.perf_counter()
         log.debug("[TIMING] capture_still: lock_wait=%.3fs capture_array=%.3fs",
                   t1 - t0, t2 - t1)
-        return arr
+        return arr[..., ::-1].copy()  # libcamera delivers BGR despite RGB888 label on Pi 5
 
     def start_video_recording(self, path: Path, bitrate_bps: int) -> None:
         from fastapi import HTTPException
