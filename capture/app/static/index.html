@@ -35,6 +35,26 @@
   <video id="modal-video" controls hidden></video>
 </div>
 
+<!-- Keyboard shortcuts overlay -->
+<div id="shortcuts-overlay" hidden role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+  <div class="shortcuts-card">
+    <div class="shortcuts-hdr">
+      <h3>Keyboard Shortcuts</h3>
+      <button id="shortcuts-close" class="btn btn-sm" aria-label="Close">×</button>
+    </div>
+    <table class="shortcuts-table">
+      <tr><td><kbd>Space</kbd></td><td>Primary capture (still / start/stop record)</td></tr>
+      <tr><td><kbd>1</kbd> – <kbd>4</kbd></td><td>NW / NE / SW / SE (quadrant mode only)</td></tr>
+      <tr><td><kbd>N</kbd></td><td>Add plate to active session</td></tr>
+      <tr><td><kbd>L</kbd></td><td>Toggle AE lock / unlock</td></tr>
+      <tr><td><kbd>M</kbd> hold</td><td>Magnifier (hold to show, release to close)</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Close modal / overlay</td></tr>
+      <tr><td><kbd>?</kbd></td><td>This overlay</td></tr>
+    </table>
+    <p class="shortcuts-note">All shortcuts disabled while typing in a form field.</p>
+  </div>
+</div>
+
 <!-- Accessibility announcements -->
 <div id="live-region" role="status" aria-live="polite" class="sr-only"></div>
 
@@ -51,6 +71,7 @@
       <span id="camera-chip" class="status-chip">Camera</span>
       <span id="ae-chip" class="status-chip mono">AE</span>
       <span id="disk-chip" class="status-chip mono">Disk</span>
+      <button id="shortcuts-btn" class="btn btn-sm" aria-label="Keyboard shortcuts" title="Keyboard shortcuts [?]">?</button>
     </div>
   </header>
 
@@ -109,14 +130,14 @@
                 <line x1="4.5" y1="6.5" x2="8.5" y2="6.5"/>
                 <line x1="6.5" y1="4.5" x2="6.5" y2="8.5"/>
               </svg>
-              Magnifier
+              Magnifier (hold) <span class="kbd-hint">[M]</span>
             </button>
             <button id="ae-lock-btn" class="btn" aria-pressed="false">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
                 <rect x="3" y="7" width="10" height="8" rx="1.5"/>
                 <path d="M5 7V5a3 3 0 0 1 6 0v2"/>
               </svg>
-              <span id="ae-lock-label">Lock AE</span>
+              <span id="ae-lock-label">Lock AE</span> <span class="kbd-hint">[L]</span>
             </button>
           </div>
         </section>
@@ -132,7 +153,7 @@
           <!-- Free Still panel -->
           <div class="mode-body" data-panel="free-still" role="tabpanel">
             <p class="panel-hint">Capture a full-resolution still to the free-capture folder.</p>
-            <button id="still-btn" class="btn btn-primary btn-capture">Capture Still</button>
+            <button id="still-btn" class="btn btn-primary btn-capture">Capture Still <span class="kbd-hint">[Space]</span></button>
             <p id="still-msg" class="capture-msg" hidden></p>
           </div>
 

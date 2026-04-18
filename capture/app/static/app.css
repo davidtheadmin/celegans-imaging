@@ -417,6 +417,39 @@ input[type="checkbox"] { accent-color: var(--accent); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* ── Kbd hints ─────────────────────────────────────────────────────────────── */
+.kbd-hint {
+  font-family: var(--mono); font-size: 10px; color: var(--text-dim);
+  font-weight: 400; letter-spacing: 0;
+}
+kbd {
+  display: inline-block; padding: 1px 5px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 3px; font-family: var(--mono); font-size: 11px;
+  color: var(--text-muted); line-height: 1.5;
+}
+
+/* ── Shortcuts overlay ─────────────────────────────────────────────────────── */
+#shortcuts-overlay {
+  position: fixed; inset: 0; z-index: 700;
+  background: rgba(0,0,0,.72);
+  display: flex; align-items: center; justify-content: center;
+}
+#shortcuts-overlay[hidden] { display: none; }
+.shortcuts-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r-lg); padding: 20px 24px; min-width: 340px;
+}
+.shortcuts-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.shortcuts-hdr h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.shortcuts-table { width: 100%; border-collapse: collapse; }
+.shortcuts-table td { padding: 5px 0; font-size: 12px; vertical-align: middle; }
+.shortcuts-table td:first-child { width: 130px; white-space: nowrap; padding-right: 16px; }
+.shortcuts-note { margin: 12px 0 0; font-size: 11px; color: var(--text-dim); }
+
 /* ── Magnifier overlay ─────────────────────────────────────────────────────── */
 #magnifier-overlay {
   position: fixed; inset: 0; z-index: 500;

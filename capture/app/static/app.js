@@ -118,6 +118,59 @@ function initPreview() {
     `/preview.mjpg?token=${encodeURIComponent(S.token)}`;
 }
 
+// ── Keyboard helpers ──────────────────────────────────────────────────────────
+function isTyping() {
+  const el = document.activeElement;
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+}
+
+const _QUAD_ORDER = ['NW', 'NE', 'SW', 'SE'];
+
+function primaryCapture() {
+  if (!S.cameraReady) return;
+  if (S.mode === 'free-still') {
+    const btn = document.getElementById('still-btn');
+    if (!btn.disabled) captureFreeStill();
+  } else if (S.mode === 'free-video') {
+    const btn = document.getElementById('video-btn');
+    if (!btn.disabled) captureFreeVideo();
+  } else if (S.mode === 'session' && S.activeSessionId && S.activePlateId) {
+    const sess = getActiveSession();
+    if (!sess) return;
+    if (sess.assay_mode === 'motility') {
+      const btn = document.getElementById('mot-btn');
+      if (btn && !btn.disabled) captureMotility(sess.id, S.activePlateId);
+    } else if (!sess.assay_config.quadrants) {
+      const btn = document.getElementById('surv-btn');
+      if (btn && !btn.disabled) captureSurvival(sess.id, S.activePlateId);
+    }
+  }
+}
+
+function captureQuadrantByIndex(idx) {
+  const q = _QUAD_ORDER[idx];
+  const btn = document.querySelector(`.btn-quadrant[data-q="${q}"]`);
+  if (!btn || btn.disabled) return;
+  const sess = getActiveSession();
+  if (!sess || !sess.assay_config.quadrants) return;
+  captureQuadrant(sess.id, S.activePlateId, q, btn);
+}
+
+function openAddPlateForm() {
+  if (!S.activeSessionId) return;
+  S.expandedIds.add(S.activeSessionId);
+  saveExpandedIds();
+  S.addingPlateFor = S.activeSessionId;
+  renderSessionSidebar();
+  setTimeout(() => document.querySelector('.ap-cond')?.focus(), 0);
+}
+
+function toggleShortcutsOverlay() {
+  const ov = document.getElementById('shortcuts-overlay');
+  ov.hidden = !ov.hidden;
+  if (!ov.hidden) document.getElementById('shortcuts-close').focus();
+}
+
 // ── Magnifier ─────────────────────────────────────────────────────────────────
 function startMagnifier(e) {
   if (e?.preventDefault) e.preventDefault();
@@ -334,7 +387,7 @@ async function captureFreeVideo() {
 function initVideoDuration() {
   const input = document.getElementById('video-dur');
   const btn = document.getElementById('video-btn');
-  const upd = () => { btn.textContent = `Record ${parseInt(input.value) || 5}s`; };
+  const upd = () => { btn.innerHTML = `Record ${parseInt(input.value) || 5}s <span class="kbd-hint">[Space]</span>`; };
   input.addEventListener('input', upd); upd();
 }
 
@@ -607,7 +660,7 @@ function renderSessionCapture() {
           <span class="affix-unit">s</span>
         </div>
       </label>
-      <button id="mot-btn" class="btn btn-primary btn-capture">Record ${dur}s</button>
+      <button id="mot-btn" class="btn btn-primary btn-capture">Record ${dur}s <span class="kbd-hint">[Space]</span></button>
       <div id="mot-progress" hidden>
         <div class="progress-track"><div id="mot-bar" class="progress-fill"></div></div>
         <span id="mot-ctr" class="progress-label mono"></span>
@@ -615,7 +668,7 @@ function renderSessionCapture() {
 
     const durEl = body.querySelector('#mot-dur');
     const motBtn = body.querySelector('#mot-btn');
-    durEl.addEventListener('input', () => { motBtn.textContent = `Record ${parseInt(durEl.value)||30}s`; });
+    durEl.addEventListener('input', () => { motBtn.innerHTML = `Record ${parseInt(durEl.value)||30}s <span class="kbd-hint">[Space]</span>`; });
     motBtn.addEventListener('click', () => captureMotility(sess.id, plate.id));
 
   } else if (sess.assay_config.quadrants) {
@@ -625,10 +678,10 @@ function renderSessionCapture() {
         <div class="plate-info-mode">Survival · Quadrant</div>
       </div>
       <div class="quadrant-grid">
-        <button class="btn btn-quadrant" data-q="NW">NW</button>
-        <button class="btn btn-quadrant" data-q="NE">NE</button>
-        <button class="btn btn-quadrant" data-q="SW">SW</button>
-        <button class="btn btn-quadrant" data-q="SE">SE</button>
+        <button class="btn btn-quadrant" data-q="NW">NW <span class="kbd-hint">[1]</span></button>
+        <button class="btn btn-quadrant" data-q="NE">NE <span class="kbd-hint">[2]</span></button>
+        <button class="btn btn-quadrant" data-q="SW">SW <span class="kbd-hint">[3]</span></button>
+        <button class="btn btn-quadrant" data-q="SE">SE <span class="kbd-hint">[4]</span></button>
       </div>`;
 
     body.querySelectorAll('.btn-quadrant').forEach(btn => {
@@ -642,7 +695,7 @@ function renderSessionCapture() {
         <div class="plate-info-name">${esc(plate.folder_name)}</div>
         <div class="plate-info-mode">Survival · Single frame</div>
       </div>
-      <button id="surv-btn" class="btn btn-primary btn-capture">Capture Still</button>`;
+      <button id="surv-btn" class="btn btn-primary btn-capture">Capture Still <span class="kbd-hint">[Space]</span></button>`;
 
     body.querySelector('#surv-btn').addEventListener('click', () => captureSurvival(sess.id, plate.id));
   }
@@ -898,12 +951,26 @@ function bindEvents() {
   magBtn.addEventListener('touchstart', startMagnifier, { passive: false });
   document.addEventListener('mouseup', stopMagnifier);
   document.addEventListener('touchend', stopMagnifier);
+
   document.addEventListener('keydown', e => {
-    if (e.code === 'Space' && document.activeElement === document.body) {
-      e.preventDefault(); startMagnifier();
+    if (e.key === 'Escape') {
+      if (S.magnifierActive) { stopMagnifier(); return; }
+      if (!document.getElementById('modal-overlay').hidden) { closeModal(); return; }
+      if (!document.getElementById('shortcuts-overlay').hidden) { toggleShortcutsOverlay(); return; }
+      return;
     }
+    if (isTyping()) return;
+    if (e.code === 'KeyM' && !e.repeat) { e.preventDefault(); startMagnifier(); return; }
+    if (e.code === 'Space') { e.preventDefault(); primaryCapture(); return; }
+    if (e.key === '1') captureQuadrantByIndex(0);
+    if (e.key === '2') captureQuadrantByIndex(1);
+    if (e.key === '3') captureQuadrantByIndex(2);
+    if (e.key === '4') captureQuadrantByIndex(3);
+    if (e.code === 'KeyN') { e.preventDefault(); openAddPlateForm(); }
+    if (e.code === 'KeyL') { e.preventDefault(); toggleAELock(); }
+    if (e.key === '?') { e.preventDefault(); toggleShortcutsOverlay(); }
   });
-  document.addEventListener('keyup', e => { if (e.code === 'Space') stopMagnifier(); });
+  document.addEventListener('keyup', e => { if (e.code === 'KeyM') stopMagnifier(); });
 
   document.getElementById('still-btn').addEventListener('click', captureFreeStill);
   document.getElementById('video-btn').addEventListener('click', captureFreeVideo);
@@ -925,7 +992,11 @@ function bindEvents() {
   document.getElementById('modal-overlay').addEventListener('click', e => {
     if (e.target === e.currentTarget) closeModal();
   });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') { closeModal(); stopMagnifier(); } });
+  document.getElementById('shortcuts-btn').addEventListener('click', toggleShortcutsOverlay);
+  document.getElementById('shortcuts-close').addEventListener('click', toggleShortcutsOverlay);
+  document.getElementById('shortcuts-overlay').addEventListener('click', e => {
+    if (e.target === e.currentTarget) toggleShortcutsOverlay();
+  });
 }
 
 // ── App entry ──────────────────────────────────────────────────────────────────
