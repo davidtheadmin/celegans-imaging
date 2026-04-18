@@ -358,16 +358,44 @@ function initVideoDuration() {
   input.addEventListener('input', upd); upd();
 }
 
-// ── Session expand state (sessionStorage) ────────────────────────────────────
+// ── Session / condition expand state (sessionStorage) ────────────────────────
 function saveExpandedIds() {
   try { sessionStorage.setItem('expandedIds', JSON.stringify([...S.expandedIds])); } catch {}
 }
-
 function initExpandedIds() {
   try {
     const saved = JSON.parse(sessionStorage.getItem('expandedIds') || '[]');
     S.expandedIds = new Set(saved);
   } catch { S.expandedIds = new Set(); }
+}
+function saveExpandedConditions() {
+  try { sessionStorage.setItem('expandedConds', JSON.stringify([...S.expandedConditions])); } catch {}
+}
+function initExpandedConditions() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('expandedConds') || '[]');
+    S.expandedConditions = new Set(saved);
+  } catch { S.expandedConditions = new Set(); }
+}
+
+function condKey(sessId, condId, name) { return `${sessId}:${condId}:${name}`; }
+
+function toggleCondition(sessId, cond) {
+  const k = condKey(sessId, cond.condition_id, cond.name);
+  if (S.expandedConditions.has(k)) { S.expandedConditions.delete(k); }
+  else { S.expandedConditions.add(k); }
+  saveExpandedConditions();
+  renderSessionSidebar();
+}
+
+function groupByCondition(plates) {
+  const map = new Map();
+  for (const plate of plates) {
+    const k = condKey('', plate.condition_id, plate.name);
+    if (!map.has(k)) map.set(k, { condition_id: plate.condition_id, name: plate.name, plates: [] });
+    map.get(k).plates.push(plate);
+  }
+  return [...map.values()];
 }
 
 // ── Sessions ───────────────────────────────────────────────────────────────────
@@ -393,6 +421,13 @@ function selectPlate(sessionId, plateId) {
   S.activeSessionId = sessionId;
   S.activePlateId = plateId;
   S.expandedIds.add(sessionId);
+  // Auto-expand the condition containing this plate
+  const sess = S.sessions.find(s => s.id === sessionId);
+  const plate = sess?.plates.find(p => p.id === plateId);
+  if (plate) {
+    S.expandedConditions.add(condKey(sessionId, plate.condition_id, plate.name));
+    saveExpandedConditions();
+  }
   saveExpandedIds();
   switchMode('session');
   renderSessionSidebar();
@@ -439,86 +474,148 @@ function renderSessionSidebar() {
       const sec = document.createElement('div');
       sec.className = 'plates-section';
 
-      if (sess.plates.length === 0) {
+      const conditions = groupByCondition(sess.plates);
+
+      if (conditions.length === 0) {
         sec.innerHTML =
-          '<p style="font-size:11px;color:var(--text-dim);margin:4px 0 6px">No plates yet.</p>';
+          '<p style="font-size:11px;color:var(--text-dim);margin:4px 0 6px">No conditions yet.</p>';
       }
 
-      for (const plate of sess.plates) {
-        const isActive = plate.id === S.activePlateId && sess.id === S.activeSessionId;
-        const el = document.createElement('div');
-        el.className = 'plate-item' + (isActive ? ' active' : '');
-        el.setAttribute('tabindex', '0');
-        el.innerHTML = `
-          <span class="plate-dot"></span>
-          <span class="plate-name">${esc(plate.folder_name)}</span>
-          <button class="plate-del-btn" aria-label="Delete ${esc(plate.folder_name)}" title="Delete plate">×</button>`;
-        el.addEventListener('click', e => {
-          if (e.target.classList.contains('plate-del-btn')) return;
-          selectPlate(sess.id, plate.id);
+      for (const cond of conditions) {
+        const ck = condKey(sess.id, cond.condition_id, cond.name);
+        const isCondOpen = S.expandedConditions.has(ck);
+        const condEl = document.createElement('div');
+        condEl.className = 'cond-group' + (isCondOpen ? ' open' : '');
+
+        const condHdr = document.createElement('div');
+        condHdr.className = 'cond-hdr';
+        condHdr.setAttribute('tabindex', '0');
+        condHdr.setAttribute('role', 'button');
+        condHdr.setAttribute('aria-expanded', String(isCondOpen));
+        condHdr.innerHTML = `
+          <svg class="s-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3,2 7,5 3,8"/>
+          </svg>
+          <span class="cond-label">${esc(cond.name)} / ${esc(cond.condition_id)}</span>
+          <span class="cond-count">${cond.plates.length}</span>`;
+        condHdr.addEventListener('click', () => toggleCondition(sess.id, cond));
+        condHdr.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCondition(sess.id, cond); }
         });
-        el.addEventListener('keydown', e => { if (e.key === 'Enter') selectPlate(sess.id, plate.id); });
-        el.querySelector('.plate-del-btn').addEventListener('click', e => {
-          e.stopPropagation();
-          confirmDeletePlate(sess.id, plate);
-        });
-        sec.appendChild(el);
+        condEl.appendChild(condHdr);
+
+        if (isCondOpen) {
+          const platesDiv = document.createElement('div');
+          platesDiv.className = 'cond-plates';
+          const sorted = [...cond.plates].sort((a, b) => a.plate_number - b.plate_number);
+          for (const plate of sorted) {
+            const isActive = plate.id === S.activePlateId && sess.id === S.activeSessionId;
+            const el = document.createElement('div');
+            el.className = 'plate-item' + (isActive ? ' active' : '');
+            el.setAttribute('tabindex', '0');
+            el.innerHTML = `
+              <span class="plate-dot"></span>
+              <span class="plate-name">plate ${String(plate.plate_number).padStart(2, '0')}</span>
+              <button class="plate-del-btn" aria-label="Delete plate" title="Delete plate">×</button>`;
+            el.addEventListener('click', e => {
+              if (e.target.classList.contains('plate-del-btn')) return;
+              selectPlate(sess.id, plate.id);
+            });
+            el.addEventListener('keydown', e => { if (e.key === 'Enter') selectPlate(sess.id, plate.id); });
+            el.querySelector('.plate-del-btn').addEventListener('click', e => {
+              e.stopPropagation();
+              confirmDeletePlate(sess.id, plate);
+            });
+            platesDiv.appendChild(el);
+          }
+
+          // "+ Add plates" inside this condition
+          const aplKey = ck;
+          const isAddingPlates = S.addingPlatesFor === aplKey;
+          if (isAddingPlates) {
+            const lastNum = Math.max(0, ...cond.plates.map(p => p.plate_number));
+            const nextNum = lastNum + 1;
+            const addForm = document.createElement('div');
+            addForm.className = 'add-plates-form';
+            addForm.innerHTML = `
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)">
+                <span>Add</span>
+                <input class="apl-count mono" type="number" value="1" min="1" max="50" style="width:40px">
+                <span>plates from #${nextNum}</span>
+              </div>
+              <div class="form-actions">
+                <button class="btn btn-sm btn-primary apl-submit">Add</button>
+                <button class="btn btn-sm apl-cancel">Cancel</button>
+              </div>`;
+            addForm.querySelector('.apl-submit').addEventListener('click', () => {
+              const count = Math.max(1, parseInt(addForm.querySelector('.apl-count').value) || 1);
+              submitAddPlatesInCondition(sess.id, cond, count);
+            });
+            addForm.querySelector('.apl-cancel').addEventListener('click', () => {
+              S.addingPlatesFor = null; renderSessionSidebar();
+            });
+            setTimeout(() => addForm.querySelector('.apl-count')?.select(), 0);
+            platesDiv.appendChild(addForm);
+          } else {
+            const addPlatesBtn = document.createElement('button');
+            addPlatesBtn.className = 'btn btn-sm add-plate-btn';
+            addPlatesBtn.innerHTML = `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+              <line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/>
+            </svg> Add plates`;
+            addPlatesBtn.addEventListener('click', () => {
+              S.addingPlatesFor = aplKey; renderSessionSidebar();
+            });
+            platesDiv.appendChild(addPlatesBtn);
+          }
+          condEl.appendChild(platesDiv);
+        }
+        sec.appendChild(condEl);
       }
 
-      const isAdding = S.addingPlateFor === sess.id;
-      const addBtn = document.createElement('button');
-      addBtn.className = 'btn btn-sm add-plate-btn';
-      addBtn.innerHTML = `
-        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
-          <line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/>
-        </svg> Add plate`;
-      addBtn.hidden = isAdding;
-      addBtn.addEventListener('click', () => { S.addingPlateFor = sess.id; renderSessionSidebar(); });
-      sec.appendChild(addBtn);
+      // "+ Add condition" button / form
+      const isAddingCond = S.addingConditionFor === sess.id;
+      const addCondBtn = document.createElement('button');
+      addCondBtn.className = 'btn btn-sm add-plate-btn';
+      addCondBtn.innerHTML = `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+        <line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/>
+      </svg> Add condition <span class="kbd-hint">[N]</span>`;
+      addCondBtn.hidden = isAddingCond;
+      addCondBtn.addEventListener('click', () => { S.addingConditionFor = sess.id; renderSessionSidebar(); });
+      sec.appendChild(addCondBtn);
 
-      if (isAdding) {
+      if (isAddingCond) {
         const form = document.createElement('div');
         form.className = 'add-plate-form';
-        const last = sess.plates.length > 0 ? sess.plates[sess.plates.length - 1] : null;
-        const nextNum = last ? last.plate_number + 1 : 1;
-        const prevCond = last?.condition_id ?? '';
-        const prevName = last?.name ?? '';
         form.innerHTML = `
-          <input class="ap-cond" type="text" placeholder="Condition ID" value="${esc(prevCond)}" required>
-          <input class="ap-name" type="text" placeholder="Name" value="${esc(prevName)}" required>
-          <div style="display:flex;gap:6px;align-items:center">
-            <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0;flex:1">
-              Start #<input class="ap-num mono" type="number" value="${nextNum}" min="1" style="width:52px">
-            </label>
-            <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0;flex:1">
-              ×<input class="ap-rep mono" type="number" value="1" min="1" max="50" style="width:44px">
-            </label>
-          </div>
-          <div class="ap-preview" style="font-size:10px;color:var(--text-dim);font-family:var(--mono);min-height:13px"></div>
+          <input class="ac-name" type="text" placeholder="Name (e.g. WT)" required>
+          <input class="ac-cond" type="text" placeholder="Condition ID (e.g. 10J)" required>
+          <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0">
+            ×<input class="ac-rep mono" type="number" value="1" min="1" max="50" style="width:44px"> replicates
+          </label>
+          <div class="ac-preview" style="font-size:10px;color:var(--text-dim);font-family:var(--mono);min-height:13px"></div>
+          <p class="ac-error form-error" hidden></p>
           <div class="form-actions">
-            <button class="btn btn-sm btn-primary ap-submit">Add</button>
-            <button class="btn btn-sm ap-cancel">Cancel</button>
+            <button class="btn btn-sm btn-primary ac-submit">Create</button>
+            <button class="btn btn-sm ac-cancel">Cancel</button>
           </div>`;
 
+        const errEl = form.querySelector('.ac-error');
         const updatePreview = () => {
-          const n = parseInt(form.querySelector('.ap-num').value) || nextNum;
-          const r = Math.max(1, parseInt(form.querySelector('.ap-rep').value) || 1);
-          const el = form.querySelector('.ap-preview');
-          el.textContent = r > 1 ? `Plates ${n} – ${n + r - 1}` : `Plate ${n}`;
+          const n = form.querySelector('.ac-name').value.trim() || 'Name';
+          const c = form.querySelector('.ac-cond').value.trim() || 'CondID';
+          const r = Math.max(1, parseInt(form.querySelector('.ac-rep').value) || 1);
+          form.querySelector('.ac-preview').textContent =
+            r > 1 ? `${n} / ${c} — plates 1 through ${r}` : `${n} / ${c} — plate 1`;
         };
-        form.querySelector('.ap-num').addEventListener('input', updatePreview);
-        form.querySelector('.ap-rep').addEventListener('input', updatePreview);
-        updatePreview();
-
-        form.querySelector('.ap-submit').addEventListener('click', () => submitAddPlate(sess.id, form));
-        form.querySelector('.ap-cancel').addEventListener('click', () => {
-          S.addingPlateFor = null; renderSessionSidebar();
+        ['ac-name', 'ac-cond', 'ac-rep'].forEach(cls => {
+          form.querySelector(`.${cls}`).addEventListener('input', () => { updatePreview(); errEl.hidden = true; });
         });
-        // Focus plate number if pre-filled, otherwise condition field
-        setTimeout(() => {
-          const target = prevCond ? form.querySelector('.ap-num') : form.querySelector('.ap-cond');
-          target?.focus();
-        }, 0);
+        updatePreview();
+        form.querySelector('.ac-submit').addEventListener('click', () => submitAddCondition(sess.id, form));
+        form.querySelector('.ac-cancel').addEventListener('click', () => {
+          S.addingConditionFor = null; renderSessionSidebar();
+        });
+        setTimeout(() => form.querySelector('.ac-name')?.focus(), 0);
         sec.appendChild(form);
       }
 
@@ -563,21 +660,50 @@ async function submitCreateSession() {
   }
 }
 
-async function submitAddPlate(sessionId, form) {
-  const cond = form.querySelector('.ap-cond').value.trim();
-  const name = form.querySelector('.ap-name').value.trim();
-  const num = parseInt(form.querySelector('.ap-num').value) || 1;
-  const replicates = Math.max(1, parseInt(form.querySelector('.ap-rep').value) || 1);
+async function submitAddCondition(sessionId, form) {
+  const name = form.querySelector('.ac-name').value.trim();
+  const cond = form.querySelector('.ac-cond').value.trim();
+  const replicates = Math.max(1, parseInt(form.querySelector('.ac-rep').value) || 1);
   if (!cond || !name) return;
+  const errEl = form.querySelector('.ac-error');
+  const sess = S.sessions.find(s => s.id === sessionId);
+  if (sess) {
+    const exists = sess.plates.some(p => p.condition_id === cond && p.name === name);
+    if (exists) {
+      errEl.textContent = `Condition "${name} / ${cond}" already exists. Use "+ Add plates" to extend it.`;
+      errEl.hidden = false;
+      return;
+    }
+  }
   try {
     const updated = await apiJson(`/sessions/${sessionId}/plates`, {
-      method: 'POST', body: { condition_id: cond, name, plate_number: num, replicates },
+      method: 'POST', body: { condition_id: cond, name, plate_number: 1, replicates },
     });
     const idx = S.sessions.findIndex(s => s.id === sessionId);
     if (idx >= 0) S.sessions[idx] = updated;
-    S.addingPlateFor = null;
+    S.expandedConditions.add(condKey(sessionId, cond, name));
+    saveExpandedConditions();
+    S.addingConditionFor = null;
     renderSessionSidebar();
-    announce('Plate added');
+    announce(`Condition ${name} / ${cond} added`);
+  } catch (err) {
+    errEl.textContent = `Failed: ${err.message}`;
+    errEl.hidden = false;
+  }
+}
+
+async function submitAddPlatesInCondition(sessionId, cond, count) {
+  const lastNum = Math.max(0, ...cond.plates.map(p => p.plate_number));
+  try {
+    const updated = await apiJson(`/sessions/${sessionId}/plates`, {
+      method: 'POST',
+      body: { condition_id: cond.condition_id, name: cond.name, plate_number: lastNum + 1, replicates: count },
+    });
+    const idx = S.sessions.findIndex(s => s.id === sessionId);
+    if (idx >= 0) S.sessions[idx] = updated;
+    S.addingPlatesFor = null;
+    renderSessionSidebar();
+    announce(`${count} plate(s) added to ${cond.name} / ${cond.condition_id}`);
   } catch (err) {
     announce(`Failed: ${err.message}`);
   }
@@ -960,6 +1086,7 @@ function bindEvents() {
 // ── App entry ──────────────────────────────────────────────────────────────────
 function startApp() {
   initExpandedIds();
+  initExpandedConditions();
   initPreview();
   startPolling();
   loadSessions().then(() => refreshThumbnails());
