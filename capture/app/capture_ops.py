@@ -1,5 +1,6 @@
 import io
 import logging
+import shutil
 import subprocess
 import sys
 import time
@@ -178,17 +179,45 @@ def plate_survival(
 # ------------------------------------------------------------------
 
 THUMB_LONG = 400
+_VIDEO_EXTS = {".mp4", ".h264", ".mkv"}
+_THUMB_EXTS = {".jpg", ".jpeg"} | _VIDEO_EXTS
 
 
 def free_base() -> Path:
     return Path(settings.DATA_ROOT) / "freecapture"
 
 
+def trash_base() -> Path:
+    return Path(settings.DATA_ROOT) / ".trash"
+
+
+def trash_file(src: Path, rel_path: str) -> Path:
+    """Move src (and its .thumbs cache) to .trash/<rel_path>. Returns dest path."""
+    dest = trash_base() / rel_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
+    shutil.move(str(src), str(dest))
+    thumb_src = src.parent / ".thumbs" / (src.stem + ".jpg")
+    if thumb_src.exists():
+        thumb_dest = dest.parent / ".thumbs" / (dest.stem + ".jpg")
+        thumb_dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(thumb_src), str(thumb_dest))
+        except OSError:
+            pass
+    return dest
+
+
 def make_thumb(image_path: Path) -> bytes:
-    """Return cached thumbnail JPEG bytes (400px on longest side)."""
-    cache = image_path.parent / ".thumbs" / image_path.name
+    """Return cached thumbnail JPEG bytes (400px on longest side).
+    For videos, extracts the first frame via ffmpeg."""
+    cache = image_path.parent / ".thumbs" / (image_path.stem + ".jpg")
     if cache.exists():
         return cache.read_bytes()
+    if image_path.suffix.lower() in _VIDEO_EXTS:
+        return _make_video_thumb(image_path, cache)
     img = Image.open(image_path)
     img.thumbnail((THUMB_LONG, THUMB_LONG), Image.LANCZOS)
     buf = io.BytesIO()
@@ -200,3 +229,31 @@ def make_thumb(image_path: Path) -> bytes:
     except OSError:
         pass
     return data
+
+
+def _make_video_thumb(video_path: Path, cache: Path) -> bytes:
+    tmp = cache.with_suffix(".tmp.jpg")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", "0", "-i", str(video_path),
+                "-frames:v", "1",
+                "-vf", f"scale={THUMB_LONG}:{THUMB_LONG}:force_original_aspect_ratio=decrease",
+                str(tmp),
+            ],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode == 0 and tmp.exists():
+            data = tmp.read_bytes()
+            cache.parent.mkdir(exist_ok=True)
+            tmp.rename(cache)
+            return data
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    raise HTTPException(404, "Could not generate video thumbnail")

@@ -686,13 +686,16 @@ function renderThumbnailStrip() {
     label.textContent = f.filename;
 
     if (isVideo) {
-      const icon = document.createElement('div');
-      icon.className = 'thumb-tile__icon';
-      icon.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <circle cx="12" cy="12" r="10"/>
-        <polygon points="10,8 17,12 10,16" fill="currentColor" stroke="none"/>
-      </svg>`;
-      tile.appendChild(icon);
+      const img = new Image();
+      img.src = f.thumbUrl;
+      img.alt = f.filename;
+      img.loading = 'lazy';
+      img.onerror = () => img.replaceWith(createVideoIcon());
+      tile.appendChild(img);
+      const play = document.createElement('div');
+      play.className = 'thumb-tile__play';
+      play.innerHTML = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="rgba(0,0,0,.55)" stroke="none"/><polygon points="10,8 17,12 10,16" fill="#fff" stroke="none"/></svg>`;
+      tile.appendChild(play);
     } else {
       const img = new Image();
       img.src = f.thumbUrl;
@@ -725,13 +728,28 @@ function createVideoIcon() {
 function openModal(url, alt) {
   const overlay = document.getElementById('modal-overlay');
   const img = document.getElementById('modal-img');
-  img.src = url; img.alt = alt;
+  const vid = document.getElementById('modal-video');
+  const isVideo = /\.(mp4|h264|mkv)(\?|$)/i.test(url);
+  if (isVideo) {
+    img.hidden = true;
+    vid.hidden = false;
+    vid.src = url;
+  } else {
+    vid.hidden = true;
+    vid.src = '';
+    img.hidden = false;
+    img.src = url;
+    img.alt = alt;
+  }
   overlay.hidden = false;
   document.getElementById('modal-close').focus();
 }
 
 function closeModal() {
   document.getElementById('modal-overlay').hidden = true;
+  const vid = document.getElementById('modal-video');
+  vid.pause();
+  vid.src = '';
   document.getElementById('modal-img').src = '';
 }
 

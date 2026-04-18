@@ -374,6 +374,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
   display: flex; align-items: center; justify-content: center; color: var(--text-muted);
 }
 .thumb-tile__icon svg { width: 26px; height: 26px; }
+.thumb-tile__play {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+}
+.thumb-tile__play svg { width: 28px; height: 28px; }
 .thumb-tile__label {
   position: absolute; bottom: 0; left: 0; right: 0;
   padding: 2px 3px;
@@ -413,6 +419,11 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 #modal-close:hover { background: var(--surface-3); }
 #modal-img {
+  max-width: 90vw; max-height: 90vh; display: block;
+  border: 1px solid var(--border); border-radius: var(--r);
+}
+#modal-img[hidden], #modal-video[hidden] { display: none; }
+#modal-video {
   max-width: 90vw; max-height: 90vh; display: block;
   border: 1px solid var(--border); border-radius: var(--r);
 }

@@ -102,7 +102,7 @@ async def serve_plate_file(
         raise HTTPException(404, "File not found")
 
     if thumb:
-        if file_path.suffix.lower() not in {".jpg", ".jpeg"}:
+        if file_path.suffix.lower() not in capture_ops._THUMB_EXTS:
             raise HTTPException(404, "Thumbnail not available for this file type")
         data = await asyncio.to_thread(capture_ops.make_thumb, file_path)
         return Response(content=data, media_type="image/jpeg")
