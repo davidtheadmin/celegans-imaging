@@ -107,7 +107,7 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
     path = _free_dir() / filename
     t0 = time.perf_counter()
     save_jpeg(arr, path)
-    log.info("[TIMING] free_still: save_jpeg=%.3fs", time.perf_counter() - t0)
+    log.debug("[TIMING] free_still: save_jpeg=%.3fs", time.perf_counter() - t0)
     return {"path": str(path), "filename": filename}
 
 
@@ -163,7 +163,7 @@ def plate_survival(
     path = plate_dir / filename
     t0 = time.perf_counter()
     save_jpeg(arr, path)
-    log.info("[TIMING] plate_survival: save_jpeg=%.3fs", time.perf_counter() - t0)
+    log.debug("[TIMING] plate_survival: save_jpeg=%.3fs", time.perf_counter() - t0)
     return {
         "path": str(path),
         "filename": filename,

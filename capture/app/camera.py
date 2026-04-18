@@ -171,8 +171,8 @@ class CameraManager:
                 raise HTTPException(409, "Video recording in progress")
             arr = self._cam.capture_array("main")
             t2 = time.perf_counter()
-        log.info("[TIMING] capture_still: lock_wait=%.3fs capture_array=%.3fs",
-                 t1 - t0, t2 - t1)
+        log.debug("[TIMING] capture_still: lock_wait=%.3fs capture_array=%.3fs",
+                  t1 - t0, t2 - t1)
         return arr
 
     def start_video_recording(self, path: Path, bitrate_bps: int) -> None:

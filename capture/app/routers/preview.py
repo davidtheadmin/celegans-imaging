@@ -59,15 +59,19 @@ async def focus():
     return {"score": score, "at": datetime.now(timezone.utc).isoformat()}
 
 
-@router.get("/magnifier.jpg", dependencies=[Depends(require_token)])
-async def magnifier():
+def _capture_magnifier() -> bytes:
     import io
     from PIL import Image
-
-    _require_camera()
-    arr = await asyncio.to_thread(camera_manager.capture_still)
+    arr = camera_manager.capture_still()
     cy, cx = FULL_H // 2, FULL_W // 2
     crop = arr[cy - 300: cy + 300, cx - 300: cx + 300]
     buf = io.BytesIO()
     Image.fromarray(crop, "RGB").save(buf, format="JPEG", quality=90)
-    return Response(content=buf.getvalue(), media_type="image/jpeg")
+    return buf.getvalue()
+
+
+@router.get("/magnifier.jpg", dependencies=[Depends(require_token)])
+async def magnifier():
+    _require_camera()
+    data = await asyncio.to_thread(_capture_magnifier)
+    return Response(content=data, media_type="image/jpeg")
