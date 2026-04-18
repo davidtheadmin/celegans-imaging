@@ -92,13 +92,24 @@ def get_plate_dir(session_id: str, folder_name: str) -> Path:
 
 
 def add_plate(session_id: str, req: CreatePlateRequest) -> Session:
+    from fastapi import HTTPException
     session = get_session(session_id)
     count = max(1, min(50, req.replicates))
     now = datetime.now(timezone.utc)
 
     for i in range(count):
         pnum = req.plate_number + i
-        plate_id = f"{req.condition_id}_{pnum:02d}"
+        # Enforce uniqueness per (condition_id, name, plate_number)
+        for existing in session.plates:
+            if (existing.condition_id == req.condition_id
+                    and existing.name == req.name
+                    and existing.plate_number == pnum):
+                raise HTTPException(
+                    409,
+                    f"Plate {req.condition_id}/{req.name} #{pnum:02d} already exists"
+                )
+        # New id format includes name to stay unique across conditions
+        plate_id = f"{req.condition_id}_{req.name}_{pnum:02d}"
         plate = Plate(
             id=plate_id,
             condition_id=req.condition_id,
