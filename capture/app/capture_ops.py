@@ -80,6 +80,8 @@ def wrap_h264(h264_path: Path, fps: float = DEFAULT_VIDEO_FPS) -> Path:
     frame count); -framerate is a V4L2/device option and is silently ignored
     for file inputs."""
     mp4_path = h264_path.with_suffix(".mp4")
+    log.debug("wrap_h264: remuxing %s at %.3f fps", h264_path.name, fps)
+    t0 = time.perf_counter()
     try:
         result = subprocess.run(
             [
@@ -92,11 +94,17 @@ def wrap_h264(h264_path: Path, fps: float = DEFAULT_VIDEO_FPS) -> Path:
             capture_output=True,
             timeout=120,
         )
+        elapsed = time.perf_counter() - t0
         if result.returncode == 0:
+            log.debug("wrap_h264: done in %.3fs -> %s", elapsed, mp4_path.name)
             h264_path.unlink()
             return mp4_path
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        log.warning("wrap_h264: ffmpeg rc=%d in %.3fs stderr=%s",
+                    result.returncode, elapsed, result.stderr[-200:].decode(errors="replace"))
+    except FileNotFoundError:
+        log.warning("wrap_h264: ffmpeg not found, keeping .h264")
+    except subprocess.TimeoutExpired:
+        log.warning("wrap_h264: ffmpeg timed out after %.3fs", time.perf_counter() - t0)
     return h264_path  # ffmpeg not available or failed; .h264 is playable in VLC
 
 
@@ -122,12 +130,16 @@ def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> 
     log.debug("free_video: measured %.2f fps", fps)
     ts = _ts()
     h264_path = _free_dir() / f"{ts}_video.h264"
+    log.debug("free_video: starting recording -> %s", h264_path.name)
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
     try:
         time.sleep(duration_s)
     finally:
+        log.debug("free_video: stopping recording")
         cam_mgr.stop_video_recording()
+        log.debug("free_video: recording stopped (including drain pause)")
     final = wrap_h264(h264_path, fps=fps)
+    log.debug("free_video: returning %s", final.name)
     return {"path": str(final), "filename": final.name, "duration_s": duration_s}
 
 
@@ -145,12 +157,16 @@ def plate_motility(
     log.debug("plate_motility: measured %.2f fps", fps)
     ts = _ts()
     h264_path = plate_dir / f"{ts}_video.h264"
+    log.debug("plate_motility: starting recording -> %s", h264_path.name)
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
     try:
         time.sleep(duration_s)
     finally:
+        log.debug("plate_motility: stopping recording")
         cam_mgr.stop_video_recording()
+        log.debug("plate_motility: recording stopped (including drain pause)")
     final = wrap_h264(h264_path, fps=fps)
+    log.debug("plate_motility: returning %s", final.name)
     return {
         "path": str(final),
         "filename": final.name,
@@ -240,7 +256,13 @@ def make_thumb(image_path: Path) -> bytes:
 
 
 def _make_video_thumb(video_path: Path, cache: Path) -> bytes:
+    # Create .thumbs/ directory BEFORE ffmpeg tries to write the tmp file into it.
+    # Previously mkdir was called after subprocess.run, so ffmpeg always failed on
+    # first use of a new .thumbs/ directory (no such directory error).
+    cache.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache.with_suffix(".tmp.jpg")
+    log.debug("_make_video_thumb: extracting frame from %s", video_path.name)
+    t0 = time.perf_counter()
     try:
         result = subprocess.run(
             [
@@ -251,13 +273,19 @@ def _make_video_thumb(video_path: Path, cache: Path) -> bytes:
             ],
             capture_output=True, timeout=30,
         )
+        elapsed = time.perf_counter() - t0
         if result.returncode == 0 and tmp.exists():
+            log.debug("_make_video_thumb: done in %.3fs -> %s", elapsed, cache.name)
             data = tmp.read_bytes()
-            cache.parent.mkdir(exist_ok=True)
             tmp.rename(cache)
             return data
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        log.warning("_make_video_thumb: ffmpeg rc=%d for %s in %.3fs stderr=%s",
+                    result.returncode, video_path.name, elapsed,
+                    result.stderr[-300:].decode(errors="replace"))
+    except FileNotFoundError:
+        log.warning("_make_video_thumb: ffmpeg not found")
+    except subprocess.TimeoutExpired:
+        log.warning("_make_video_thumb: ffmpeg timed out for %s", video_path.name)
     finally:
         if tmp.exists():
             try:

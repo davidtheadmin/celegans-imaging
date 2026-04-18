@@ -34,6 +34,7 @@ class CameraManager:
         self._exposure_us: Optional[int] = None
         self._analogue_gain: Optional[float] = None
         self._recording = False
+        self._encoder: Optional[H264Encoder] = None
 
     def start(self) -> None:
         try:
@@ -178,19 +179,36 @@ class CameraManager:
 
     def start_video_recording(self, path: Path, bitrate_bps: int) -> None:
         from fastapi import HTTPException
+        log.debug("start_video_recording: waiting for lock")
+        t0 = time.perf_counter()
         with self._capture_lock:
+            log.debug("start_video_recording: lock acquired after %.3fs", time.perf_counter() - t0)
             if self._recording:
                 raise HTTPException(409, "Already recording")
             encoder = H264Encoder(bitrate=bitrate_bps)
+            log.debug("start_video_recording: calling cam.start_recording")
+            t1 = time.perf_counter()
             self._cam.start_recording(encoder, FileOutput(str(path)), name="main")
+            log.debug("start_video_recording: cam.start_recording returned in %.3fs", time.perf_counter() - t1)
+            self._encoder = encoder
             self._recording = True
             log.info("Video recording started -> %s", path)
 
     def stop_video_recording(self) -> None:
+        log.debug("stop_video_recording: waiting for lock")
+        t0 = time.perf_counter()
         with self._capture_lock:
+            log.debug("stop_video_recording: lock acquired after %.3fs", time.perf_counter() - t0)
+            t1 = time.perf_counter()
             self._cam.stop_recording()
+            log.debug("stop_video_recording: cam.stop_recording returned in %.3fs", time.perf_counter() - t1)
+            self._encoder = None  # release encoder reference; prevents GC race on next start_recording
             self._recording = False
             log.info("Video recording stopped")
+        # Pause outside the lock: lets picamera2's encoder background thread fully drain
+        # before the next start_recording() call.  Without this the second recording can
+        # deadlock inside cam.start_recording() on Pi 5 / picamera2.
+        time.sleep(0.3)
 
     def measure_fps(self) -> float:
         """Sample FrameDuration from camera metadata to determine actual fps.
