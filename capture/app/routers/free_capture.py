@@ -104,3 +104,27 @@ async def serve_freecapture_file(
         return Response(content=data, media_type="image/jpeg")
 
     return FileResponse(str(file_path))
+
+
+@router.delete("/files/{date}/{filename}", dependencies=[Depends(require_token)])
+async def delete_freecapture_file(date: str, filename: str):
+    if not _DATE_RE.match(date):
+        raise HTTPException(400, "Invalid date format")
+
+    base = capture_ops.free_base()
+    date_dir = (base / date).resolve()
+
+    if not str(date_dir).startswith(str(base.resolve())):
+        raise HTTPException(403, "Forbidden")
+
+    safe_name = Path(filename).name
+    file_path = (date_dir / safe_name).resolve()
+
+    if not str(file_path).startswith(str(date_dir)):
+        raise HTTPException(403, "Forbidden")
+    if not file_path.is_file():
+        raise HTTPException(404, "File not found")
+
+    rel_path = f"freecapture/{date}/{safe_name}"
+    trash_path = await asyncio.to_thread(capture_ops.trash_file, file_path, rel_path)
+    return {"status": "trashed", "trash_path": str(trash_path)}

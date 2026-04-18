@@ -108,3 +108,24 @@ async def serve_plate_file(
         return Response(content=data, media_type="image/jpeg")
 
     return FileResponse(str(file_path))
+
+
+@router.delete(
+    "/sessions/{session_id}/plates/{plate_id}/files/{filename}",
+    dependencies=[Depends(require_token)],
+)
+async def delete_plate_file(session_id: str, plate_id: str, filename: str):
+    session, plate = session_store.get_plate(session_id, plate_id)
+    plate_dir = session_store.get_plate_dir(session_id, plate.folder_name)
+
+    safe_name = Path(filename).name
+    file_path = (plate_dir / safe_name).resolve()
+
+    if not str(file_path).startswith(str(plate_dir.resolve())):
+        raise HTTPException(403, "Forbidden")
+    if not file_path.is_file():
+        raise HTTPException(404, "File not found")
+
+    rel_path = f"sessions/{session_id}/plates/{plate.folder_name}/{safe_name}"
+    trash_path = await asyncio.to_thread(capture_ops.trash_file, file_path, rel_path)
+    return {"status": "trashed", "trash_path": str(trash_path)}

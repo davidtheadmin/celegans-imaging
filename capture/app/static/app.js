@@ -10,12 +10,13 @@ const S = {
   diskFreeGb: null,
   mode: 'free-still',
   sessions: [],
-  expandedId: null,
+  expandedIds: new Set(),
   activeSessionId: null,
   activePlateId: null,
   addingPlateFor: null,
   showNewSession: false,
   thumbnails: [],
+  deletedFiles: new Set(),
   magnifierActive: false,
   _magnifierTimer: null,
 };
@@ -337,6 +338,18 @@ function initVideoDuration() {
   input.addEventListener('input', upd); upd();
 }
 
+// ── Session expand state (sessionStorage) ────────────────────────────────────
+function saveExpandedIds() {
+  try { sessionStorage.setItem('expandedIds', JSON.stringify([...S.expandedIds])); } catch {}
+}
+
+function initExpandedIds() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('expandedIds') || '[]');
+    S.expandedIds = new Set(saved);
+  } catch { S.expandedIds = new Set(); }
+}
+
 // ── Sessions ───────────────────────────────────────────────────────────────────
 async function loadSessions() {
   try { S.sessions = await apiJson('/sessions'); } catch {}
@@ -350,7 +363,8 @@ function getActivePlate() {
 }
 
 function toggleSession(id) {
-  S.expandedId = S.expandedId === id ? null : id;
+  if (S.expandedIds.has(id)) { S.expandedIds.delete(id); } else { S.expandedIds.add(id); }
+  saveExpandedIds();
   S.addingPlateFor = null;
   renderSessionSidebar();
 }
@@ -358,6 +372,8 @@ function toggleSession(id) {
 function selectPlate(sessionId, plateId) {
   S.activeSessionId = sessionId;
   S.activePlateId = plateId;
+  S.expandedIds.add(sessionId);
+  saveExpandedIds();
   switchMode('session');
   renderSessionSidebar();
   renderSessionCapture();
@@ -375,15 +391,16 @@ function renderSessionSidebar() {
   }
 
   for (const sess of [...S.sessions].reverse()) {
+    const isExpanded = S.expandedIds.has(sess.id);
     const item = document.createElement('div');
-    item.className = 'session-item' + (sess.id === S.expandedId ? ' open' : '');
+    item.className = 'session-item' + (isExpanded ? ' open' : '');
     item.setAttribute('role', 'listitem');
 
     const hdr = document.createElement('div');
     hdr.className = 'session-hdr';
     hdr.setAttribute('tabindex', '0');
     hdr.setAttribute('role', 'button');
-    hdr.setAttribute('aria-expanded', String(sess.id === S.expandedId));
+    hdr.setAttribute('aria-expanded', String(isExpanded));
     hdr.innerHTML = `
       <svg class="s-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="3,2 7,5 3,8"/>
@@ -398,7 +415,7 @@ function renderSessionSidebar() {
     });
     item.appendChild(hdr);
 
-    if (sess.id === S.expandedId) {
+    if (isExpanded) {
       const sec = document.createElement('div');
       sec.className = 'plates-section';
 
@@ -488,7 +505,8 @@ async function submitCreateSession() {
       method: 'POST', body: { name, assay_mode: mode, assay_config },
     });
     S.sessions.push(sess);
-    S.expandedId = sess.id;
+    S.expandedIds.add(sess.id);
+    saveExpandedIds();
     S.showNewSession = false;
     document.getElementById('ns-name').value = '';
     renderNewSessionForm();
@@ -688,7 +706,22 @@ function renderThumbnailStrip() {
   empty.hidden = true;
 
   for (const f of S.thumbnails) {
+    const deleted = S.deletedFiles.has(f.filename);
     const isVideo = /\.(mp4|h264|mkv)$/i.test(f.filename);
+
+    if (deleted) {
+      const tile = document.createElement('div');
+      tile.className = 'thumb-tile thumb-tile--deleted';
+      tile.setAttribute('aria-label', `Deleted: ${f.filename}`);
+      tile.innerHTML = `<div class="thumb-tile__tomb">Deleted</div>`;
+      const label = document.createElement('div');
+      label.className = 'thumb-tile__label';
+      label.textContent = f.filename;
+      tile.appendChild(label);
+      list.appendChild(tile);
+      continue;
+    }
+
     const tile = document.createElement('div');
     tile.className = 'thumb-tile';
     tile.setAttribute('tabindex', '0');
@@ -715,15 +748,21 @@ function renderThumbnailStrip() {
       img.src = f.thumbUrl;
       img.alt = f.filename;
       img.loading = 'lazy';
-      img.onerror = () => {
-        img.replaceWith(createVideoIcon());
-      };
+      img.onerror = () => img.replaceWith(createVideoIcon());
       tile.appendChild(img);
     }
 
+    // × delete button
+    const delBtn = document.createElement('button');
+    delBtn.className = 'thumb-tile__del';
+    delBtn.setAttribute('aria-label', `Delete ${f.filename}`);
+    delBtn.textContent = '×';
+    delBtn.addEventListener('click', e => { e.stopPropagation(); deleteCapture(f); });
+    tile.appendChild(delBtn);
+
     tile.appendChild(label);
-    tile.addEventListener('click', () => openModal(f.fullUrl, f.filename));
-    tile.addEventListener('keydown', e => { if (e.key === 'Enter') openModal(f.fullUrl, f.filename); });
+    tile.addEventListener('click', () => openModal(f.fullUrl, f.filename, f));
+    tile.addEventListener('keydown', e => { if (e.key === 'Enter') openModal(f.fullUrl, f.filename, f); });
     list.appendChild(tile);
   }
 }
@@ -739,10 +778,14 @@ function createVideoIcon() {
 }
 
 // ── Modal ──────────────────────────────────────────────────────────────────────
-function openModal(url, alt) {
+let _modalFile = null;
+
+function openModal(url, alt, fileObj) {
+  _modalFile = fileObj || null;
   const overlay = document.getElementById('modal-overlay');
   const img = document.getElementById('modal-img');
   const vid = document.getElementById('modal-video');
+  const delBtn = document.getElementById('modal-del-btn');
   const isVideo = /\.(mp4|h264|mkv)(\?|$)/i.test(url);
   if (isVideo) {
     img.hidden = true;
@@ -755,6 +798,7 @@ function openModal(url, alt) {
     img.src = url;
     img.alt = alt;
   }
+  delBtn.hidden = !fileObj;
   overlay.hidden = false;
   document.getElementById('modal-close').focus();
 }
@@ -765,6 +809,32 @@ function closeModal() {
   vid.pause();
   vid.src = '';
   document.getElementById('modal-img').src = '';
+  _modalFile = null;
+}
+
+async function deleteCapture(fileObj) {
+  if (!fileObj) return;
+  let deleteUrl;
+  if (fileObj.date) {
+    deleteUrl = `/capture/free/files/${fileObj.date}/${encodeURIComponent(fileObj.filename)}`;
+  } else {
+    deleteUrl = `/sessions/${S.activeSessionId}/plates/${S.activePlateId}/files/${encodeURIComponent(fileObj.filename)}`;
+  }
+  try {
+    await api(deleteUrl, { method: 'DELETE' });
+    S.deletedFiles.add(fileObj.filename);
+    closeModal();
+    renderThumbnailStrip();
+    // Revert quadrant button if applicable
+    const m = fileObj.filename.match(/_([A-Z]{2})\.jpg$/i);
+    if (m) {
+      document.querySelectorAll(`.btn-quadrant[data-q="${m[1].toUpperCase()}"]`)
+        .forEach(btn => btn.classList.remove('captured'));
+    }
+    announce(`Deleted: ${fileObj.filename}`);
+  } catch (err) {
+    announce(`Delete failed: ${err.message}`);
+  }
 }
 
 // ── Event binding ──────────────────────────────────────────────────────────────
@@ -804,6 +874,7 @@ function bindEvents() {
   });
 
   document.getElementById('modal-close').addEventListener('click', closeModal);
+  document.getElementById('modal-del-btn').addEventListener('click', () => deleteCapture(_modalFile));
   document.getElementById('modal-overlay').addEventListener('click', e => {
     if (e.target === e.currentTarget) closeModal();
   });
@@ -812,6 +883,7 @@ function bindEvents() {
 
 // ── App entry ──────────────────────────────────────────────────────────────────
 function startApp() {
+  initExpandedIds();
   initPreview();
   startPolling();
   loadSessions().then(() => refreshThumbnails());
