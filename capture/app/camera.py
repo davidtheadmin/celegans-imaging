@@ -92,16 +92,15 @@ class CameraManager:
     def _preview_loop(self) -> None:
         while self._running:
             try:
-                # Hold _capture_lock only for the picamera2 call itself.
-                # All picamera2/libcamera calls must be serialized through this
-                # lock — concurrent capture_array / capture_request calls from
-                # different threads deadlock on libcamera's internal queue.
-                with self._capture_lock:
-                    yuv = self._cam.capture_array("lores")
-                # JPEG encoding and colour conversion are CPU-only; do them
-                # outside the lock so other camera operations aren't delayed.
+                # No _capture_lock here: the preview is a passive lores consumer.
+                # Holding _capture_lock during capture_array("lores") would block
+                # start_video_recording() from acquiring it — and start_recording()
+                # is what "kicks" picamera2 back into delivering lores frames after
+                # a recording has stopped.  The lores stream is independent of the
+                # main-stream state-changing operations protected by _capture_lock.
                 # YUV420 I420 -> BGR for JPEG encoding.
                 # If preview looks green, change to COLOR_YUV2BGR_NV12.
+                yuv = self._cam.capture_array("lores")
                 bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
                 ok, jpeg_arr = cv2.imencode(
                     ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 70]
