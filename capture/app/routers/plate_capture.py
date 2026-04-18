@@ -1,8 +1,10 @@
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from ..auth import require_token
@@ -68,7 +70,7 @@ async def list_plate_files(session_id: str, plate_id: str) -> List[dict]:
 
     files = []
     for f in sorted(plate_dir.iterdir()):
-        if f.is_file():
+        if f.is_file() and not f.name.startswith('.'):
             stat = f.stat()
             files.append({
                 "filename": f.name,
@@ -76,3 +78,33 @@ async def list_plate_files(session_id: str, plate_id: str) -> List[dict]:
                 "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
             })
     return files
+
+
+@router.get(
+    "/sessions/{session_id}/plates/{plate_id}/files/{filename}",
+    dependencies=[Depends(require_token)],
+)
+async def serve_plate_file(
+    session_id: str,
+    plate_id: str,
+    filename: str,
+    thumb: bool = Query(default=False),
+):
+    session, plate = session_store.get_plate(session_id, plate_id)
+    plate_dir = session_store.get_plate_dir(session_id, plate.folder_name)
+
+    safe_name = Path(filename).name
+    file_path = (plate_dir / safe_name).resolve()
+
+    if not str(file_path).startswith(str(plate_dir.resolve())):
+        raise HTTPException(403, "Forbidden")
+    if not file_path.is_file():
+        raise HTTPException(404, "File not found")
+
+    if thumb:
+        if file_path.suffix.lower() not in {".jpg", ".jpeg"}:
+            raise HTTPException(404, "Thumbnail not available for this file type")
+        data = await asyncio.to_thread(capture_ops.make_thumb, file_path)
+        return Response(content=data, media_type="image/jpeg")
+
+    return FileResponse(str(file_path))

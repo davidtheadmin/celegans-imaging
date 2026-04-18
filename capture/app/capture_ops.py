@@ -1,3 +1,4 @@
+import io
 import logging
 import subprocess
 import sys
@@ -170,3 +171,32 @@ def plate_survival(
         "assay_mode": "survival",
         "quadrant": quadrant,
     }
+
+
+# ------------------------------------------------------------------
+# File serving helpers
+# ------------------------------------------------------------------
+
+THUMB_LONG = 400
+
+
+def free_base() -> Path:
+    return Path(settings.DATA_ROOT) / "freecapture"
+
+
+def make_thumb(image_path: Path) -> bytes:
+    """Return cached thumbnail JPEG bytes (400px on longest side)."""
+    cache = image_path.parent / ".thumbs" / image_path.name
+    if cache.exists():
+        return cache.read_bytes()
+    img = Image.open(image_path)
+    img.thumbnail((THUMB_LONG, THUMB_LONG), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=80)
+    data = buf.getvalue()
+    try:
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_bytes(data)
+    except OSError:
+        pass
+    return data
