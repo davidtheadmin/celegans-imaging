@@ -1,4 +1,8 @@
-# Phase 3 Status — Polish Complete (Round 2)
+# Phase 3 — COMPLETE
+
+All backend and frontend work for Phase 3 is merged and pushed.
+
+---
 
 ## What's working
 
@@ -9,47 +13,47 @@
 - `DELETE /sessions/{id}/plates/{plate_id}/files/{filename}` — soft delete (moves to `.trash/`)
 - `DELETE /capture/free/files/{date}/{filename}` — soft delete free-capture file
 - `DELETE /sessions/{id}/plates/{plate_id}` — moves entire plate folder to `.trash/`, removes from manifest
-- `POST /sessions/{id}/plates` accepts `replicates: int` (1–50); creates N plates; 409 on duplicate `(condition_id, name, plate_number)`
-- Plate id format: `{condition_id}_{name}_{NN:02d}` (changed from `{condition_id}_{NN}` for cross-condition uniqueness; old sessions remain accessible)
-- Video thumbnails: `make_thumb` extracts first frame via `ffmpeg -frames:v 1` for `.mp4/.h264/.mkv`
-- Color fix: `capture_still()` flips BGR→RGB
-- **Video framerate fix**: `wrap_h264()` now uses `-r <fps>` (not `-framerate`, which is a V4L2-only flag silently ignored for file inputs); actual fps measured from `FrameDuration` camera metadata before recording; falls back to `DEFAULT_VIDEO_FPS = 30`
+- `POST /sessions/{id}/plates` accepts `replicates: int` (1–50); 409 on duplicate `(condition_id, name, plate_number)`
+- Plate id format: `{condition_id}_{name}_{NN:02d}` — unique across conditions; old `{condition_id}_{NN}` sessions remain accessible without migration
+- Video thumbnails: `make_thumb` extracts first frame via `ffmpeg -frames:v 1`
+- Color fix: `capture_still()` flips BGR→RGB (libcamera delivers BGR on Pi 5)
+- **Video framerate**: `wrap_h264()` uses `-r <fps>` (not `-framerate`); actual fps measured from `FrameDuration` metadata before recording; fallback `DEFAULT_VIDEO_FPS = 30`
 
 ### Frontend (`capture/app/static/`)
 - Dark instrument-style UI — GitHub dark palette, monospace readouts, no framework
 - Status bar: connection dot, camera state, AE lock with exposure values, disk free (color-coded), **?** shortcut button
-- MJPEG live preview with focus score updated every 500ms
-- AE lock/unlock — locked values shown in header chip and preview overlay
-- Free Still capture with filename feedback + thumbnail strip
-- Free Video capture with duration input and live countdown progress bar
-- Session sidebar: **3-level tree** — session → condition → plates
-  - Conditions emerge from grouping the flat plate list by `(condition_id, name)` client-side; no schema change
-  - Condition groups collapsible; expand state persists in `sessionStorage` separately from session expand state
-  - **Add condition form**: Name first, then Condition ID, then replicates count; shows "Name / CondID — plates 1 through N" preview; validates no duplicate `(condition_id, name)` before POST; inline error if duplicate
-  - **Add N plates** inline per condition: appends from `lastPlateNumber + 1`
-  - **Delete plate**: × button on hover, confirm dialog, moves to `.trash/`
-- Session capture panel adapts to assay mode
-- Quadrant 2×2 grid: completion state derived from files on disk; captured quadrants green
-- Thumbnail strip: last 8 captures; click → full-size modal
-  - Video tiles: poster frame + play circle overlay
-  - × delete button on hover; tombstone tile after delete
-  - Modal Delete button; `<video controls>` for `.mp4` files
-- Token prompt on load; `?token=` URL param captured and URL-cleaned
-- Polling pauses when tab is hidden
-- **Keyboard shortcuts** (disabled in form inputs):
-  - `Space` — primary capture for current mode/plate
-  - `1–4` — NW/NE/SW/SE quadrant capture
-  - `N` — open Add Condition form for active session
-  - `L` — toggle AE lock
-  - `Esc` — close modal / shortcuts overlay
-  - `?` — shortcut reference overlay
+- MJPEG live preview with Laplacian focus score (500ms poll)
+- AE lock/unlock — locked exposure + gain shown in header chip and preview overlay
+- Free Still / Free Video capture with progress bar and thumbnail feedback
+- Session sidebar — **3-level tree**: session → condition → plates
+  - Conditions grouped client-side from flat plate list by `(condition_id, name)`; no schema change
+  - Condition collapse state persists in `sessionStorage` independently of session expand state
+  - Add Condition form: Name → Condition ID → replicates; preview line; client-side duplicate check; inline error on conflict
+  - Add N plates inline per condition: appends from `lastPlateNumber + 1`
+  - Delete plate: × button, confirm dialog, moves to `.trash/`
+- Session capture panel adapts to assay mode (motility / survival single / survival quadrant)
+- Quadrant 2×2 grid: completion state derived from files on disk on every plate visit
+- Thumbnail strip: last 8 captures; click → full-size modal; × delete with tombstone; video modal with `<video controls>`
+- Token prompt on load; `?token=` URL param consumed and URL-cleaned
+- **Keyboard shortcuts**: `Space` capture, `1–4` quadrants, `N` add condition, `L` AE lock, `Esc` close, `?` overlay
 
-### Removed / changed in round 2
-- **Magnifier removed**: the 100ms polling loop to `/magnifier.jpg` caused service hangs in real lab use. Endpoint, button, JS polling loop, CSS, and M hotkey all removed. Future rethink: CSS zoom on the existing MJPEG stream.
-- **Video playback speed fixed**: was 3–5× too fast because the H264 demuxer ignored `-framerate`; fixed with `-r` and measured actual camera fps.
-- **Add-plate form replaced by Add-condition form**: plate numbers now reset to 1 per condition; N hotkey updated.
+### Round 2 polish changes
+- **Magnifier removed**: 100ms polling loop to `/magnifier.jpg` caused service hangs in real lab use. Endpoint, button, M hotkey, CSS all removed.
+- **Video playback speed fixed**: was 3–5× too fast due to `-framerate` being a V4L2-only flag ignored for file inputs; fixed with `-r` + measured fps.
+- **Plate form restructured**: conditions are first-class groups; N hotkey opens Add Condition (not Add Plate).
 
-## Performance (Phase 2 baseline)
+---
+
+## Known outstanding / deferred items
+
+- **Magnifier rethink**: a future approach could apply CSS `transform: scale()` on the existing MJPEG `<img>` element (no new endpoint, no polling). Deferred to Phase 5a or later.
+- **`plate_info-name` in capture panel**: currently shows `plate.folder_name` (e.g. `10J_WT_plate01`). Could show a friendlier `Name / CondID — plate 01` — left as-is since folder name is unambiguous.
+- **Quadrant state on page load**: `markCapturedQuadrants` fires only when a plate is selected, not on app resume. Minor; not causing data loss.
+- **No session-level delete**: plates can be deleted but sessions cannot. Will revisit when Phase 4 output files make cleanup more complex.
+
+---
+
+## Performance (Phase 2 baseline, still valid)
 
 | Operation | Wall clock |
 |-----------|-----------|
@@ -57,4 +61,15 @@
 | `POST /sessions/.../capture` (survival, single) | ~0.38s |
 | `POST /sessions/.../capture` (survival, quadrant) | ~0.38s |
 
-## Next: Phase 4
+---
+
+## Resumed in next session
+
+**Phase 5a** is the next planned work.
+
+Phase 5a scope (to be confirmed at session start):
+- Analysis service skeleton (`analysis/` directory)
+- Motility scoring: per-clip worm-movement metric from recorded MP4s
+- Results written back to plate directory (e.g. `results.json`)
+- API endpoints to fetch per-plate and per-session results
+- Frontend: results column in the condition/plate tree; sparkline or score badge per plate
