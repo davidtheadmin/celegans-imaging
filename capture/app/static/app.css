@@ -230,8 +230,31 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 /* Plates section (inside open session) */
 .plates-section {
-  padding: 4px 12px 8px 20px; background: var(--surface-2);
+  padding: 4px 8px 8px 16px; background: var(--surface-2);
 }
+
+/* Condition groups */
+.cond-group { border-bottom: 1px solid var(--border-sub); }
+.cond-group:last-of-type { border-bottom: none; }
+.cond-hdr {
+  display: flex; align-items: center; gap: 5px;
+  padding: 5px 6px; cursor: pointer; user-select: none;
+  border-radius: var(--r-sm); transition: background .1s;
+}
+.cond-hdr:hover { background: var(--surface-3); }
+.cond-hdr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cond-label {
+  flex: 1; font-size: 11px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cond-count {
+  font-size: 10px; color: var(--text-dim); font-family: var(--mono);
+  flex-shrink: 0;
+}
+.cond-group.open .s-chevron { transform: rotate(90deg); }
+
+.cond-plates { padding: 2px 0 4px 14px; }
+
 .plate-item {
   display: flex; align-items: center; gap: 6px;
   padding: 3px 6px; border-radius: var(--r-sm); cursor: pointer;
@@ -267,6 +290,12 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .add-plate-form[hidden] { display: none; }
 .add-plate-form input { font-size: 11px; padding: 4px 6px; }
+
+.add-plates-form {
+  display: flex; flex-direction: column; gap: 5px; margin: 4px 0;
+  padding: 6px; background: var(--surface-3); border-radius: var(--r-sm);
+}
+.add-plates-form input { font-size: 11px; padding: 3px 5px; }
 
 /* ── Main content ──────────────────────────────────────────────────────────── */
 .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
