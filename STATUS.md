@@ -1,6 +1,40 @@
-# Phase 2 Status — Complete
+# Phase 3 Status — Core Complete
 
-## Performance (measured on Pi, 2026-04-18)
+## What's working
+
+### Backend
+- `GET /sessions/{id}/plates/{plate_id}/files/{filename}?thumb=1` — serves plate files; thumbnail cached in `.thumbs/` subdir
+- `GET /capture/free/files?date=` — lists free-capture files for a given date (defaults to today)
+- `GET /capture/free/files/{date}/{filename}?thumb=1` — serves free-capture files with same thumbnail support
+- Color fix: `capture_still()` flips BGR→RGB before returning (libcamera delivers BGR despite RGB888 label on Pi 5)
+
+### Frontend (`capture/app/static/`)
+- Dark instrument-style UI — GitHub dark palette, monospace readouts, no framework
+- Status bar: connection dot, camera state, AE lock with exposure values, disk free (color-coded)
+- MJPEG live preview with focus score updated every 500ms
+- AE lock/unlock — locked values shown in header chip and preview overlay
+- Magnifier on hold (mousedown / spacebar) — fetches `/magnifier.jpg` every 500ms, full-screen overlay
+- Free Still capture with filename feedback + thumbnail strip
+- Free Video capture with duration input and live countdown progress bar
+- Session sidebar: create session (motility/survival with assay_config), expand, add plates (pre-fills from last plate + auto-increments plate_number), select active plate
+- Session capture panel adapts to assay mode: motility recording with progress / survival single / quadrant 2×2 grid (captured quadrants turn green)
+- Thumbnail strip: last 8 captures in current context; click → full-size modal
+- Token prompt on load; `?token=` URL param captured and URL-cleaned for Phase 4 launcher
+- Polling pauses when tab is hidden
+
+## Known polish items (deferred to next session)
+
+### 1. Video thumbnails and playback
+- Video files in the thumbnail strip show a play icon but don't open to a playable video in the modal (modal uses `<img>`, not `<video>`)
+- Need to investigate: are MP4s reliably remuxed by ffmpeg? Does `FileResponse` set `Content-Type: video/mp4`?
+- Consider generating a thumbnail from the first frame via `ffmpeg -ss 0 -frames:v 1`
+- Modal should detect video files and render a `<video>` element instead of `<img>`
+
+### 2. Magnifier latency
+- Currently polls `/magnifier.jpg` every 500ms; each call does a fresh full-res capture + 600×600 crop + JPEG encode → feels choppy
+- Options: tighter polling interval, server-side caching of the latest magnifier crop on a background thread, smaller crop window, or a dedicated MJPEG sub-stream cropped to center (same architecture as the preview stream)
+
+## Performance (Phase 2 baseline, unchanged)
 
 | Operation | Wall clock |
 |-----------|-----------|
@@ -8,45 +42,4 @@
 | `POST /sessions/.../capture` (survival, single) | ~0.38s |
 | `POST /sessions/.../capture` (survival, quadrant) | ~0.38s |
 
-Breakdown: `capture_array("main")` = 0.106s, `save_jpeg()` = 0.132s.
-Survival is within 1.0× free-capture still — well under the 1.5× target.
-
-## What's working
-
-- `GET /preview.mjpg` — MJPEG stream, ~10-20 fps
-- `GET /focus` — Laplacian variance score
-- `POST /camera/ae/lock` / `unlock` / `GET /camera/exposure`
-- `GET /status`
-- `POST /capture/free/still` — ~0.42s
-- `POST /capture/free/video` — H.264 + ffmpeg MP4 wrap
-- `POST /sessions/.../capture` (motility) — video, ~5s for 5s clip
-- `POST /sessions/.../capture` (survival, single still) — ~0.38s ✓
-- `POST /sessions/.../capture` (survival, quadrant NE/NW/SE/SW) — ~0.38s each ✓
-- Quadrant guard: missing `quadrant` on `quadrants:true` session → 400 ✓
-
-## asyncio.to_thread coverage
-
-All camera and disk I/O runs off the event loop:
-
-| Endpoint | Off-thread function |
-|----------|---------------------|
-| `POST /capture/free/still` | `capture_ops.free_still` |
-| `POST /capture/free/video` | `capture_ops.free_video` |
-| `POST /sessions/.../capture` (motility) | `capture_ops.plate_motility` |
-| `POST /sessions/.../capture` (survival) | `capture_ops.plate_survival` |
-| `GET /magnifier.jpg` | `_capture_magnifier` (capture + PIL encode) |
-| `POST /camera/ae/lock` | `camera_manager.lock_ae` |
-| `POST /camera/ae/unlock` | `camera_manager.unlock_ae` |
-
-## Root-cause note
-
-The 3m48s survival hang reported in the previous session was on the Phase 1
-skeleton (commit 5c2e646). Phase 2 was never actually deployed to the Pi due
-to `main` tracking the deleted `origin/master` branch — silent no-op on every
-`git pull`. Fixed by resetting upstream to `origin/main`. Phase 2 code paths
-for free/still and plate/survival are identical through `capture_still()` and
-`save_jpeg()`; both are fast once deployed.
-
-## Next: Phase 3
-
-Flat-field correction pipeline, exposure calibration endpoint.
+## Next: Phase 3 polish → then Phase 4
