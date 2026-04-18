@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 
 FULL_W, FULL_H = 4056, 3040
 PREVIEW_W, PREVIEW_H = 1280, 960
+DEFAULT_VIDEO_FPS = 30  # fallback; IMX708 at 4056×3040 delivers ~10fps
 
 
 class CameraManager:
@@ -190,6 +191,25 @@ class CameraManager:
             self._cam.stop_recording()
             self._recording = False
             log.info("Video recording stopped")
+
+    def measure_fps(self) -> float:
+        """Sample FrameDuration from camera metadata to determine actual fps.
+        At full 4056×3040 resolution the IMX708 typically delivers ~10fps."""
+        try:
+            with self._capture_lock:
+                req = self._cam.capture_request()
+                try:
+                    meta = req.get_metadata()
+                finally:
+                    req.release()
+            fd_us = meta.get("FrameDuration", 0)
+            if fd_us and fd_us > 0:
+                fps = 1_000_000.0 / fd_us
+                log.debug("measure_fps: FrameDuration=%dus → %.2f fps", fd_us, fps)
+                return fps
+        except Exception as exc:
+            log.warning("measure_fps failed: %s", exc)
+        return DEFAULT_VIDEO_FPS
 
 
 camera_manager = CameraManager()

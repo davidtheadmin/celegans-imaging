@@ -24,6 +24,7 @@ from capture import load_master_flat as _load_master_flat  # noqa: E402
 
 DEFAULT_BITRATE = 25_000_000
 DEFAULT_DURATION = 30
+DEFAULT_VIDEO_FPS = 30  # fallback; actual fps queried from camera before recording
 
 
 # ------------------------------------------------------------------
@@ -73,14 +74,17 @@ def save_jpeg(arr: np.ndarray, path: Path, quality: int = 90) -> None:
 # ffmpeg wrapping
 # ------------------------------------------------------------------
 
-def wrap_h264(h264_path: Path) -> Path:
-    """Try to remux .h264 -> .mp4 with ffmpeg. Falls back to raw .h264."""
+def wrap_h264(h264_path: Path, fps: float = DEFAULT_VIDEO_FPS) -> Path:
+    """Remux .h264 -> .mp4 with correct framerate. Falls back to raw .h264.
+    -r before -i is the correct flag for the H264 demuxer (generates PTS from
+    frame count); -framerate is a V4L2/device option and is silently ignored
+    for file inputs."""
     mp4_path = h264_path.with_suffix(".mp4")
     try:
         result = subprocess.run(
             [
                 "ffmpeg", "-y",
-                "-framerate", "30",
+                "-r", f"{fps:.6f}",
                 "-i", str(h264_path),
                 "-c", "copy",
                 str(mp4_path),
@@ -114,6 +118,8 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
 
 
 def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> dict:
+    fps = cam_mgr.measure_fps()
+    log.debug("free_video: measured %.2f fps", fps)
     ts = _ts()
     h264_path = _free_dir() / f"{ts}_video.h264"
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
@@ -121,7 +127,7 @@ def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> 
         time.sleep(duration_s)
     finally:
         cam_mgr.stop_video_recording()
-    final = wrap_h264(h264_path)
+    final = wrap_h264(h264_path, fps=fps)
     return {"path": str(final), "filename": final.name, "duration_s": duration_s}
 
 
@@ -135,6 +141,8 @@ def plate_motility(
     duration_s: int,
     bitrate_bps: int = DEFAULT_BITRATE,
 ) -> dict:
+    fps = cam_mgr.measure_fps()
+    log.debug("plate_motility: measured %.2f fps", fps)
     ts = _ts()
     h264_path = plate_dir / f"{ts}_video.h264"
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
@@ -142,7 +150,7 @@ def plate_motility(
         time.sleep(duration_s)
     finally:
         cam_mgr.stop_video_recording()
-    final = wrap_h264(h264_path)
+    final = wrap_h264(h264_path, fps=fps)
     return {
         "path": str(final),
         "filename": final.name,
