@@ -569,6 +569,7 @@ function renderSessionCapture() {
     body.querySelectorAll('.btn-quadrant').forEach(btn => {
       btn.addEventListener('click', () => captureQuadrant(sess.id, plate.id, btn.dataset.q, btn));
     });
+    markCapturedQuadrants(sess.id, plate.id);
 
   } else {
     body.innerHTML = `
@@ -635,6 +636,19 @@ async function captureQuadrant(sessionId, plateId, quadrant, btn) {
     announce(`Capture failed: ${err.message}`);
     btn.disabled = false;
   }
+}
+
+async function markCapturedQuadrants(sessionId, plateId) {
+  try {
+    const files = await apiJson(`/sessions/${sessionId}/plates/${plateId}/files`);
+    const captured = new Set(
+      files.map(f => { const m = f.filename.match(/_([A-Z]{2})\.jpg$/i); return m ? m[1].toUpperCase() : null; })
+           .filter(Boolean)
+    );
+    document.querySelectorAll('.btn-quadrant').forEach(btn => {
+      btn.classList.toggle('captured', captured.has(btn.dataset.q));
+    });
+  } catch {}
 }
 
 // ── Thumbnail strip ────────────────────────────────────────────────────────────
