@@ -47,10 +47,15 @@ class CameraManager:
             )
             cam.configure(config)
             cam.start()
-            # Cap AE shutter: accept darker image rather than multi-second freezes.
-            cam.set_controls({"ExposureTimeMax": settings.MAX_AUTO_SHUTTER_US})
-            log.info("Camera: AE shutter cap set to %d µs (%.0f ms)",
-                     settings.MAX_AUTO_SHUTTER_US, settings.MAX_AUTO_SHUTTER_US / 1000)
+            # Cap AE shutter via FrameDurationLimits (min_us, max_us).
+            # ExposureTimeMax is not a valid picamera2 control; FrameDurationLimits
+            # is the correct mechanism — it constrains both shutter and frame time.
+            min_frame_us = 1_000
+            cam.set_controls({"FrameDurationLimits": (min_frame_us, settings.MAX_AUTO_SHUTTER_US)})
+            log.info(
+                "Camera: FrameDurationLimits set to (%d, %d) µs — AE shutter capped at %.0f ms",
+                min_frame_us, settings.MAX_AUTO_SHUTTER_US, settings.MAX_AUTO_SHUTTER_US / 1000,
+            )
             time.sleep(2.0)  # AE / AWB settle
 
             # Measure actual fps while single-threaded (preview not yet started).

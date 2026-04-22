@@ -104,10 +104,14 @@ recordings via `camera_manager.video_fps`.
 ## Phase 5a polish (complete)
 
 ### AE shutter cap (`CELEGANS_MAX_AUTO_SHUTTER_US`, default 500 ms)
-`ExposureTimeMax` control applied at camera startup via `cam.set_controls()`. AE can never
-choose a shutter longer than the cap. Trade-off: image is darker in very dim conditions
-but captures never appear hung. Manual exposure (AE lock) is unaffected — the locked
-value is whatever AE settled on within the cap.
+**Clock sync** ✓ working.
+**AE cap** — second attempt pushed, unverified, needs lighting test.
+
+Attempt 1 used `ExposureTimeMax` — not a valid picamera2 control; exposure reports were
+stuck (~66 ms) and unresponsive to lighting. Attempt 2 replaces it with
+`FrameDurationLimits = (1000, MAX_AUTO_SHUTTER_US)`, which is the correct picamera2
+mechanism for bounding both frame time and AE shutter. Trade-off unchanged: image is
+darker in very dim conditions but captures never appear hung.
 
 ### Clock-sync helper
 `scripts/sync-pi-clock.sh` — sets Pi clock from laptop system time via SSH.
@@ -123,4 +127,11 @@ value is whatever AE settled on within the cap.
 
 ## Resumed in next session
 
-**Phase 5a** main work: manifest endpoints, ack tracking, retention daemon, /status extension.
+1. **Verify AE cap** in bright/dim conditions. If still broken (exposure still stuck or
+   unresponsive), investigate properly: introspect `cam.camera_controls` at startup to
+   see what controls are actually available, and cross-reference picamera2 / libcamera
+   docs for the correct AE constraint API.
+2. **Phase 5a step 2**: SHA256 caching at capture time — write `.sha256` sibling after
+   every capture in all four paths (`free_still`, `free_video`, `plate_motility`,
+   `plate_survival`).
+3. Then: manifest endpoints, ack endpoints, retention daemon, /status extension.
