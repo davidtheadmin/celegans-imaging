@@ -1,3 +1,9 @@
+# Phase 5a — IN PROGRESS
+
+Polish items complete (see below). Main work (manifests, acks, retention) in progress.
+
+---
+
 # Phase 3 — COMPLETE
 
 All backend and frontend work for Phase 3 is merged, pushed, and verified on hardware.
@@ -95,11 +101,26 @@ recordings via `camera_manager.video_fps`.
 
 ---
 
+## Phase 5a polish (complete)
+
+### AE shutter cap (`CELEGANS_MAX_AUTO_SHUTTER_US`, default 500 ms)
+`ExposureTimeMax` control applied at camera startup via `cam.set_controls()`. AE can never
+choose a shutter longer than the cap. Trade-off: image is darker in very dim conditions
+but captures never appear hung. Manual exposure (AE lock) is unaffected — the locked
+value is whatever AE settled on within the cap.
+
+### Clock-sync helper
+`scripts/sync-pi-clock.sh` — sets Pi clock from laptop system time via SSH.
+
+---
+
+## Useful operations
+
+- **Sync Pi clock** (no internet needed): `./scripts/sync-pi-clock.sh` — run at the start
+  of each session when working at a location with no Pi internet access.
+
+---
+
 ## Resumed in next session
 
-**Phase 5a** is the next planned work.
-
-Phase 5a scope (to be confirmed at session start):
-- Pi-side retention daemon: background process that watches `celegans-data/` and enforces storage limits / age-based cleanup
-- File manifest endpoints: API to list all sessions + plates + files in a single response (avoids N+1 calls from a future analysis UI)
-- Possibly: analysis service skeleton (`analysis/` directory) and motility scoring groundwork
+**Phase 5a** main work: manifest endpoints, ack tracking, retention daemon, /status extension.

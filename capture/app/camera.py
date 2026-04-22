@@ -11,6 +11,8 @@ from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FileOutput
 
+from .config import settings
+
 log = logging.getLogger(__name__)
 
 FULL_W, FULL_H = 4056, 3040
@@ -45,6 +47,10 @@ class CameraManager:
             )
             cam.configure(config)
             cam.start()
+            # Cap AE shutter: accept darker image rather than multi-second freezes.
+            cam.set_controls({"ExposureTimeMax": settings.MAX_AUTO_SHUTTER_US})
+            log.info("Camera: AE shutter cap set to %d µs (%.0f ms)",
+                     settings.MAX_AUTO_SHUTTER_US, settings.MAX_AUTO_SHUTTER_US / 1000)
             time.sleep(2.0)  # AE / AWB settle
 
             # Measure actual fps while single-threaded (preview not yet started).
