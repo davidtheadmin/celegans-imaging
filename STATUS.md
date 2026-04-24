@@ -105,13 +105,20 @@ recordings via `camera_manager.video_fps`.
 
 ### AE shutter cap (`CELEGANS_MAX_AUTO_SHUTTER_US`, default 500 ms)
 **Clock sync** ✓ working.
-**AE cap** — second attempt pushed, unverified, needs lighting test.
+**AE cap** ✓ verified in bright, normal, and dim lighting.
 
 Attempt 1 used `ExposureTimeMax` — not a valid picamera2 control; exposure reports were
 stuck (~66 ms) and unresponsive to lighting. Attempt 2 replaces it with
 `FrameDurationLimits = (1000, MAX_AUTO_SHUTTER_US)`, which is the correct picamera2
 mechanism for bounding both frame time and AE shutter. Trade-off unchanged: image is
 darker in very dim conditions but captures never appear hung.
+
+**Observed behaviour**: AE effectively capped at ~66.7 ms (bright: 0.9 ms, normal: 66.7 ms,
+very dim: 66.7 ms). The 66.7 ms ceiling corresponds to 1/15 s frame duration — picamera2
+pins the frame period there regardless of the 500 ms `FrameDurationLimits` upper bound we
+set. Root cause unclear (likely the video config's implicit frame rate or the encoder's
+requirement). Effect is the desired one: captures can never hang for more than a few tens
+of ms even in abysmal lighting. **Revisit only if we ever need >67 ms exposure.**
 
 ### Clock-sync helper
 `scripts/sync-pi-clock.sh` — sets Pi clock from laptop system time via SSH.
@@ -125,13 +132,12 @@ darker in very dim conditions but captures never appear hung.
 
 ---
 
-## Resumed in next session
+## Phase 5a main work — in progress
 
-1. **Verify AE cap** in bright/dim conditions. If still broken (exposure still stuck or
-   unresponsive), investigate properly: introspect `cam.camera_controls` at startup to
-   see what controls are actually available, and cross-reference picamera2 / libcamera
-   docs for the correct AE constraint API.
-2. **Phase 5a step 2**: SHA256 caching at capture time — write `.sha256` sibling after
-   every capture in all four paths (`free_still`, `free_video`, `plate_motility`,
-   `plate_survival`).
-3. Then: manifest endpoints, ack endpoints, retention daemon, /status extension.
+Steps in order:
+1. **SHA256 caching at capture time** — `.sha256` sibling written after every capture in all four paths.
+2. **Manifest endpoints** — `/sessions/{id}/manifest`, `/capture/free/manifest`, `/manifest`.
+3. **Ack endpoints** — POST to mark files transferred; sha256 verification; `.acked` marker.
+4. **Retention daemon** — `capture/retention.py`; space-pressure + age eviction; dry-run flag.
+5. **Systemd timer** — `celegans-retention.timer` every 15 min.
+6. **/status extension** — unsynced counts, oldest age, last retention run.
