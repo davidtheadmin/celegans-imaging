@@ -1,6 +1,6 @@
-# Phase 5a — IN PROGRESS
+# Phase 5a — COMPLETE (pending Pi deployment + verification)
 
-Polish items complete (see below). Main work (manifests, acks, retention) in progress.
+All six steps committed and pushed. Deploy to Pi, then verify per the checklist below.
 
 ---
 
@@ -132,12 +132,33 @@ of ms even in abysmal lighting. **Revisit only if we ever need >67 ms exposure.*
 
 ---
 
-## Phase 5a main work — in progress
+## Phase 5a main work — complete
 
-Steps in order:
-1. **SHA256 caching at capture time** — `.sha256` sibling written after every capture in all four paths.
-2. **Manifest endpoints** — `/sessions/{id}/manifest`, `/capture/free/manifest`, `/manifest`.
-3. **Ack endpoints** — POST to mark files transferred; sha256 verification; `.acked` marker.
-4. **Retention daemon** — `capture/retention.py`; space-pressure + age eviction; dry-run flag.
-5. **Systemd timer** — `celegans-retention.timer` every 15 min.
-6. **/status extension** — unsynced counts, oldest age, last retention run.
+All six steps committed and pushed. Verification needed on Pi:
+
+1. **SHA256 caching** ✓ committed — capture one of each type, confirm `.sha256` appears.
+2. **Manifest endpoints** ✓ committed — curl `/manifest`, `/sessions/{id}/manifest`, `/capture/free/manifest`.
+3. **Ack endpoints** ✓ committed — ack a file, verify `.acked` marker; wrong sha256 → 409.
+4. **Retention daemon** ✓ committed — `--dry-run` with a backdated `.acked` file; then live run.
+5. **Systemd timer** ✓ committed — deploy `.service` + `.timer`, `systemctl list-timers`.
+6. **/status extension** ✓ committed — check unsynced fields and `last_retention_run_at` in `/status`.
+
+### Deploy commands for Pi
+
+```bash
+ssh celegans "cd celegans-imaging && git pull && sudo systemctl restart celegans-capture"
+
+# Step 5 — retention timer (one-time install)
+ssh celegans "sudo cp celegans-imaging/deploy/celegans-retention.{service,timer} /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now celegans-retention.timer"
+```
+
+### Retention test recipe
+
+```bash
+# Capture a file, ack it, backdate the .acked marker
+ssh celegans "touch -d '2 hours ago' /home/pi/celegans-data/freecapture/YYYY-MM-DD/FILE.jpg.acked"
+ssh celegans "cd celegans-imaging && .venv/bin/python -m capture.retention --dry-run"
+# Confirm the backdated file appears as eligible; then run live:
+ssh celegans "cd celegans-imaging && .venv/bin/python -m capture.retention"
+# Check it moved to .trash/
+```
