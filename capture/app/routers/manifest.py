@@ -2,9 +2,10 @@ import asyncio
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from ..auth import require_token
 from ..config import settings
@@ -121,3 +122,60 @@ async def top_manifest():
         "sessions": list(session_manifests),
         "freecapture": free,
     }
+
+
+# ------------------------------------------------------------------
+# Ack helpers
+# ------------------------------------------------------------------
+
+class AckRequest(BaseModel):
+    relative_path: str
+    sha256: str
+
+
+def _do_ack(file_path: Path) -> dict:
+    """Write .acked marker atomically. Returns {acked, acked_at}."""
+    acked_path = file_path.parent / (file_path.name + ".acked")
+    acked_path.touch()
+    acked_at = datetime.fromtimestamp(
+        acked_path.stat().st_mtime, tz=timezone.utc
+    ).isoformat()
+    return {"acked": True, "acked_at": acked_at}
+
+
+def _resolve_and_ack(base_dir: Path, relative_path: str, supplied_sha256: str) -> dict:
+    # Reject path traversal
+    rel = Path(relative_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise HTTPException(400, "Invalid relative_path")
+    file_path = (base_dir / rel).resolve()
+    if not str(file_path).startswith(str(base_dir.resolve())):
+        raise HTTPException(403, "Forbidden")
+    if not file_path.is_file():
+        raise HTTPException(404, "File not found")
+    actual = capture_ops.read_sha256(file_path)
+    if actual != supplied_sha256.lower():
+        raise HTTPException(
+            409,
+            f"SHA256 mismatch: supplied {supplied_sha256[:12]}… does not match "
+            f"stored {(actual or '')[:12]}…",
+        )
+    return _do_ack(file_path)
+
+
+@router.post("/sessions/{session_id}/files/ack", dependencies=[Depends(require_token)])
+async def ack_session_file(session_id: str, req: AckRequest):
+    # Validate session exists
+    session_store.get_session(session_id)
+    base = Path(settings.DATA_ROOT) / "sessions" / session_id
+    return await asyncio.to_thread(
+        _resolve_and_ack, base, req.relative_path, req.sha256
+    )
+
+
+@router.post("/capture/free/files/ack", dependencies=[Depends(require_token)])
+async def ack_free_file(req: AckRequest):
+    base = Path(settings.DATA_ROOT) / "freecapture"
+    return await asyncio.to_thread(
+        _resolve_and_ack, base, req.relative_path, req.sha256
+    )
