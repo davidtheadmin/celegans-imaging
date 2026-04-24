@@ -1,6 +1,6 @@
 """
 Retention daemon: evict acked files when disk is low or files age out.
-Run as: python -m capture.retention [--dry-run]
+Run as: python -m capture.retention [--dry-run] [--verbose]
 """
 import argparse
 import logging
@@ -38,8 +38,8 @@ def _is_data_file(p: Path) -> bool:
     return True
 
 
-def _collect_eligible(now: datetime):
-    """Return list of (file_path, acked_at, reason) for trashable files."""
+def _collect_eligible(now: datetime, verbose: bool = False):
+    """Return list of (file_path, acked_at, reason) sorted by acked_at ascending."""
     grace_cutoff = now - timedelta(hours=GRACE_HOURS)
     age_cutoff = now - timedelta(days=MAX_AGE_DAYS)
     eligible = []
@@ -47,24 +47,48 @@ def _collect_eligible(now: datetime):
     for search_root in [DATA_ROOT / "sessions", DATA_ROOT / "freecapture"]:
         if not search_root.exists():
             continue
-        for p in search_root.rglob("*"):
+        for p in sorted(search_root.rglob("*")):
             if not _is_data_file(p):
                 continue
             acked_path = p.parent / (p.name + ".acked")
             if not acked_path.exists():
+                if verbose:
+                    log.info("  SKIP (no .acked) %s", p.relative_to(DATA_ROOT))
                 continue
             acked_mtime = datetime.fromtimestamp(acked_path.stat().st_mtime, tz=timezone.utc)
             file_mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
-            if acked_mtime <= grace_cutoff:
-                eligible.append((p, acked_mtime, "space pressure"))
-            elif file_mtime <= age_cutoff:
-                eligible.append((p, acked_mtime, "max age"))
+            grace_elapsed = acked_mtime <= grace_cutoff
+            age_exceeded = file_mtime <= age_cutoff
+
+            # Age violations take priority so they are always trashed regardless of disk state.
+            if age_exceeded:
+                reason = "max age"
+            elif grace_elapsed:
+                reason = "space pressure"
+            else:
+                if verbose:
+                    log.info(
+                        "  SKIP (grace not elapsed) %s  acked=%s  grace_cutoff=%s",
+                        p.relative_to(DATA_ROOT),
+                        acked_mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        grace_cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    )
+                continue
+
+            if verbose:
+                log.info(
+                    "  ELIGIBLE (%s) %s  acked=%s",
+                    reason,
+                    p.relative_to(DATA_ROOT),
+                    acked_mtime.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            eligible.append((p, acked_mtime, reason))
 
     eligible.sort(key=lambda x: x[1])
     return eligible
 
 
-def _trash_file(src: Path, dry_run: bool) -> int:
+def _trash_file(src: Path) -> int:
     """Move src + siblings (.sha256, .acked, thumbnail) to .trash/. Returns bytes freed."""
     rel = src.relative_to(DATA_ROOT)
     dest = DATA_ROOT / ".trash" / rel
@@ -74,25 +98,21 @@ def _trash_file(src: Path, dry_run: bool) -> int:
         dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
 
     size = src.stat().st_size
-    if not dry_run:
-        shutil.move(str(src), str(dest))
+    shutil.move(str(src), str(dest))
 
     for suffix in (".sha256", ".acked"):
         sib = src.parent / (src.name + suffix)
         if sib.exists():
-            sib_dest = dest.parent / (dest.name + suffix)
-            if not dry_run:
-                shutil.move(str(sib), str(sib_dest))
+            shutil.move(str(sib), str(dest.parent / (dest.name + suffix)))
 
     thumb_src = src.parent / ".thumbs" / (src.stem + ".jpg")
     if thumb_src.exists():
         thumb_dest = dest.parent / ".thumbs" / (dest.stem + ".jpg")
-        if not dry_run:
-            thumb_dest.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                shutil.move(str(thumb_src), str(thumb_dest))
-            except OSError:
-                pass
+        thumb_dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(thumb_src), str(thumb_dest))
+        except OSError:
+            pass
 
     return size
 
@@ -100,15 +120,20 @@ def _trash_file(src: Path, dry_run: bool) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Retention daemon for celegans-imaging")
     parser.add_argument("--dry-run", action="store_true", help="List eligible files, move nothing")
+    parser.add_argument("--verbose", action="store_true", help="Log every file examined with eligibility reasoning")
     args = parser.parse_args()
     dry_run = args.dry_run
+    verbose = args.verbose
 
     now = datetime.now(timezone.utc)
     free_gb = _disk_free_gb()
-    log.info("Disk free: %.2f GB (min=%.1f, target=%.1f)", free_gb, MIN_FREE_GB, TARGET_FREE_GB)
+    log.info("Disk free: %.2f GB (min=%.1f, target=%.1f, grace=%.1fh, max_age=%gd)",
+             free_gb, MIN_FREE_GB, TARGET_FREE_GB, GRACE_HOURS, MAX_AGE_DAYS)
 
-    # Collect eligible before early-exit check so we can log age violations
-    eligible = _collect_eligible(now)
+    if verbose:
+        log.info("Scanning eligible files...")
+
+    eligible = _collect_eligible(now, verbose=verbose)
     has_age_violation = any(r == "max age" for _, _, r in eligible)
 
     if free_gb >= MIN_FREE_GB and not has_age_violation:
@@ -116,15 +141,26 @@ def main():
         _touch_last_run(dry_run)
         return
 
+    log.info("Found %d eligible file(s) (%d age violations)", len(eligible),
+             sum(1 for _, _, r in eligible if r == "max age"))
+
     if dry_run:
         log.info("DRY RUN — no files will be moved")
+
+    # Stop when we've freed enough to be above BOTH the target and the minimum.
+    # Using max() handles the case where MIN > TARGET (e.g. in testing), so we
+    # never declare victory until disk exceeds whichever threshold triggered the run.
+    stop_threshold_gb = max(TARGET_FREE_GB, MIN_FREE_GB)
 
     trashed_count = 0
     trashed_bytes = 0
 
     for file_path, acked_at, reason in eligible:
         current_free = _disk_free_gb()
-        if reason != "max age" and current_free >= TARGET_FREE_GB:
+        # Age-violation files are always trashed; space-pressure files stop at threshold.
+        if reason != "max age" and current_free >= stop_threshold_gb:
+            log.info("Reached %.2f GB free (threshold %.1f GB), stopping space-pressure eviction",
+                     current_free, stop_threshold_gb)
             break
         size = file_path.stat().st_size
         rel = file_path.relative_to(DATA_ROOT)
@@ -137,7 +173,7 @@ def main():
             reason,
         )
         if not dry_run:
-            trashed_bytes += _trash_file(file_path, dry_run=False)
+            trashed_bytes += _trash_file(file_path)
         else:
             trashed_bytes += size
         trashed_count += 1
@@ -150,7 +186,7 @@ def main():
         )
     else:
         log.info(
-            "Dry run complete — %d file(s) eligible, %.1f MB would be freed",
+            "Dry run complete — %d file(s) would be trashed, %.1f MB would be freed",
             trashed_count, trashed_bytes / 1e6,
         )
 
