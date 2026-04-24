@@ -1,0 +1,13 @@
+[Unit]
+Description=C. elegans Imaging Station — retention daemon (oneshot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/celegans-imaging
+EnvironmentFile=/home/pi/celegans-imaging/capture/.env
+ExecStart=/home/pi/celegans-imaging/.venv/bin/python -m capture.retention
+
+[Install]
+WantedBy=multi-user.target

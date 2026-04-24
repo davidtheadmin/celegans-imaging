@@ -1,0 +1,9 @@
+[Unit]
+Description=C. elegans Imaging Station — retention daemon timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target
