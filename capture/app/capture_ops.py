@@ -1,3 +1,4 @@
+import hashlib
 import io
 import logging
 import shutil
@@ -44,6 +45,31 @@ def _free_dir() -> Path:
 
 def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+
+def _write_sha256(path: Path) -> str:
+    """Compute SHA256 of path and write hex digest to <path>.sha256. Returns the digest."""
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    digest = h.hexdigest()
+    sha_path = path.parent / (path.name + ".sha256")
+    tmp = sha_path.with_suffix(".tmp")
+    tmp.write_text(digest)
+    tmp.replace(sha_path)
+    log.debug("_write_sha256: %s -> %s", path.name, digest[:12])
+    return digest
+
+
+def read_sha256(path: Path) -> Optional[str]:
+    """Read cached SHA256 for path, or compute+cache it lazily if missing."""
+    sha_path = path.parent / (path.name + ".sha256")
+    if sha_path.exists():
+        return sha_path.read_text().strip()
+    if not path.exists():
+        return None
+    return _write_sha256(path)
 
 
 # ------------------------------------------------------------------
@@ -122,6 +148,7 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
     t0 = time.perf_counter()
     save_jpeg(arr, path)
     log.debug("[TIMING] free_still: save_jpeg=%.3fs", time.perf_counter() - t0)
+    _write_sha256(path)
     return {"path": str(path), "filename": filename}
 
 
@@ -139,6 +166,7 @@ def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> 
         cam_mgr.stop_video_recording()
         log.debug("free_video: recording stopped (including drain pause)")
     final = wrap_h264(h264_path, fps=fps)
+    _write_sha256(final)
     log.debug("free_video: returning %s", final.name)
     return {"path": str(final), "filename": final.name, "duration_s": duration_s}
 
@@ -166,6 +194,7 @@ def plate_motility(
         cam_mgr.stop_video_recording()
         log.debug("plate_motility: recording stopped (including drain pause)")
     final = wrap_h264(h264_path, fps=fps)
+    _write_sha256(final)
     log.debug("plate_motility: returning %s", final.name)
     return {
         "path": str(final),
@@ -190,6 +219,7 @@ def plate_survival(
     t0 = time.perf_counter()
     save_jpeg(arr, path)
     log.debug("[TIMING] plate_survival: save_jpeg=%.3fs", time.perf_counter() - t0)
+    _write_sha256(path)
     return {
         "path": str(path),
         "filename": filename,
