@@ -1,6 +1,10 @@
+import asyncio
 import shutil
+import time
 from contextlib import asynccontextmanager
-from typing import List
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +15,53 @@ from .config import settings
 from .models import CreatePlateRequest, CreateSessionRequest, Session
 from . import sessions as session_store
 from .routers import camera_ctrl, free_capture, manifest, plate_capture, preview
+
+_STATUS_CACHE_TTL = 30.0
+_unsynced_cache: Optional[dict] = None
+_unsynced_cache_at: float = 0.0
+
+
+def _compute_unsynced() -> dict:
+    data_root = Path(settings.DATA_ROOT)
+    count = 0
+    total_bytes = 0
+    oldest_age_s: Optional[float] = None
+    now = time.time()
+
+    for search_root in [data_root / "sessions", data_root / "freecapture"]:
+        if not search_root.exists():
+            continue
+        for p in search_root.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.name.startswith("."):
+                continue
+            if ".thumbs" in p.parts:
+                continue
+            if p.suffix in {".sha256", ".acked"}:
+                continue
+            if (p.parent / (p.name + ".acked")).exists():
+                continue
+            st = p.stat()
+            count += 1
+            total_bytes += st.st_size
+            age = now - st.st_mtime
+            if oldest_age_s is None or age > oldest_age_s:
+                oldest_age_s = age
+
+    return {
+        "unsynced_file_count": count,
+        "unsynced_total_bytes": total_bytes,
+        "oldest_unsynced_age_seconds": int(oldest_age_s) if oldest_age_s is not None else None,
+    }
+
+
+async def _get_unsynced() -> dict:
+    global _unsynced_cache, _unsynced_cache_at
+    if _unsynced_cache is None or (time.monotonic() - _unsynced_cache_at) > _STATUS_CACHE_TTL:
+        _unsynced_cache = await asyncio.to_thread(_compute_unsynced)
+        _unsynced_cache_at = time.monotonic()
+    return _unsynced_cache
 
 
 @asynccontextmanager
@@ -37,12 +88,23 @@ async def health():
 @app.get("/status", dependencies=[Depends(require_token)])
 async def status():
     usage = shutil.disk_usage(settings.DATA_ROOT)
+    unsynced = await _get_unsynced()
+
+    last_run_at = None
+    marker = Path(settings.DATA_ROOT) / ".retention-last-run"
+    if marker.exists():
+        last_run_at = datetime.fromtimestamp(
+            marker.stat().st_mtime, tz=timezone.utc
+        ).isoformat()
+
     return {
         "disk_free_gb": round(usage.free / 1e9, 2),
         "disk_total_gb": round(usage.total / 1e9, 2),
         "data_root": settings.DATA_ROOT,
         "camera_ready": camera_manager.ready,
         "ae_locked": camera_manager.ae_locked,
+        **unsynced,
+        "last_retention_run_at": last_run_at,
     }
 
 
