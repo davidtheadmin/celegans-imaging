@@ -63,7 +63,7 @@ async def list_freecapture_files(
 
     files = []
     for f in sorted(date_dir.iterdir()):
-        if f.is_file() and not f.name.startswith("."):
+        if f.is_file() and not f.name.startswith(".") and f.suffix not in capture_ops._SIDECAR_SUFFIXES:
             stat = f.stat()
             files.append({
                 "filename": f.name,

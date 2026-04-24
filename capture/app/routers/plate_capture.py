@@ -70,7 +70,7 @@ async def list_plate_files(session_id: str, plate_id: str) -> List[dict]:
 
     files = []
     for f in sorted(plate_dir.iterdir()):
-        if f.is_file() and not f.name.startswith('.'):
+        if f.is_file() and not f.name.startswith('.') and f.suffix not in capture_ops._SIDECAR_SUFFIXES:
             stat = f.stat()
             files.append({
                 "filename": f.name,

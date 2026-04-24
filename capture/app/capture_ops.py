@@ -235,6 +235,7 @@ def plate_survival(
 THUMB_LONG = 400
 _VIDEO_EXTS = {".mp4", ".h264", ".mkv"}
 _THUMB_EXTS = {".jpg", ".jpeg"} | _VIDEO_EXTS
+_SIDECAR_SUFFIXES = {".sha256", ".acked"}  # never shown in file listings
 
 
 def free_base() -> Path:
