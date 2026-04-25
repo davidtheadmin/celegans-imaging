@@ -62,7 +62,9 @@ def _build_session_manifest(session_id: str) -> dict:
         for p in sorted(plate_dir.rglob("*")):
             if _is_manifest_file(p):
                 rel = str(p.relative_to(session_dir)).replace("\\", "/")
-                files.append(_file_entry(p, rel))
+                entry = _file_entry(p, rel)
+                entry["plate_id"] = plate.id
+                files.append(entry)
     total_bytes = sum(f["size_bytes"] for f in files)
     return {
         "session_id": session_id,
