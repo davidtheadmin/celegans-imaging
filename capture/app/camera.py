@@ -242,7 +242,7 @@ class CameraManager:
         with self._capture_lock:
             log.debug("stop_video_recording: lock acquired after %.3fs", time.perf_counter() - t0)
             t1 = time.perf_counter()
-            self._cam.stop_recording()
+            self._cam.stop_encoder()
             log.debug("stop_video_recording: cam.stop_recording returned in %.3fs", time.perf_counter() - t1)
             self._encoder = None  # release encoder reference; prevents GC race on next start_recording
             self._recording = False
