@@ -129,6 +129,10 @@ of ms even in abysmal lighting. **Revisit only if we ever need >67 ms exposure.*
 
 - **Sync Pi clock** (no internet needed): `./scripts/sync-pi-clock.sh` — run at the start
   of each session when working at a location with no Pi internet access.
+- **Data folder migration** (one-time, after deploying feat/polish): stop the service, run
+  `bash scripts/rename_data_folders.sh` on the Pi, then restart. Also run the equivalent
+  `mv` commands in `Documents\WormScan\` on the laptop mirror
+  (`sessions` → `experiments`, `freecapture` → `pictures`).
 
 ---
 

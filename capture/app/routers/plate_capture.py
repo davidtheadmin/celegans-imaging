@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from ..auth import require_token
 from ..camera import camera_manager
+from ..config import settings
 from .. import capture_ops
 from .. import sessions as session_store
 
@@ -134,6 +135,6 @@ async def delete_plate_file(session_id: str, plate_id: str, filename: str):
     if not file_path.is_file():
         raise HTTPException(404, "File not found")
 
-    rel_path = f"sessions/{session_id}/plates/{plate.folder_name}/{safe_name}"
+    rel_path = f"{settings.EXPERIMENTS_DIR}/{session_id}/plates/{plate.folder_name}/{safe_name}"
     trash_path = await asyncio.to_thread(capture_ops.trash_file, file_path, rel_path)
     return {"status": "trashed", "trash_path": str(trash_path)}

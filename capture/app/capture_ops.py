@@ -38,7 +38,7 @@ def _flat_dir() -> Path:
 
 def _free_dir() -> Path:
     today = datetime.now().strftime("%Y-%m-%d")
-    d = Path(settings.DATA_ROOT) / "freecapture" / today
+    d = Path(settings.DATA_ROOT) / settings.PICTURES_DIR / today
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -239,7 +239,7 @@ _SIDECAR_SUFFIXES = {".sha256", ".acked"}  # never shown in file listings
 
 
 def free_base() -> Path:
-    return Path(settings.DATA_ROOT) / "freecapture"
+    return Path(settings.DATA_ROOT) / settings.PICTURES_DIR
 
 
 def trash_base() -> Path:

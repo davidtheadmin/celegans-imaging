@@ -16,6 +16,9 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 DATA_ROOT = Path(os.environ.get("CELEGANS_DATA_ROOT", "/home/pi/celegans-data"))
+# Must match EXPERIMENTS_DIR / PICTURES_DIR in capture/app/config.py
+EXPERIMENTS_DIR = "experiments"
+PICTURES_DIR = "pictures"
 GRACE_HOURS = float(os.environ.get("CELEGANS_RETENTION_GRACE_HOURS", "1"))
 MIN_FREE_GB = float(os.environ.get("CELEGANS_RETENTION_MIN_FREE_GB", "5"))
 TARGET_FREE_GB = float(os.environ.get("CELEGANS_RETENTION_TARGET_FREE_GB", "10"))
@@ -44,7 +47,7 @@ def _collect_eligible(now: datetime, verbose: bool = False):
     age_cutoff = now - timedelta(days=MAX_AGE_DAYS)
     eligible = []
 
-    for search_root in [DATA_ROOT / "sessions", DATA_ROOT / "freecapture"]:
+    for search_root in [DATA_ROOT / EXPERIMENTS_DIR, DATA_ROOT / PICTURES_DIR]:
         if not search_root.exists():
             continue
         for p in sorted(search_root.rglob("*")):

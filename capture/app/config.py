@@ -6,6 +6,8 @@ class Settings(BaseSettings):
 
     TOKEN: str
     DATA_ROOT: str = "/home/pi/celegans-data"
+    EXPERIMENTS_DIR: str = "experiments"   # on-disk folder name for session data
+    PICTURES_DIR: str = "pictures"         # on-disk folder name for free captures
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     MAX_AUTO_SHUTTER_US: int = 500_000  # AE shutter cap — prefer darker image over multi-second freeze

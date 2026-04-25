@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from ..auth import require_token
 from ..camera import camera_manager
+from ..config import settings
 from .. import capture_ops
 
 router = APIRouter(prefix="/capture/free")
@@ -125,6 +126,6 @@ async def delete_freecapture_file(date: str, filename: str):
     if not file_path.is_file():
         raise HTTPException(404, "File not found")
 
-    rel_path = f"freecapture/{date}/{safe_name}"
+    rel_path = f"{settings.PICTURES_DIR}/{date}/{safe_name}"
     trash_path = await asyncio.to_thread(capture_ops.trash_file, file_path, rel_path)
     return {"status": "trashed", "trash_path": str(trash_path)}

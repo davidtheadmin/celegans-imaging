@@ -11,7 +11,7 @@ from .models import CreatePlateRequest, CreateSessionRequest, Plate, Session
 
 
 def _sessions_dir() -> Path:
-    return Path(settings.DATA_ROOT) / "sessions"
+    return Path(settings.DATA_ROOT) / settings.EXPERIMENTS_DIR
 
 
 def _session_dir(session_id: str) -> Path:
@@ -134,7 +134,7 @@ def delete_plate(session_id: str, plate_id: str) -> Session:
 
     plate_dir = get_plate_dir(session_id, plate.folder_name)
     trash_dest = (
-        Path(settings.DATA_ROOT) / ".trash" / "sessions" / session_id / "plates" / plate.folder_name
+        Path(settings.DATA_ROOT) / ".trash" / settings.EXPERIMENTS_DIR / session_id / "plates" / plate.folder_name
     )
     trash_dest.parent.mkdir(parents=True, exist_ok=True)
     if trash_dest.exists():

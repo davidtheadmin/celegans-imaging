@@ -53,7 +53,7 @@ def _file_entry(path: Path, relative_path: str) -> dict:
 
 def _build_session_manifest(session_id: str) -> dict:
     session = session_store.get_session(session_id)
-    session_dir = Path(settings.DATA_ROOT) / "sessions" / session_id
+    session_dir = Path(settings.DATA_ROOT) / settings.EXPERIMENTS_DIR / session_id
     files = []
     for plate in session.plates:
         plate_dir = session_dir / "plates" / plate.folder_name
@@ -76,7 +76,7 @@ def _build_session_manifest(session_id: str) -> dict:
 
 
 def _build_free_manifest(date_filter: Optional[str] = None) -> dict:
-    free_base = Path(settings.DATA_ROOT) / "freecapture"
+    free_base = Path(settings.DATA_ROOT) / settings.PICTURES_DIR
     files = []
     if date_filter:
         dirs = [free_base / date_filter] if (free_base / date_filter).is_dir() else []
@@ -169,7 +169,7 @@ def _resolve_and_ack(base_dir: Path, relative_path: str, supplied_sha256: str) -
 async def ack_session_file(session_id: str, req: AckRequest):
     # Validate session exists
     session_store.get_session(session_id)
-    base = Path(settings.DATA_ROOT) / "sessions" / session_id
+    base = Path(settings.DATA_ROOT) / settings.EXPERIMENTS_DIR / session_id
     return await asyncio.to_thread(
         _resolve_and_ack, base, req.relative_path, req.sha256
     )
@@ -177,7 +177,7 @@ async def ack_session_file(session_id: str, req: AckRequest):
 
 @router.post("/capture/free/files/ack", dependencies=[Depends(require_token)])
 async def ack_free_file(req: AckRequest):
-    base = Path(settings.DATA_ROOT) / "freecapture"
+    base = Path(settings.DATA_ROOT) / settings.PICTURES_DIR
     return await asyncio.to_thread(
         _resolve_and_ack, base, req.relative_path, req.sha256
     )

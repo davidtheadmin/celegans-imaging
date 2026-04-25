@@ -24,6 +24,10 @@ import requests
 
 log = logging.getLogger(__name__)
 
+# Must match EXPERIMENTS_DIR / PICTURES_DIR in capture/app/config.py
+_EXPERIMENTS_DIR = "experiments"
+_PICTURES_DIR = "pictures"
+
 
 # ---------------------------------------------------------------------------
 # Shared status object
@@ -289,7 +293,7 @@ class SyncAgent(threading.Thread):
             return 0, 0
 
         # relative_path format: "YYYY-MM-DD/filename"
-        local = mirror / "freecapture" / Path(rel)
+        local = mirror / _PICTURES_DIR / Path(rel)
         need_download = not (local.exists() and _sha256_file(local) == sha256)
 
         if need_download:
@@ -322,7 +326,7 @@ class SyncAgent(threading.Thread):
             return 0, 0
 
         # relative_path format: "plates/<folder_name>/<filename>"
-        local = mirror / "sessions" / sid / Path(rel)
+        local = mirror / _EXPERIMENTS_DIR / sid / Path(rel)
         need_download = not (local.exists() and _sha256_file(local) == sha256)
 
         if need_download:
