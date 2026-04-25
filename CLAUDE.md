@@ -36,6 +36,17 @@ capture/                  # FastAPI service (Phase 1+)
     └── static/
         └── index.html
 
+launcher/                 # Windows sync/launcher app (Phase 6)
+├── main.py               # entry point
+├── config.py             # settings dataclass, APPDATA persistence
+├── sync.py               # background sync thread
+├── ui.py                 # Tkinter main window + settings dialog
+├── requirements.txt      # requests (only)
+├── setup.bat             # one-time installer for non-technical users
+├── INSTALL.md            # end-user installation guide
+└── assets/
+    └── wormscan.ico      # placeholder app icon (replace later)
+
 deploy/
 └── celegans-capture.service   # systemd unit
 
@@ -44,6 +55,16 @@ scripts/
 
 capture.py                # standalone full-res capture script (do not modify)
 ```
+
+## Launcher — both launch paths are supported
+
+| Path | Command |
+|------|---------|
+| Dev (Git Bash, manual venv) | `source launcher/.venv/Scripts/activate && python launcher/main.py` |
+| End-user (desktop shortcut) | Double-click the WormScan icon created by `setup.bat` |
+
+`setup.bat` is additive and idempotent. Admin rights are not required — the venv lives
+inside the repo folder and the shortcut targets the current user's Desktop.
 
 ## Data layout (outside the repo)
 
