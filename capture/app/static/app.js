@@ -463,10 +463,18 @@ function renderSessionSidebar() {
       <span class="mode-badge ${esc(sess.assay_mode)}">${sess.assay_mode === 'motility' ? 'MOT' : 'SRV'}</span>
       <span class="s-name" title="${esc(sess.name)}">${esc(sess.name)}</span>
       <span class="s-date">${esc(fmtDate(sess.created_at))}</span>
+      <button class="sess-del-btn" aria-label="Delete experiment" title="Delete experiment">×</button>
     `;
-    hdr.addEventListener('click', () => toggleSession(sess.id));
+    hdr.addEventListener('click', e => {
+      if (e.target.classList.contains('sess-del-btn')) return;
+      toggleSession(sess.id);
+    });
     hdr.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleSession(sess.id); }
+    });
+    hdr.querySelector('.sess-del-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      confirmDeleteSession(sess);
     });
     item.appendChild(hdr);
 
@@ -498,10 +506,18 @@ function renderSessionSidebar() {
             <polyline points="3,2 7,5 3,8"/>
           </svg>
           <span class="cond-label">${esc(cond.name)} / ${esc(cond.condition_id)}</span>
-          <span class="cond-count">${cond.plates.length}</span>`;
-        condHdr.addEventListener('click', () => toggleCondition(sess.id, cond));
+          <span class="cond-count">${cond.plates.length}</span>
+          <button class="cond-del-btn" aria-label="Delete condition" title="Delete condition">×</button>`;
+        condHdr.addEventListener('click', e => {
+          if (e.target.classList.contains('cond-del-btn')) return;
+          toggleCondition(sess.id, cond);
+        });
         condHdr.addEventListener('keydown', e => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCondition(sess.id, cond); }
+        });
+        condHdr.querySelector('.cond-del-btn').addEventListener('click', e => {
+          e.stopPropagation();
+          confirmDeleteCondition(sess, cond);
         });
         condEl.appendChild(condHdr);
 
@@ -729,6 +745,51 @@ async function confirmDeletePlate(sessionId, plate) {
     }
     renderSessionSidebar();
     announce(`${itemLabel.charAt(0).toUpperCase() + itemLabel.slice(1)} ${n} deleted`);
+  } catch (err) {
+    announce(`Delete failed: ${err.message}`);
+  }
+}
+
+async function confirmDeleteSession(sess) {
+  const plateCount = sess.plates.length;
+  const countStr = plateCount === 1 ? '1 capture' : `${plateCount} captures`;
+  const msg = `Delete experiment "${sess.name}" and all ${countStr}?\nThis can be undone manually from .trash on the Pi.`;
+  if (!confirm(msg)) return;
+  const btn = document.querySelector(`.sess-del-btn[aria-label="Delete experiment"]`);
+  if (btn) btn.disabled = true;
+  try {
+    await api(`/sessions/${sess.id}`, { method: 'DELETE' });
+    S.sessions = S.sessions.filter(s => s.id !== sess.id);
+    if (S.activeSessionId === sess.id) {
+      S.activeSessionId = null;
+      S.activePlateId = null;
+      renderSessionCapture();
+    }
+    renderSessionSidebar();
+    announce(`Experiment "${sess.name}" deleted`);
+  } catch (err) {
+    if (btn) btn.disabled = false;
+    announce(`Delete failed: ${err.message}`);
+  }
+}
+
+async function confirmDeleteCondition(sess, cond) {
+  const itemLabel = sess.assay_mode === 'motility' ? 'video' : 'plate';
+  const n = cond.plates.length;
+  const countStr = n === 1 ? `1 ${itemLabel}` : `${n} ${itemLabel}s`;
+  const msg = `Delete condition "${cond.name} / ${cond.condition_id}" and all ${countStr}?\nThis can be undone manually from .trash on the Pi.`;
+  if (!confirm(msg)) return;
+  try {
+    const updated = await apiJson(`/sessions/${sess.id}/conditions/${encodeURIComponent(cond.condition_id)}`, { method: 'DELETE' });
+    const idx = S.sessions.findIndex(s => s.id === sess.id);
+    if (idx >= 0) S.sessions[idx] = updated;
+    const conditionHadActivePlate = cond.plates.some(p => p.id === S.activePlateId) && S.activeSessionId === sess.id;
+    if (conditionHadActivePlate) {
+      S.activePlateId = null;
+      renderSessionCapture();
+    }
+    renderSessionSidebar();
+    announce(`Condition "${cond.name} / ${cond.condition_id}" deleted`);
   } catch (err) {
     announce(`Delete failed: ${err.message}`);
   }

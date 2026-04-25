@@ -125,6 +125,42 @@ def add_plate(session_id: str, req: CreatePlateRequest) -> Session:
     return session
 
 
+def delete_session(session_id: str) -> None:
+    from fastapi import HTTPException
+    if not _manifest_path(session_id).exists():
+        raise HTTPException(404, "Session not found")
+    session_dir = _session_dir(session_id)
+    trash_dest = Path(settings.DATA_ROOT) / ".trash" / settings.EXPERIMENTS_DIR / session_id
+    if trash_dest.exists():
+        ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+        trash_dest = trash_dest.with_name(f"{session_id}_{ts}")
+    trash_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(session_dir), str(trash_dest))
+
+
+def delete_condition(session_id: str, condition_id: str) -> Session:
+    from fastapi import HTTPException
+    session = get_session(session_id)
+    targets = [p for p in session.plates if p.condition_id == condition_id]
+    if not targets:
+        raise HTTPException(404, "Condition not found or has no plates")
+    for plate in targets:
+        plate_dir = get_plate_dir(session_id, plate.folder_name)
+        trash_dest = (
+            Path(settings.DATA_ROOT) / ".trash" / settings.EXPERIMENTS_DIR
+            / session_id / "plates" / plate.folder_name
+        )
+        trash_dest.parent.mkdir(parents=True, exist_ok=True)
+        if trash_dest.exists():
+            ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+            trash_dest = trash_dest.with_name(f"{trash_dest.name}_{ts}")
+        if plate_dir.exists():
+            shutil.move(str(plate_dir), str(trash_dest))
+    session.plates = [p for p in session.plates if p.condition_id != condition_id]
+    _write_manifest(session)
+    return session
+
+
 def delete_plate(session_id: str, plate_id: str) -> Session:
     from fastapi import HTTPException
     session = get_session(session_id)

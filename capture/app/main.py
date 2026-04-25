@@ -128,4 +128,15 @@ async def add_plate(session_id: str, req: CreatePlateRequest) -> Session:
     return session_store.add_plate(session_id, req)
 
 
+@app.delete("/sessions/{session_id}", dependencies=[Depends(require_token)])
+async def delete_session(session_id: str):
+    await asyncio.to_thread(session_store.delete_session, session_id)
+    return {"status": "trashed", "session_id": session_id}
+
+
+@app.delete("/sessions/{session_id}/conditions/{condition_id}", dependencies=[Depends(require_token)])
+async def delete_condition(session_id: str, condition_id: str) -> Session:
+    return await asyncio.to_thread(session_store.delete_condition, session_id, condition_id)
+
+
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")

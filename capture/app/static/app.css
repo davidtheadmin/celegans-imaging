@@ -277,6 +277,15 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .plate-item:hover .plate-del-btn { display: block; }
 .plate-del-btn:hover { color: var(--danger); }
 
+.sess-del-btn, .cond-del-btn {
+  display: none; background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 14px; line-height: 1;
+  padding: 0 2px; flex-shrink: 0; margin-left: auto;
+}
+.session-hdr:hover .sess-del-btn,
+.cond-hdr:hover .cond-del-btn { display: block; }
+.sess-del-btn:hover, .cond-del-btn:hover { color: var(--danger); }
+
 .add-plate-btn {
   width: 100%; justify-content: flex-start; margin-top: 4px;
   background: transparent; border-color: transparent; color: var(--text-dim);
