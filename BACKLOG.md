@@ -42,3 +42,17 @@ Note: the launcher's recovery logic relies on Pi-relative paths matching
 the mirror structure. Renaming requires a stable mapping table held in
 the launcher, OR the launcher writes a `.wormscan-meta` marker per
 folder recording the original Pi path. Decide which when we pick this up.
+
+## UI: delete sessions and conditions, not just plates
+
+Currently the timeline only supports deleting individual plates (and free
+captures). Need bulk-delete operations:
+
+- Delete entire session: removes all plates + session.json. Soft-delete
+  to .trash/sessions/<sid>/ for recoverability.
+- Delete a condition within a session: removes all plates assigned to
+  that condition, but leaves the rest of the session intact.
+
+Both need confirmation dialogs ("Delete session 'UV survival run 3' and
+all 60 plates?"). Soft-delete semantics should match the existing
+per-plate delete so retention can clean up later.
