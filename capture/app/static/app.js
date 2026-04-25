@@ -441,7 +441,7 @@ function renderSessionSidebar() {
 
   if (S.sessions.length === 0) {
     list.innerHTML =
-      '<p style="padding:12px 14px;font-size:11px;color:var(--text-dim);margin:0">No sessions yet.</p>';
+      '<p style="padding:12px 14px;font-size:11px;color:var(--text-dim);margin:0">No experiments yet.</p>';
     return;
   }
 
@@ -475,6 +475,7 @@ function renderSessionSidebar() {
       sec.className = 'plates-section';
 
       const conditions = groupByCondition(sess.plates);
+      const itemLabel = sess.assay_mode === 'motility' ? 'video' : 'plate';
 
       if (conditions.length === 0) {
         sec.innerHTML =
@@ -515,8 +516,8 @@ function renderSessionSidebar() {
             el.setAttribute('tabindex', '0');
             el.innerHTML = `
               <span class="plate-dot"></span>
-              <span class="plate-name">plate ${String(plate.plate_number).padStart(2, '0')}</span>
-              <button class="plate-del-btn" aria-label="Delete plate" title="Delete plate">×</button>`;
+              <span class="plate-name">${itemLabel} ${String(plate.plate_number).padStart(2, '0')}</span>
+              <button class="plate-del-btn" aria-label="Delete ${itemLabel}" title="Delete ${itemLabel}">×</button>`;
             el.addEventListener('click', e => {
               if (e.target.classList.contains('plate-del-btn')) return;
               selectPlate(sess.id, plate.id);
@@ -541,7 +542,7 @@ function renderSessionSidebar() {
               <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)">
                 <span>Add</span>
                 <input class="apl-count mono" type="number" value="1" min="1" max="50" style="width:40px">
-                <span>plates from #${nextNum}</span>
+                <span>${itemLabel}s from #${nextNum}</span>
               </div>
               <div class="form-actions">
                 <button class="btn btn-sm btn-primary apl-submit">Add</button>
@@ -561,7 +562,7 @@ function renderSessionSidebar() {
             addPlatesBtn.className = 'btn btn-sm add-plate-btn';
             addPlatesBtn.innerHTML = `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
               <line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/>
-            </svg> Add plates`;
+            </svg> Add ${itemLabel}s`;
             addPlatesBtn.addEventListener('click', () => {
               S.addingPlatesFor = aplKey; renderSessionSidebar();
             });
@@ -600,12 +601,14 @@ function renderSessionSidebar() {
           </div>`;
 
         const errEl = form.querySelector('.ac-error');
+        const sessForPreview = S.sessions.find(s => s.id === sess.id);
+        const previewLabel = sessForPreview?.assay_mode === 'motility' ? 'video' : 'plate';
         const updatePreview = () => {
           const n = form.querySelector('.ac-name').value.trim() || 'Name';
           const c = form.querySelector('.ac-cond').value.trim() || 'CondID';
           const r = Math.max(1, parseInt(form.querySelector('.ac-rep').value) || 1);
           form.querySelector('.ac-preview').textContent =
-            r > 1 ? `${n} / ${c} — plates 1 through ${r}` : `${n} / ${c} — plate 1`;
+            r > 1 ? `${n} / ${c} — ${previewLabel}s 1 through ${r}` : `${n} / ${c} — ${previewLabel} 1`;
         };
         ['ac-name', 'ac-cond', 'ac-rep'].forEach(cls => {
           form.querySelector(`.${cls}`).addEventListener('input', () => { updatePreview(); errEl.hidden = true; });
@@ -654,7 +657,7 @@ async function submitCreateSession() {
     document.getElementById('ns-name').value = '';
     renderNewSessionForm();
     renderSessionSidebar();
-    announce(`Session created: ${sess.name}`);
+    announce(`Experiment created: ${sess.name}`);
   } catch (err) {
     announce(`Failed: ${err.message}`);
   }
@@ -694,6 +697,7 @@ async function submitAddCondition(sessionId, form) {
 
 async function submitAddPlatesInCondition(sessionId, cond, count) {
   const lastNum = Math.max(0, ...cond.plates.map(p => p.plate_number));
+  const itemLabel = S.sessions.find(s => s.id === sessionId)?.assay_mode === 'motility' ? 'video' : 'plate';
   try {
     const updated = await apiJson(`/sessions/${sessionId}/plates`, {
       method: 'POST',
@@ -703,7 +707,7 @@ async function submitAddPlatesInCondition(sessionId, cond, count) {
     if (idx >= 0) S.sessions[idx] = updated;
     S.addingPlatesFor = null;
     renderSessionSidebar();
-    announce(`${count} plate(s) added to ${cond.name} / ${cond.condition_id}`);
+    announce(`${count} ${itemLabel}(s) added to ${cond.name} / ${cond.condition_id}`);
   } catch (err) {
     announce(`Failed: ${err.message}`);
   }
@@ -711,8 +715,9 @@ async function submitAddPlatesInCondition(sessionId, cond, count) {
 
 async function confirmDeletePlate(sessionId, plate) {
   const n = plate.folder_name;
-  const count = 0; // skip file count fetch for simplicity
-  const msg = `Delete plate ${n} and all its captures?\nThis can be undone manually from .trash on the Pi.`;
+  const sess = S.sessions.find(s => s.id === sessionId);
+  const itemLabel = sess?.assay_mode === 'motility' ? 'video' : 'plate';
+  const msg = `Delete ${itemLabel} ${n} and all its captures?\nThis can be undone manually from .trash on the Pi.`;
   if (!confirm(msg)) return;
   try {
     const updated = await apiJson(`/sessions/${sessionId}/plates/${plate.id}`, { method: 'DELETE' });
@@ -723,7 +728,7 @@ async function confirmDeletePlate(sessionId, plate) {
       renderSessionCapture();
     }
     renderSessionSidebar();
-    announce(`Plate ${n} deleted`);
+    announce(`${itemLabel.charAt(0).toUpperCase() + itemLabel.slice(1)} ${n} deleted`);
   } catch (err) {
     announce(`Delete failed: ${err.message}`);
   }
