@@ -427,14 +427,10 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .thumb-tile:hover .thumb-tile__del { display: flex; }
 .thumb-tile__del:hover { background: var(--danger); color: #fff; }
 
-.thumb-tile--deleted {
-  opacity: .45; cursor: default;
-  border-style: dashed;
-}
-.thumb-tile__tomb {
-  position: absolute; inset: 0;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 10px; color: var(--text-dim); letter-spacing: .04em; text-transform: uppercase;
+.thumb-tile--fade-out {
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
 }
 .thumb-tile__icon {
   position: absolute; inset: 0;

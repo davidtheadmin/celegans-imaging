@@ -18,7 +18,6 @@ const S = {
   addingPlatesFor: null,
   showNewSession: false,
   thumbnails: [],
-  deletedFiles: new Set(),
 };
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -965,24 +964,11 @@ function renderThumbnailStrip() {
   empty.hidden = true;
 
   for (const f of S.thumbnails) {
-    const deleted = S.deletedFiles.has(f.filename);
     const isVideo = /\.(mp4|h264|mkv)$/i.test(f.filename);
-
-    if (deleted) {
-      const tile = document.createElement('div');
-      tile.className = 'thumb-tile thumb-tile--deleted';
-      tile.setAttribute('aria-label', `Deleted: ${f.filename}`);
-      tile.innerHTML = `<div class="thumb-tile__tomb">Deleted</div>`;
-      const label = document.createElement('div');
-      label.className = 'thumb-tile__label';
-      label.textContent = f.filename;
-      tile.appendChild(label);
-      list.appendChild(tile);
-      continue;
-    }
 
     const tile = document.createElement('div');
     tile.className = 'thumb-tile';
+    tile.dataset.filename = f.filename;
     tile.setAttribute('tabindex', '0');
     tile.setAttribute('role', 'button');
     tile.setAttribute('aria-label', `View ${f.filename}`);
@@ -1081,14 +1067,24 @@ async function deleteCapture(fileObj) {
   }
   try {
     await api(deleteUrl, { method: 'DELETE' });
-    S.deletedFiles.add(fileObj.filename);
     closeModal();
-    renderThumbnailStrip();
     // Revert quadrant button if applicable
     const m = fileObj.filename.match(/_([A-Z]{2})\.jpg$/i);
     if (m) {
       document.querySelectorAll(`.btn-quadrant[data-q="${m[1].toUpperCase()}"]`)
         .forEach(btn => btn.classList.remove('captured'));
+    }
+    // Fade the tile out, then remove it from DOM and state
+    const tile = document.querySelector(`.thumb-list .thumb-tile[data-filename="${CSS.escape(fileObj.filename)}"]`);
+    if (tile) {
+      tile.classList.add('thumb-tile--fade-out');
+      tile.addEventListener('transitionend', () => {
+        tile.remove();
+        S.thumbnails = S.thumbnails.filter(f => f.filename !== fileObj.filename);
+        if (S.thumbnails.length === 0) {
+          document.getElementById('thumb-empty').hidden = false;
+        }
+      }, { once: true });
     }
     announce(`Deleted: ${fileObj.filename}`);
   } catch (err) {
