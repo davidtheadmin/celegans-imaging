@@ -29,6 +29,68 @@ _EXPERIMENTS_DIR = "experiments"
 _PICTURES_DIR = "pictures"
 _VIDEOS_DIR = "videos"
 
+_UNSAFE_CHARS = str.maketrans(r'\/:*?"<>|', "_________")
+_MAX_COMPONENT = 200
+
+
+def _sanitize(text: str) -> str:
+    """Make text safe for use as a filesystem path component."""
+    out = text.translate(_UNSAFE_CHARS).strip(". ")[:_MAX_COMPONENT]
+    return out or "_"
+
+
+def _build_name_maps(
+    sessions: list[dict],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """
+    Build collision-aware friendly name mappings for sessions and conditions.
+
+    Returns:
+        session_dirs  — {session_id: friendly_experiment_dir_name}
+        cond_dirs     — {session_id: {condition_id: friendly_condition_dir_name}}
+    """
+    # Count sanitized experiment names to detect collisions
+    name_counts: dict[str, int] = {}
+    for sm in sessions:
+        key = _sanitize(sm.get("experiment_name") or sm["session_id"])
+        name_counts[key] = name_counts.get(key, 0) + 1
+
+    session_dirs: dict[str, str] = {}
+    cond_dirs: dict[str, dict[str, str]] = {}
+
+    for sm in sessions:
+        sid = sm["session_id"]
+        base = _sanitize(sm.get("experiment_name") or sid)
+        if name_counts[base] > 1:
+            session_dirs[sid] = f"{base} ({sid[:6]})"
+        else:
+            session_dirs[sid] = base
+
+        # Build condition dirs within this session
+        # Gather all (condition_id, condition_name) pairs seen in files
+        cond_names: dict[str, str] = {}
+        for entry in sm.get("files", []):
+            cid = entry.get("plate_id", "").rsplit("_", 2)[0] if entry.get("plate_id") else ""
+            cname = entry.get("condition_name") or cid
+            if cid and cid not in cond_names:
+                cond_names[cid] = cname
+
+        cname_counts: dict[str, int] = {}
+        for cid, cname in cond_names.items():
+            key = _sanitize(cname)
+            cname_counts[key] = cname_counts.get(key, 0) + 1
+
+        this_cond: dict[str, str] = {}
+        for cid, cname in cond_names.items():
+            base_c = _sanitize(cname)
+            if cname_counts[base_c] > 1:
+                this_cond[cid] = f"{base_c} ({cid[:6]})"
+            else:
+                this_cond[cid] = base_c
+        cond_dirs[sid] = this_cond
+
+    return session_dirs, cond_dirs
+
 
 # ---------------------------------------------------------------------------
 # Shared status object
@@ -309,10 +371,15 @@ class SyncAgent(threading.Thread):
             tick_files += f
             tick_bytes += b
 
-        for session_m in manifest.get("sessions", []):
+        sessions = manifest.get("sessions", [])
+        session_dirs, cond_dirs = _build_name_maps(sessions)
+
+        for session_m in sessions:
             sid = session_m["session_id"]
+            exp_dir = session_dirs.get(sid, sid)
+            this_cond = cond_dirs.get(sid, {})
             for entry in session_m.get("files", []):
-                f, b = self._sync_session(entry, sid, s, mirror)
+                f, b = self._sync_session(entry, sid, exp_dir, this_cond, s, mirror)
                 tick_files += f
                 tick_bytes += b
 
@@ -388,7 +455,13 @@ class SyncAgent(threading.Thread):
         return 0, 0
 
     def _sync_session(
-        self, entry: dict, sid: str, s: object, mirror: Path
+        self,
+        entry: dict,
+        sid: str,
+        exp_dir: str,
+        cond_dir_map: dict[str, str],
+        s: object,
+        mirror: Path,
     ) -> tuple[int, int]:
         if entry.get("acked"):
             return 0, 0
@@ -401,16 +474,29 @@ class SyncAgent(threading.Thread):
             )
             return 0, 0
 
-        # relative_path format: "plates/<folder_name>/<filename>"
-        local = mirror / _EXPERIMENTS_DIR / sid / Path(rel)
+        parts = rel.split("/")
+        if len(parts) < 3 or parts[0] != "plates":
+            log.warning("Unexpected session relative_path %r — skipping", rel)
+            return 0, 0
+        filename = parts[-1]
+
+        # Build friendly local path from manifest metadata when available,
+        # falling back to sid/rel for legacy entries.
+        condition_name = entry.get("condition_name") or ""
+        plate_label = entry.get("plate_label") or ""
+        if condition_name and plate_label:
+            # plate_id format: "{condition_id}_{name}_{NN:02d}"
+            # rsplit with maxsplit=2 reliably extracts condition_id regardless of
+            # underscores within condition_id or name.
+            cid = plate_id.rsplit("_", 2)[0] if "_" in plate_id else plate_id
+            cond_dir = cond_dir_map.get(cid) or _sanitize(condition_name)
+            local = mirror / "experiments" / exp_dir / cond_dir / _sanitize(plate_label) / filename
+        else:
+            local = mirror / _EXPERIMENTS_DIR / sid / Path(rel)
+
         need_download = not (local.exists() and _sha256_file(local) == sha256)
 
         if need_download:
-            parts = rel.split("/")
-            if len(parts) < 3 or parts[0] != "plates":
-                log.warning("Unexpected session relative_path %r — skipping", rel)
-                return 0, 0
-            filename = parts[-1]
             url = f"{s.pi_url}/sessions/{sid}/plates/{plate_id}/files/{filename}"
             if not _download_file(url, local, sha256, s.token):
                 return 0, 0
