@@ -43,6 +43,19 @@ the mirror structure. Renaming requires a stable mapping table held in
 the launcher, OR the launcher writes a `.wormscan-meta` marker per
 folder recording the original Pi path. Decide which when we pick this up.
 
+## Launcher mirror: rename-orphan limitation
+
+When an experiment is renamed in the browser, the existing mirror folder
+is **not** moved. New files captured after the rename appear in a new
+folder named after the new experiment name; files already mirrored stay
+in the old folder. This is accepted as a minor papercut — the old folder
+is harmless and can be deleted manually.
+
+The root cause: the launcher has no stable mapping from session_id to
+previous friendly folder names. A future fix would write a
+`.wormscan-meta` marker per folder recording the original session_id,
+allowing the launcher to detect renames and move the folder.
+
 ## UI: delete sessions and conditions, not just plates
 
 Currently the timeline only supports deleting individual plates (and free

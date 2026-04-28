@@ -1,3 +1,63 @@
+# Phase 6.2 — feat/launcher-v2 (ready to deploy)
+
+## Migration procedure
+
+1. **Stop the service on the Pi**
+   ```bash
+   ssh celegans "sudo systemctl stop celegans-capture"
+   ```
+
+2. **Wipe Pi data** (clean-slate deploy — skip if you want to keep existing data)
+   ```bash
+   ssh celegans "cd celegans-imaging && bash scripts/wipe_data.sh"
+   ```
+
+3. **Run video migration** (if any .mp4 files exist in pictures/ from before this release)
+   ```bash
+   ssh celegans "cd celegans-imaging && bash scripts/move_videos_out_of_pictures.sh"
+   ```
+   Idempotent — safe to run on empty directories.
+
+4. **Pull new code and restart service**
+   ```bash
+   ssh celegans "cd celegans-imaging && git pull && sudo systemctl start celegans-capture"
+   ```
+
+5. **Wipe the laptop mirror** (optional, only if starting fresh)
+   Delete `Documents\WormScan\experiments`, `\pictures`, `\videos` if present.
+
+6. **Restart the launcher** — clock sync runs automatically on startup.
+
+## Test plan
+
+| Test | Expected result |
+|------|----------------|
+| a. Free still | File appears in `pictures/<date>/` on Pi; mirrored to `mirror/pictures/` |
+| b. Free video | File appears in `videos/<date>/` on Pi; mirrored to `mirror/videos/` |
+| c. New experiment with named conditions | After sync: `mirror/experiments/<experiment name>/<condition name>/plate 01/<filename>` |
+| d. Pi clock reset | Status line shows "Pi clock synced (offset: Xs)" for ~5 s after launcher starts |
+| e. "Sync now" button | Button disables, sync runs immediately, button re-enables |
+| f. Rename experiment | Old mirror folder stays orphaned; new files go to new folder (documented BACKLOG limitation) |
+
+## ⚠ Breaking change: manifest key rename
+
+The top-level `/manifest` response renames `freecapture` → `pictures` and
+adds a `videos` section. An old launcher reading `manifest["freecapture"]`
+will silently get 0 free pictures. Deploy the Pi service and the new
+launcher together.
+
+## sudoers note for /clock-sync
+
+The `POST /clock-sync` endpoint runs `sudo -n date -s`. If the FastAPI
+service user (`pi`) does not have passwordless sudo for `/bin/date`, the
+endpoint returns a 500 with the exact sudoers entry to add:
+```
+pi ALL=(ALL) NOPASSWD: /bin/date
+```
+Add to `/etc/sudoers.d/celegans-date` on the Pi.
+
+---
+
 # Phase 5a — COMPLETE (pending Pi deployment + verification)
 
 All six steps committed and pushed. Deploy to Pi, then verify per the checklist below.
