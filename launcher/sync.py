@@ -293,6 +293,7 @@ class SyncAgent(threading.Thread):
         self._settings = settings
         self.status = status
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._total_files = 0
         self._total_bytes = 0
 
@@ -307,6 +308,11 @@ class SyncAgent(threading.Thread):
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()  # unblock any pending wait so the thread exits promptly
+
+    def wake(self) -> None:
+        """UI thread: trigger an immediate sync tick instead of waiting for the interval."""
+        self._wake.set()
 
     def _do_clock_sync(self, s: object) -> None:
         """POST /clock-sync and update the ephemeral status message. Never raises."""
@@ -339,7 +345,8 @@ class SyncAgent(threading.Thread):
         while not self._stop.is_set():
             s = self._get_settings()
             self._tick(s)
-            self._stop.wait(s.poll_interval_s)
+            self._wake.wait(s.poll_interval_s)
+            self._wake.clear()
 
     # ------------------------------------------------------------------
 

@@ -158,6 +158,7 @@ class MainWindow(tk.Tk):
         self._settings = settings
         self._agent = agent
         self._status = status
+        self._button_waiting = False
 
         self.title("WormScan Launcher")
         self.resizable(False, False)
@@ -200,6 +201,11 @@ class MainWindow(tk.Tk):
             btn_frame, text="Open Mirror Folder", command=self._open_mirror
         ).pack(fill="x", pady=3)
 
+        self._sync_btn = ttk.Button(
+            btn_frame, text="Sync now", command=self._on_sync_now
+        )
+        self._sync_btn.pack(fill="x", pady=3)
+
         # --- Info / settings row ---
         bottom = ttk.Frame(self)
         bottom.pack(fill="x", padx=14, pady=(4, 10))
@@ -223,6 +229,10 @@ class MainWindow(tk.Tk):
 
         self._canvas.itemconfig(self._dot, fill=_DOT_COLORS.get(color, "#9e9e9e"))
         self._status_lbl.config(text=display_label)
+
+        if self._button_waiting and color == "green":
+            self._button_waiting = False
+            self._sync_btn.config(state="normal")
 
         parts = []
         if last_sync:
@@ -248,6 +258,11 @@ class MainWindow(tk.Tk):
         mirror = self._settings.mirror_root
         os.makedirs(mirror, exist_ok=True)
         os.startfile(mirror)   # Windows only — launcher is Windows-only
+
+    def _on_sync_now(self) -> None:
+        self._sync_btn.config(state="disabled")
+        self._button_waiting = True
+        self._agent.wake()
 
     def _open_settings(self) -> None:
         SettingsDialog(self, self._settings, self._on_settings_saved)
