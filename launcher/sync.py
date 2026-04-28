@@ -24,9 +24,10 @@ import requests
 
 log = logging.getLogger(__name__)
 
-# Must match EXPERIMENTS_DIR / PICTURES_DIR in capture/app/config.py
+# Must match EXPERIMENTS_DIR / PICTURES_DIR / VIDEOS_DIR in capture/app/config.py
 _EXPERIMENTS_DIR = "experiments"
 _PICTURES_DIR = "pictures"
+_VIDEOS_DIR = "videos"
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,8 @@ class SyncStatus:
         self._last_sync: Optional[str] = None
         self._files_mirrored = 0
         self._bytes_mirrored = 0
+        self._clock_msg: str = ""
+        self._clock_msg_expires: float = 0.0
 
     def update(
         self,
@@ -72,6 +75,19 @@ class SyncStatus:
                 self._files_mirrored = files_mirrored
             if bytes_mirrored is not None:
                 self._bytes_mirrored = bytes_mirrored
+
+    def set_clock_msg(self, msg: str, duration_s: float = 5.0) -> None:
+        """Sync thread: set an ephemeral clock-sync status message."""
+        with self._lock:
+            self._clock_msg = msg
+            self._clock_msg_expires = time.monotonic() + duration_s
+
+    def get_clock_msg(self) -> Optional[str]:
+        """UI thread: return the clock message if still within its display window."""
+        with self._lock:
+            if self._clock_msg and time.monotonic() < self._clock_msg_expires:
+                return self._clock_msg
+            return None
 
     def snapshot(self) -> tuple[str, str, Optional[str], int, int]:
         """UI thread: return a consistent (color, label, last_sync, files, bytes) tuple."""
@@ -230,9 +246,34 @@ class SyncAgent(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
+    def _do_clock_sync(self, s: object) -> None:
+        """POST /clock-sync and update the ephemeral status message. Never raises."""
+        client_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            resp = requests.post(
+                f"{s.pi_url}/clock-sync",
+                json={"client_iso": client_iso},
+                headers={"X-Auth-Token": s.token},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            offset = data.get("offset_seconds", 0)
+            if abs(offset) > 1:
+                msg = f"Pi clock synced (offset: {offset:+d}s)"
+            else:
+                msg = "Pi clock OK"
+            log.info("Clock sync: %s", msg)
+            self.status.set_clock_msg(msg, duration_s=5.0)
+        except Exception as exc:
+            msg = f"Clock sync failed: {exc}"
+            log.warning(msg)
+            self.status.set_clock_msg(msg, duration_s=5.0)
+
     def run(self) -> None:
         s = self._get_settings()
         _cleanup_partials(Path(s.mirror_root))
+        self._do_clock_sync(s)
         while not self._stop.is_set():
             s = self._get_settings()
             self._tick(s)
@@ -258,8 +299,13 @@ class SyncAgent(threading.Thread):
         mirror = Path(s.mirror_root)
         tick_files = tick_bytes = 0
 
-        for entry in manifest.get("freecapture", {}).get("files", []):
-            f, b = self._sync_free(entry, s, mirror)
+        for entry in manifest.get("pictures", {}).get("files", []):
+            f, b = self._sync_pictures(entry, s, mirror)
+            tick_files += f
+            tick_bytes += b
+
+        for entry in manifest.get("videos", {}).get("files", []):
+            f, b = self._sync_videos(entry, s, mirror)
             tick_files += f
             tick_bytes += b
 
@@ -281,7 +327,7 @@ class SyncAgent(threading.Thread):
             bytes_mirrored=self._total_bytes,
         )
 
-    def _sync_free(
+    def _sync_pictures(
         self, entry: dict, s: object, mirror: Path
     ) -> tuple[int, int]:
         if entry.get("acked"):
@@ -289,7 +335,7 @@ class SyncAgent(threading.Thread):
         rel: str = entry.get("relative_path", "")
         sha256: str = entry.get("sha256") or ""
         if not sha256:
-            log.warning("Free entry missing sha256: %r — skipping", rel)
+            log.warning("Picture entry missing sha256: %r — skipping", rel)
             return 0, 0
 
         # relative_path format: "YYYY-MM-DD/filename"
@@ -299,7 +345,7 @@ class SyncAgent(threading.Thread):
         if need_download:
             parts = rel.split("/", 1)
             if len(parts) != 2:
-                log.warning("Unexpected free relative_path %r — skipping", rel)
+                log.warning("Unexpected picture relative_path %r — skipping", rel)
                 return 0, 0
             date, filename = parts
             url = f"{s.pi_url}/capture/free/files/{date}/{filename}"
@@ -308,6 +354,36 @@ class SyncAgent(threading.Thread):
 
         size = local.stat().st_size if need_download else 0
         if _ack_file(s.pi_url, "/capture/free/files/ack", rel, sha256, s.token):
+            return 1, size
+        return 0, 0
+
+    def _sync_videos(
+        self, entry: dict, s: object, mirror: Path
+    ) -> tuple[int, int]:
+        if entry.get("acked"):
+            return 0, 0
+        rel: str = entry.get("relative_path", "")
+        sha256: str = entry.get("sha256") or ""
+        if not sha256:
+            log.warning("Video entry missing sha256: %r — skipping", rel)
+            return 0, 0
+
+        # relative_path format: "YYYY-MM-DD/filename"
+        local = mirror / _VIDEOS_DIR / Path(rel)
+        need_download = not (local.exists() and _sha256_file(local) == sha256)
+
+        if need_download:
+            parts = rel.split("/", 1)
+            if len(parts) != 2:
+                log.warning("Unexpected video relative_path %r — skipping", rel)
+                return 0, 0
+            date, filename = parts
+            url = f"{s.pi_url}/capture/free/videos/{date}/{filename}"
+            if not _download_file(url, local, sha256, s.token):
+                return 0, 0
+
+        size = local.stat().st_size if need_download else 0
+        if _ack_file(s.pi_url, "/capture/free/videos/ack", rel, sha256, s.token):
             return 1, size
         return 0, 0
 

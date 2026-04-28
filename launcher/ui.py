@@ -218,8 +218,11 @@ class MainWindow(tk.Tk):
     def _poll(self) -> None:
         color, label, last_sync, files, nbytes = self._status.snapshot()
 
+        clock_msg = self._status.get_clock_msg()
+        display_label = clock_msg if clock_msg else label
+
         self._canvas.itemconfig(self._dot, fill=_DOT_COLORS.get(color, "#9e9e9e"))
-        self._status_lbl.config(text=label)
+        self._status_lbl.config(text=display_label)
 
         parts = []
         if last_sync:
