@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, computed_field
 
 
@@ -6,6 +6,7 @@ class Plate(BaseModel):
     id: str
     condition_id: str
     name: str
+    condition_name: Optional[str] = None  # user-given name; None on legacy plates
     plate_number: int
     created_at: str
 
@@ -34,5 +35,6 @@ class CreateSessionRequest(BaseModel):
 class CreatePlateRequest(BaseModel):
     condition_id: str
     name: str
+    condition_name: Optional[str] = None
     plate_number: int
     replicates: int = 1

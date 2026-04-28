@@ -114,6 +114,7 @@ def add_plate(session_id: str, req: CreatePlateRequest) -> Session:
             id=plate_id,
             condition_id=req.condition_id,
             name=req.name,
+            condition_name=req.condition_name,
             plate_number=pnum,
             created_at=now.isoformat(),
         )

@@ -695,7 +695,7 @@ async function submitAddCondition(sessionId, form) {
   }
   try {
     const updated = await apiJson(`/sessions/${sessionId}/plates`, {
-      method: 'POST', body: { condition_id: cond, name, plate_number: 1, replicates },
+      method: 'POST', body: { condition_id: cond, name, condition_name: name, plate_number: 1, replicates },
     });
     const idx = S.sessions.findIndex(s => s.id === sessionId);
     if (idx >= 0) S.sessions[idx] = updated;
@@ -716,7 +716,7 @@ async function submitAddPlatesInCondition(sessionId, cond, count) {
   try {
     const updated = await apiJson(`/sessions/${sessionId}/plates`, {
       method: 'POST',
-      body: { condition_id: cond.condition_id, name: cond.name, plate_number: lastNum + 1, replicates: count },
+      body: { condition_id: cond.condition_id, name: cond.name, condition_name: cond.name, plate_number: lastNum + 1, replicates: count },
     });
     const idx = S.sessions.findIndex(s => s.id === sessionId);
     if (idx >= 0) S.sessions[idx] = updated;
