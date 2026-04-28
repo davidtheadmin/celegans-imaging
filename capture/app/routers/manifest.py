@@ -55,7 +55,7 @@ def _resolve_condition_name(plates, condition_id: str) -> str:
     """Return the first non-None condition_name for this condition_id, else the id itself."""
     for p in plates:
         if p.condition_id == condition_id and p.condition_name:
-            return p.condition_name
+            return f"{p.condition_name} {condition_id}"
     return condition_id
 
 
