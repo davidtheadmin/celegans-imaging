@@ -51,6 +51,14 @@ def _file_entry(path: Path, relative_path: str) -> dict:
     }
 
 
+def _resolve_condition_name(plates, condition_id: str) -> str:
+    """Return the first non-None condition_name for this condition_id, else the id itself."""
+    for p in plates:
+        if p.condition_id == condition_id and p.condition_name:
+            return p.condition_name
+    return condition_id
+
+
 def _build_session_manifest(session_id: str) -> dict:
     session = session_store.get_session(session_id)
     session_dir = Path(settings.DATA_ROOT) / settings.EXPERIMENTS_DIR / session_id
@@ -59,15 +67,20 @@ def _build_session_manifest(session_id: str) -> dict:
         plate_dir = session_dir / "plates" / plate.folder_name
         if not plate_dir.exists():
             continue
+        condition_name = _resolve_condition_name(session.plates, plate.condition_id)
+        plate_label = f"plate {plate.plate_number:02d}"
         for p in sorted(plate_dir.rglob("*")):
             if _is_manifest_file(p):
                 rel = str(p.relative_to(session_dir)).replace("\\", "/")
                 entry = _file_entry(p, rel)
                 entry["plate_id"] = plate.id
+                entry["condition_name"] = condition_name
+                entry["plate_label"] = plate_label
                 files.append(entry)
     total_bytes = sum(f["size_bytes"] for f in files)
     return {
         "session_id": session_id,
+        "experiment_name": session.name,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "files": files,
         "total_files": len(files),
