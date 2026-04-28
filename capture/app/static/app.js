@@ -943,13 +943,23 @@ async function refreshThumbnails() {
   } else {
     const d = today();
     try {
-      const raw = await apiJson(`/capture/free/files?date=${d}`);
-      const base = `/capture/free/files/${d}`;
-      files = raw.map(f => ({
-        ...f,
-        thumbUrl: `${base}/${encodeURIComponent(f.filename)}?thumb=1&token=${encodeURIComponent(S.token)}`,
-        fullUrl:  `${base}/${encodeURIComponent(f.filename)}?token=${encodeURIComponent(S.token)}`,
+      const [rawPics, rawVids] = await Promise.all([
+        apiJson(`/capture/free/files?date=${d}`).catch(() => []),
+        apiJson(`/capture/free/videos?date=${d}`).catch(() => []),
+      ]);
+      const picBase = `/capture/free/files/${d}`;
+      const vidBase = `/capture/free/videos/${d}`;
+      const pics = rawPics.map(f => ({
+        ...f, kind: 'picture',
+        thumbUrl: `${picBase}/${encodeURIComponent(f.filename)}?thumb=1&token=${encodeURIComponent(S.token)}`,
+        fullUrl:  `${picBase}/${encodeURIComponent(f.filename)}?token=${encodeURIComponent(S.token)}`,
       }));
+      const vids = rawVids.map(f => ({
+        ...f, kind: 'video',
+        thumbUrl: `${vidBase}/${encodeURIComponent(f.filename)}?thumb=1&token=${encodeURIComponent(S.token)}`,
+        fullUrl:  `${vidBase}/${encodeURIComponent(f.filename)}?token=${encodeURIComponent(S.token)}`,
+      }));
+      files = [...pics, ...vids].sort((a, b) => a.mtime < b.mtime ? -1 : 1);
     } catch {}
   }
   S.thumbnails = files.slice(-8);
@@ -1061,7 +1071,8 @@ async function deleteCapture(fileObj) {
   if (!fileObj) return;
   let deleteUrl;
   if (fileObj.date) {
-    deleteUrl = `/capture/free/files/${fileObj.date}/${encodeURIComponent(fileObj.filename)}`;
+    const ns = fileObj.kind === 'video' ? 'videos' : 'files';
+    deleteUrl = `/capture/free/${ns}/${fileObj.date}/${encodeURIComponent(fileObj.filename)}`;
   } else {
     deleteUrl = `/sessions/${S.activeSessionId}/plates/${S.activePlateId}/files/${encodeURIComponent(fileObj.filename)}`;
   }

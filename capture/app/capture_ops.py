@@ -43,6 +43,13 @@ def _free_dir() -> Path:
     return d
 
 
+def _video_dir() -> Path:
+    today = datetime.now().strftime("%Y-%m-%d")
+    d = Path(settings.DATA_ROOT) / settings.VIDEOS_DIR / today
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
 
@@ -156,7 +163,7 @@ def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> 
     fps = cam_mgr.video_fps
     log.debug("free_video: using %.2f fps (measured at startup)", fps)
     ts = _ts()
-    h264_path = _free_dir() / f"{ts}_video.h264"
+    h264_path = _video_dir() / f"{ts}_video.h264"
     log.debug("free_video: starting recording -> %s", h264_path.name)
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
     try:
@@ -240,6 +247,10 @@ _SIDECAR_SUFFIXES = {".sha256", ".acked"}  # never shown in file listings
 
 def free_base() -> Path:
     return Path(settings.DATA_ROOT) / settings.PICTURES_DIR
+
+
+def video_base() -> Path:
+    return Path(settings.DATA_ROOT) / settings.VIDEOS_DIR
 
 
 def trash_base() -> Path:

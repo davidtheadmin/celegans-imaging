@@ -28,7 +28,7 @@ def _compute_unsynced() -> dict:
     oldest_age_s: Optional[float] = None
     now = time.time()
 
-    for search_root in [data_root / settings.EXPERIMENTS_DIR, data_root / settings.PICTURES_DIR]:
+    for search_root in [data_root / settings.EXPERIMENTS_DIR, data_root / settings.PICTURES_DIR, data_root / settings.VIDEOS_DIR]:
         if not search_root.exists():
             continue
         for p in search_root.rglob("*"):

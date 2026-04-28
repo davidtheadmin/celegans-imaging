@@ -98,6 +98,29 @@ def _build_free_manifest(date_filter: Optional[str] = None) -> dict:
     }
 
 
+def _build_videos_manifest(date_filter: Optional[str] = None) -> dict:
+    videos_base = Path(settings.DATA_ROOT) / settings.VIDEOS_DIR
+    files = []
+    if date_filter:
+        dirs = [videos_base / date_filter] if (videos_base / date_filter).is_dir() else []
+    else:
+        dirs = sorted(videos_base.iterdir()) if videos_base.exists() else []
+    for date_dir in dirs:
+        if not date_dir.is_dir() or date_dir.name.startswith("."):
+            continue
+        for p in sorted(date_dir.iterdir()):
+            if _is_manifest_file(p):
+                rel = str(p.relative_to(videos_base)).replace("\\", "/")
+                files.append(_file_entry(p, rel))
+    total_bytes = sum(f["size_bytes"] for f in files)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "files": files,
+        "total_files": len(files),
+        "total_bytes": total_bytes,
+    }
+
+
 @router.get("/sessions/{session_id}/manifest", dependencies=[Depends(require_token)])
 async def session_manifest(session_id: str):
     return await asyncio.to_thread(_build_session_manifest, session_id)
@@ -110,19 +133,28 @@ async def free_manifest(date: Optional[str] = Query(default=None)):
     return await asyncio.to_thread(_build_free_manifest, date)
 
 
+@router.get("/capture/free/videos/manifest", dependencies=[Depends(require_token)])
+async def free_videos_manifest(date: Optional[str] = Query(default=None)):
+    if date is not None and not _DATE_RE.match(date):
+        raise HTTPException(400, "Invalid date format, expected YYYY-MM-DD")
+    return await asyncio.to_thread(_build_videos_manifest, date)
+
+
 @router.get("/manifest", dependencies=[Depends(require_token)])
 async def top_manifest():
     sessions = session_store.list_sessions()
-    session_manifests, free = await asyncio.gather(
+    session_manifests, pictures, videos = await asyncio.gather(
         asyncio.gather(*[
             asyncio.to_thread(_build_session_manifest, s.id) for s in sessions
         ]),
         asyncio.to_thread(_build_free_manifest, None),
+        asyncio.to_thread(_build_videos_manifest, None),
     )
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sessions": list(session_manifests),
-        "freecapture": free,
+        "pictures": pictures,
+        "videos": videos,
     }
 
 
@@ -178,6 +210,14 @@ async def ack_session_file(session_id: str, req: AckRequest):
 @router.post("/capture/free/files/ack", dependencies=[Depends(require_token)])
 async def ack_free_file(req: AckRequest):
     base = Path(settings.DATA_ROOT) / settings.PICTURES_DIR
+    return await asyncio.to_thread(
+        _resolve_and_ack, base, req.relative_path, req.sha256
+    )
+
+
+@router.post("/capture/free/videos/ack", dependencies=[Depends(require_token)])
+async def ack_free_video(req: AckRequest):
+    base = Path(settings.DATA_ROOT) / settings.VIDEOS_DIR
     return await asyncio.to_thread(
         _resolve_and_ack, base, req.relative_path, req.sha256
     )
