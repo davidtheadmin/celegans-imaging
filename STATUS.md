@@ -1,4 +1,14 @@
-# Phase 6.2 — feat/launcher-v2 (ready to deploy)
+## 2026-05-02
+
+**Motility analysis pipeline complete.** Validated end-to-end on reference video (test.avi: 30s, ~15 worms, median 57.1 BPM matching prior manual run at 56.3 BPM). Pipeline lives in `launcher/analysis/`. User flow: launcher → Open Analysis → Motility → folder picker → progress dialog → results in `_analysis/<timestamp>/`. Tierpsy runs headless in ephemeral Docker containers. Render of tracked MP4s is optional via three checkboxes.
+
+**Outstanding work for v2:**
+- Calibrate `microns_per_pixel` (image a stage micrometer, plug value into `motility_params.json`) → unlocks real-units length/speed columns
+- Counting analysis branch (YOLOv8 staging on still images, separate pipeline)
+- `setup.bat` should auto-sync requirements.txt on launch so future deps don't need manual pip install#
+
+
+ Phase 6.2 — feat/launcher-v2 (ready to deploy)
 
 ## Migration procedure
 
