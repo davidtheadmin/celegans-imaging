@@ -234,13 +234,18 @@ For each `.mp4` discovered:
      -v "<video_parent_folder>:/data" \
      tierpsy/tierpsy-tracker \
      tierpsy_process \
-     --video_file "/data/<video>.avi" \
-     --json_file  "/data/<video>.json" \
-     --masks_dir  "/data/MaskedVideos" \
-     --results_dir "/data/Results"
+     --video_dir_root   /data \
+     --mask_dir_root    /data/MaskedVideos \
+     --results_dir_root /data/Results \
+     --pattern_include  <video>.avi \
+     --json_file        /data/<video>.json \
+     --max_num_process  1
    ```
-   On Windows, paths must be passed in a Docker-compatible form. Capture stdout and stderr to
-   the run log. Time out after 10 minutes per video.
+   `tierpsy_process` is batch-oriented and scans `--video_dir_root` for files
+   matching `--pattern_include`; it does not accept a single `--video_file`.
+   Passing the basename as the pattern isolates processing to one file per run.
+   On Windows, paths must be passed in a Docker-compatible form. Capture stdout
+   and stderr to the run log. Time out after 10 minutes per video.
 
 5. **Read `_featuresN.hdf5`** from the Results folder. Compute per-fragment BPM using the
    algorithm in Section 6.

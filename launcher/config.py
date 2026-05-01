@@ -19,6 +19,12 @@ class Settings:
     token: str = ""
     mirror_root: str = str(_DEFAULT_MIRROR)
     poll_interval_s: int = 120
+    # Analysis
+    tierpsy_image: str = "tierpsy/tierpsy-tracker"
+    tierpsy_image_tag: str = "latest"
+    docker_command: str = "docker"
+    analysis_video_timeout_s: int = 600
+    motility_long_threshold_s: float = 5.0
 
 
 _FIELD_NAMES = {f.name for f in fields(Settings)}
