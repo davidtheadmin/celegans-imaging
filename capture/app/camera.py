@@ -16,8 +16,10 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 FULL_W, FULL_H = 4056, 3040
+VIDEO_W, VIDEO_H = 2028, 1520   # IMX477 mode 2: full FoV, 2×2 binned, 53.77 fps max
+VIDEO_FPS = 30.0
 PREVIEW_W, PREVIEW_H = 1280, 960
-DEFAULT_VIDEO_FPS = 30  # fallback; IMX708 at 4056×3040 delivers ~10fps
+DEFAULT_VIDEO_FPS = VIDEO_FPS  # kept for capture_ops compatibility
 
 
 class CameraManager:
@@ -41,49 +43,24 @@ class CameraManager:
     def start(self) -> None:
         try:
             cam = Picamera2()
+            # Start in still mode (full resolution) so capture_still() works without
+            # reconfiguration. start_video_recording() will switch to VIDEO_W×VIDEO_H.
             config = cam.create_video_configuration(
                 main={"size": (FULL_W, FULL_H), "format": "RGB888"},
                 lores={"size": (PREVIEW_W, PREVIEW_H), "format": "YUV420"},
             )
             cam.configure(config)
             cam.start()
-            # Cap AE shutter via FrameDurationLimits (min_us, max_us).
-            # ExposureTimeMax is not a valid picamera2 control; FrameDurationLimits
-            # is the correct mechanism — it constrains both shutter and frame time.
-            min_frame_us = 1_000
-            cam.set_controls({"FrameDurationLimits": (min_frame_us, settings.MAX_AUTO_SHUTTER_US)})
-            log.info(
-                "Camera: FrameDurationLimits set to (%d, %d) µs — AE shutter capped at %.0f ms",
-                min_frame_us, settings.MAX_AUTO_SHUTTER_US, settings.MAX_AUTO_SHUTTER_US / 1000,
-            )
+            self._apply_still_controls(cam)
             time.sleep(2.0)  # AE / AWB settle
 
-            # Measure actual fps while single-threaded (preview not yet started).
-            # We read FrameDuration here so we never need capture_request() at
-            # recording time — that call races with capture_array("lores") in the
-            # preview loop and deadlocks on picamera2's internal libcamera queue.
-            fps = DEFAULT_VIDEO_FPS
-            try:
-                req = cam.capture_request()
-                try:
-                    meta = req.get_metadata()
-                finally:
-                    req.release()
-                fd_us = meta.get("FrameDuration", 0)
-                if fd_us and fd_us > 0:
-                    fps = 1_000_000.0 / fd_us
-                    log.info("Camera: measured %.2f fps (FrameDuration=%d µs)", fps, fd_us)
-            except Exception as exc:
-                log.warning("Camera: fps measurement failed (%s) — using fallback %.0f fps", exc, fps)
-
-            self._video_fps = fps
             self._cam = cam
             self._running = True
             self._preview_thread = threading.Thread(
                 target=self._preview_loop, daemon=True, name="preview"
             )
             self._preview_thread.start()
-            log.info("Camera started (%dx%d main, %dx%d lores)",
+            log.info("Camera started in still mode (%dx%d main, %dx%d lores)",
                      FULL_W, FULL_H, PREVIEW_W, PREVIEW_H)
         except Exception as exc:
             log.error("Camera failed to start: %s", exc)
@@ -127,6 +104,21 @@ class CameraManager:
                     time.sleep(0.05)
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _apply_still_controls(cam: Picamera2) -> None:
+        """Apply still-mode FrameDurationLimits. Must be called after every cam.start()
+        in still mode because cam.configure() resets controls to hardware defaults."""
+        min_frame_us = 1_000
+        cam.set_controls({"FrameDurationLimits": (min_frame_us, settings.MAX_AUTO_SHUTTER_US)})
+        log.info(
+            "Camera: still-mode FrameDurationLimits (%d, %d) µs — AE shutter capped at %.0f ms",
+            min_frame_us, settings.MAX_AUTO_SHUTTER_US, settings.MAX_AUTO_SHUTTER_US / 1000,
+        )
+
+    # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
 
@@ -144,7 +136,7 @@ class CameraManager:
 
     @property
     def video_fps(self) -> float:
-        """Actual camera fps measured at startup. Safe to read from any thread."""
+        """Target video fps (VIDEO_FPS). Safe to read from any thread."""
         return self._video_fps
 
     # ------------------------------------------------------------------
@@ -227,11 +219,28 @@ class CameraManager:
             log.debug("start_video_recording: lock acquired after %.3fs", time.perf_counter() - t0)
             if self._recording:
                 raise HTTPException(409, "Already recording")
+            # Switch to video mode (2028×1520 @ 30 fps). cam.configure() requires
+            # the camera to be stopped; the preview loop handles the brief gap via
+            # its exception-catch-retry loop.
+            t1 = time.perf_counter()
+            self._cam.stop()
+            video_config = self._cam.create_video_configuration(
+                main={"size": (VIDEO_W, VIDEO_H), "format": "RGB888"},
+                lores={"size": (PREVIEW_W, PREVIEW_H), "format": "YUV420"},
+                controls={"FrameDurationLimits": (33_333, 33_333)},  # lock to 30 fps
+            )
+            self._cam.configure(video_config)
+            self._cam.start()
+            self._video_fps = VIDEO_FPS
+            log.info(
+                "start_video_recording: reconfigured to %dx%d @ %.0f fps in %.3fs",
+                VIDEO_W, VIDEO_H, VIDEO_FPS, time.perf_counter() - t1,
+            )
             encoder = H264Encoder(bitrate=bitrate_bps)
             log.debug("start_video_recording: calling cam.start_recording")
-            t1 = time.perf_counter()
+            t2 = time.perf_counter()
             self._cam.start_recording(encoder, FileOutput(str(path)), name="main")
-            log.debug("start_video_recording: cam.start_recording returned in %.3fs", time.perf_counter() - t1)
+            log.debug("start_video_recording: cam.start_recording returned in %.3fs", time.perf_counter() - t2)
             self._encoder = encoder
             self._recording = True
             log.info("Video recording started -> %s", path)
@@ -243,10 +252,23 @@ class CameraManager:
             log.debug("stop_video_recording: lock acquired after %.3fs", time.perf_counter() - t0)
             t1 = time.perf_counter()
             self._cam.stop_encoder()
-            log.debug("stop_video_recording: cam.stop_recording returned in %.3fs", time.perf_counter() - t1)
+            log.debug("stop_video_recording: stop_encoder returned in %.3fs", time.perf_counter() - t1)
             self._encoder = None  # release encoder reference; prevents GC race on next start_recording
             self._recording = False
-            log.info("Video recording stopped")
+            # Reconfigure back to still mode so capture_still() returns full-res frames.
+            t2 = time.perf_counter()
+            self._cam.stop()
+            still_config = self._cam.create_video_configuration(
+                main={"size": (FULL_W, FULL_H), "format": "RGB888"},
+                lores={"size": (PREVIEW_W, PREVIEW_H), "format": "YUV420"},
+            )
+            self._cam.configure(still_config)
+            self._cam.start()
+            self._apply_still_controls(self._cam)
+            log.info(
+                "stop_video_recording: reconfigured to %dx%d still mode in %.3fs",
+                FULL_W, FULL_H, time.perf_counter() - t2,
+            )
 
 
 camera_manager = CameraManager()

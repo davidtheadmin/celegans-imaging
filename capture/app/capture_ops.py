@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from capture import apply_flat_field  # noqa: E402
 from capture import load_master_flat as _load_master_flat  # noqa: E402
 
-DEFAULT_BITRATE = 25_000_000
+DEFAULT_BITRATE = 9_000_000  # 9 Mbps for 2028×1520 @ 30 fps
 DEFAULT_DURATION = 30
 DEFAULT_VIDEO_FPS = 30  # fallback; actual fps queried from camera before recording
 
@@ -160,12 +160,12 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
 
 
 def free_video(cam_mgr, duration_s: int, bitrate_bps: int = DEFAULT_BITRATE) -> dict:
-    fps = cam_mgr.video_fps
-    log.debug("free_video: using %.2f fps (measured at startup)", fps)
     ts = _ts()
     h264_path = _video_dir() / f"{ts}_video.h264"
     log.debug("free_video: starting recording -> %s", h264_path.name)
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
+    fps = cam_mgr.video_fps  # read after reconfiguration so we get the actual video fps
+    log.debug("free_video: using %.2f fps", fps)
     try:
         time.sleep(duration_s)
     finally:
@@ -188,12 +188,12 @@ def plate_motility(
     duration_s: int,
     bitrate_bps: int = DEFAULT_BITRATE,
 ) -> dict:
-    fps = cam_mgr.video_fps
-    log.debug("plate_motility: using %.2f fps (measured at startup)", fps)
     ts = _ts()
     h264_path = plate_dir / f"{ts}_video.h264"
     log.debug("plate_motility: starting recording -> %s", h264_path.name)
     cam_mgr.start_video_recording(h264_path, bitrate_bps)
+    fps = cam_mgr.video_fps  # read after reconfiguration so we get the actual video fps
+    log.debug("plate_motility: using %.2f fps", fps)
     try:
         time.sleep(duration_s)
     finally:
