@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 FULL_W, FULL_H = 4056, 3040
 VIDEO_W, VIDEO_H = 2028, 1520   # IMX477 mode 2: full FoV, 2×2 binned, 53.77 fps max
 VIDEO_FPS = 30.0
+VIDEO_FRAME_US = 33_333  # 1_000_000 / 30
 PREVIEW_W, PREVIEW_H = 1280, 960
 DEFAULT_VIDEO_FPS = VIDEO_FPS  # kept for capture_ops compatibility
 
@@ -227,7 +228,7 @@ class CameraManager:
             video_config = self._cam.create_video_configuration(
                 main={"size": (VIDEO_W, VIDEO_H), "format": "RGB888"},
                 lores={"size": (PREVIEW_W, PREVIEW_H), "format": "YUV420"},
-                controls={"FrameDurationLimits": (33_333, 33_333)},  # lock to 30 fps
+                controls={"FrameDurationLimits": (VIDEO_FRAME_US, VIDEO_FRAME_US)},  # lock to 30 fps
             )
             self._cam.configure(video_config)
             self._cam.start()
