@@ -16,9 +16,9 @@
     ],
     "mask_min_area": 50,
     "mask_max_area": 100000000,
-    "thresh_C": 15,
+    "thresh_C": 10,
     "thresh_block_size": 61,
-    "dilation_size": 9,
+    "dilation_size": 5,
     "save_full_interval": -1,
     "compression_buff": -1,
     "keep_border_data": false,
@@ -34,7 +34,7 @@
     "traj_min_area": 25,
     "traj_min_box_width": 5,
     "traj_max_allowed_dist": 100,
-    "traj_max_frames_gap": 5,
+    "traj_max_frames_gap": 10,
     "traj_area_ratio_lim": 2,
     "roi_size": -1,
     "w_num_segments": 24,
@@ -66,5 +66,6 @@
     "MWP_total_n_wells": "-1",
     "MWP_whichsideup": "upright",
     "MWP_well_shape": "square",
-    "MWP_well_masked_edge": 0.1
+    "MWP_well_masked_edge": 0.1,
+    "head_angle_prominence": 0.30
 }

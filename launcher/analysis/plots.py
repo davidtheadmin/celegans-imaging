@@ -15,8 +15,9 @@ def make_video_summary_png(
     hdf5_path: Path,
     fps: float,
     out_path: Path,
+    head_angle_prominence: float = 0.30,
 ) -> None:
-    """Two-panel plot: BPM bar chart + curvature traces for top 3 longest fragments."""
+    """Two-panel plot: BPM bar chart + head-angle traces for top 3 longest fragments."""
     long_rows = [r for r in fragment_rows if r["is_long"]]
     if not long_rows:
         log.warning("No long fragments for %s — skipping plot", out_path.name)
@@ -40,30 +41,95 @@ def make_video_summary_png(
     ax1.set_title("BPM per long fragment")
     ax1.legend(fontsize=9)
 
-    # Panel 2: raw curvature trace for top 3 longest fragments
+    # Panel 2: head-angle traces for top 3 longest fragments
     try:
-        df = pd.read_hdf(str(hdf5_path), key="timeseries_data")
+        import h5py
+        from analysis.analysis_csv import compute_head_angle_signal
+        traj = pd.read_hdf(str(hdf5_path), key="trajectories_data")
+        with h5py.File(str(hdf5_path), "r") as fh:
+            skel_all = fh["coordinates"]["skeletons"][:]
+        frame_col = "timestamp_raw" if "timestamp_raw" in traj.columns else "frame_number"
         colors = ["#1976d2", "#f57c00", "#7b1fa2"]
         for idx, worm_index in enumerate(top3_indices):
-            grp = df[df["worm_index"] == worm_index]["curvature_midbody"].dropna().values
-            if len(grp) == 0:
+            worm_traj = (traj[traj["worm_index_joined"] == worm_index]
+                         .sort_values(frame_col).reset_index(drop=True))
+            signal = compute_head_angle_signal(worm_traj, skel_all, fps, head_angle_prominence)
+            if signal is None:
                 continue
-            t = np.arange(len(grp)) / fps
-            ax2.plot(t, grp, color=colors[idx % len(colors)], alpha=0.8,
-                     linewidth=0.8, label=f"worm {worm_index}")
+            t_rel = signal["frame_nums"] / fps
+            t_rel = t_rel - t_rel[0]
+            ax2.plot(t_rel, signal["detrended"], color=colors[idx % len(colors)],
+                     alpha=0.8, linewidth=0.8, label=f"worm {worm_index}")
+            all_peaks = np.concatenate([signal["pos_peaks"], signal["neg_peaks"]])
+            if len(all_peaks):
+                ax2.scatter(t_rel[all_peaks], signal["detrended"][all_peaks],
+                            color="red", s=12, zorder=5)
         ax2.set_xlabel("Time (s)")
-        ax2.set_ylabel("Curvature (midbody)")
-        ax2.set_title("Body wiggle — midline-crossing = half a bend")
+        ax2.set_ylabel("Head angle (rad)")
+        ax2.set_title("Head swing — each peak is a bend")
         if top3_indices:
             ax2.legend(fontsize=9)
     except Exception as exc:
-        log.warning("Could not load curvature data for %s: %s", out_path.name, exc)
-        ax2.text(0.5, 0.5, "Curvature data unavailable",
+        log.warning("Could not load head-angle data for %s: %s", out_path.name, exc)
+        ax2.text(0.5, 0.5, "Head-angle data unavailable",
                  ha="center", va="center", transform=ax2.transAxes)
 
     plt.tight_layout()
     plt.savefig(out_path, dpi=100)
     plt.close(fig)
+
+
+def make_per_worm_trace_png(
+    worm_index: int,
+    hdf5_path: Path,
+    fps: float,
+    basename: str,
+    out_path: Path,
+    bpm: float,
+    coverage_pct: float,
+    head_angle_prominence: float = 0.30,
+) -> None:
+    """Static 800×400 head-angle trace PNG for one fully-tracked worm."""
+    try:
+        import h5py
+        from analysis.analysis_csv import compute_head_angle_signal
+        traj = pd.read_hdf(str(hdf5_path), key="trajectories_data")
+        with h5py.File(str(hdf5_path), "r") as fh:
+            skel_all = fh["coordinates"]["skeletons"][:]
+        frame_col = "timestamp_raw" if "timestamp_raw" in traj.columns else "frame_number"
+        worm_traj = (traj[traj["worm_index_joined"] == worm_index]
+                     .sort_values(frame_col).reset_index(drop=True))
+        signal = compute_head_angle_signal(worm_traj, skel_all, fps, head_angle_prominence)
+        if signal is None:
+            log.warning("make_per_worm_trace_png: no valid signal for worm %d in %s",
+                        worm_index, hdf5_path.name)
+            return
+
+        t_sec = signal["frame_nums"] / fps
+        t_rel = t_sec - t_sec[0]
+        detrended = signal["detrended"]
+        all_peaks = np.concatenate([signal["pos_peaks"], signal["neg_peaks"]])
+        bends_per_30s = bpm / 2.0
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(t_rel, detrended, color="#1976d2", linewidth=0.8)
+        if len(all_peaks):
+            ax.scatter(t_rel[all_peaks], detrended[all_peaks],
+                       color="red", s=20, zorder=5)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_xlabel("Time (s)")
+        ax.set_ylabel("Head angle (rad)")
+        ax.set_title(
+            f"{basename} — worm {worm_index}\n"
+            f"bends_per_30s = {bends_per_30s:.1f},  coverage = {coverage_pct:.0f}%",
+            fontsize=10,
+        )
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=100)
+        plt.close(fig)
+        log.info("Saved per-worm trace PNG: %s", out_path.name)
+    except Exception as exc:
+        log.warning("make_per_worm_trace_png failed for worm %d: %s", worm_index, exc)
 
 
 def make_overview_png(

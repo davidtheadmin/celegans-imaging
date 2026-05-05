@@ -348,6 +348,7 @@ class AnalysisDialog(tk.Toplevel):
         self._want_tracked = tk.BooleanVar(value=False)
         self._want_curvature = tk.BooleanVar(value=False)
         self._want_sidebyside = tk.BooleanVar(value=False)
+        self._want_per_worm_traces = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             render_frame, text="Tracked (skeleton + worm IDs)",
             variable=self._want_tracked,
@@ -359,6 +360,11 @@ class AnalysisDialog(tk.Toplevel):
         ttk.Checkbutton(
             render_frame, text="Side-by-side (original | masked + tracked)",
             variable=self._want_sidebyside,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            render_frame,
+            text="Per-worm curvature traces (PNG + MP4 per fully-tracked worm)",
+            variable=self._want_per_worm_traces,
         ).pack(anchor="w")
         ttk.Label(
             render_frame,
@@ -433,6 +439,7 @@ class AnalysisDialog(tk.Toplevel):
             want_tracked=self._want_tracked.get(),
             want_curvature=self._want_curvature.get(),
             want_sidebyside=self._want_sidebyside.get(),
+            want_per_worm_traces=self._want_per_worm_traces.get(),
         )
         self.destroy()
 

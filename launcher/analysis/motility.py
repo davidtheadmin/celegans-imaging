@@ -22,6 +22,10 @@ log = logging.getLogger(__name__)
 _ANALYSIS_DIR = "_analysis"
 _CACHE_DIR = "_wormscan_cache"
 
+# Keys in motility_params.json that are consumed by our post-Tierpsy code and
+# must never be written into the per-video JSON that Tierpsy validates.
+_WORMSCAN_ONLY_KEYS: frozenset[str] = frozenset({"head_angle_prominence"})
+
 
 def _condition_for(video: Path, selected_folder: Path) -> str:
     return "unlabeled" if video.parent == selected_folder else video.parent.name
@@ -159,6 +163,7 @@ class MotilityAgent(threading.Thread):
         self._want_tracked: bool = False
         self._want_curvature: bool = False
         self._want_sidebyside: bool = False
+        self._want_per_worm_traces: bool = False
         self._params_template: dict = {}
         self._load_params()
 
@@ -194,6 +199,7 @@ class MotilityAgent(threading.Thread):
         want_tracked: bool = False,
         want_curvature: bool = False,
         want_sidebyside: bool = False,
+        want_per_worm_traces: bool = False,
     ) -> None:
         """UI thread: trigger an analysis run on the given folder."""
         with self._lock:
@@ -203,6 +209,7 @@ class MotilityAgent(threading.Thread):
             self._want_tracked = want_tracked
             self._want_curvature = want_curvature
             self._want_sidebyside = want_sidebyside
+            self._want_per_worm_traces = want_per_worm_traces
         self.status.update(
             running=True,
             total=0,
@@ -227,6 +234,7 @@ class MotilityAgent(threading.Thread):
                 want_tracked = self._want_tracked
                 want_curvature = self._want_curvature
                 want_sidebyside = self._want_sidebyside
+                want_per_worm_traces = self._want_per_worm_traces
                 self._folder = None
             if folder is not None:
                 self._cancel.clear()
@@ -234,6 +242,7 @@ class MotilityAgent(threading.Thread):
                     self._run_analysis(
                         folder, threshold_s, clear_cache,
                         want_tracked, want_curvature, want_sidebyside,
+                        want_per_worm_traces,
                     )
                 except Exception:
                     log.exception("MotilityAgent crashed")
@@ -251,6 +260,7 @@ class MotilityAgent(threading.Thread):
         want_tracked: bool = False,
         want_curvature: bool = False,
         want_sidebyside: bool = False,
+        want_per_worm_traces: bool = False,
     ) -> None:
         from analysis.ffmpeg_utils import find_videos, probe_fps, probe_duration, convert_to_avi
         from analysis.docker_utils import run_tierpsy
@@ -299,6 +309,7 @@ class MotilityAgent(threading.Thread):
             )
 
             image = f"{s.tierpsy_image}:{s.tierpsy_image_tag}"
+            head_angle_prominence = float(self._params_template.get("head_angle_prominence", 0.30))
             all_fragment_rows: list[dict] = []
             summary_rows: list[dict] = []
 
@@ -347,6 +358,8 @@ class MotilityAgent(threading.Thread):
                     params = copy.deepcopy(self._params_template)
                     if "expected_fps" in params:
                         params["expected_fps"] = fps
+                    for _k in _WORMSCAN_ONLY_KEYS:
+                        params.pop(_k, None)
                     json_file = cache_dir / (video.stem + ".json")
                     json_file.write_text(
                         json.dumps(params, indent=2), encoding="utf-8"
@@ -375,6 +388,7 @@ class MotilityAgent(threading.Thread):
                     fragment_rows = read_fragments(
                         hdf5_path, fps, condition, plate,
                         long_threshold_s=threshold_s,
+                        head_angle_prominence=head_angle_prominence,
                     )
                     n_long = sum(1 for r in fragment_rows if r["is_long"])
                     write_log(
@@ -385,11 +399,13 @@ class MotilityAgent(threading.Thread):
                     _stage("Writing plots…")
                     if fragment_rows and hdf5_path:
                         plot_path = per_video_dir / f"{condition}__{plate}.png"
-                        make_video_summary_png(fragment_rows, hdf5_path, fps, plot_path)
+                        make_video_summary_png(fragment_rows, hdf5_path, fps, plot_path,
+                                               head_angle_prominence)
 
-                    if want_tracked or want_curvature or want_sidebyside:
+                    if want_tracked or want_curvature or want_sidebyside or want_per_worm_traces:
                         from analysis.render_video import (
                             render_tracked, render_curvature, render_sidebyside,
+                            render_per_worm_trace,
                         )
                         skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
                         masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
@@ -412,6 +428,30 @@ class MotilityAgent(threading.Thread):
                                 avi, masked_hdf5, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_sidebyside.mp4", fps,
                             )
+                        if (want_per_worm_traces and hdf5_path
+                                and skeletons_hdf5.exists() and masked_hdf5.exists()):
+                            from analysis.plots import make_per_worm_trace_png
+                            full_track_rows = [r for r in fragment_rows
+                                               if r.get("is_full_track")]
+                            n_full = len(full_track_rows)
+                            traces_dir = per_video_dir / f"{prefix}_traces"
+                            traces_dir.mkdir(exist_ok=True)
+                            for j, worm_row in enumerate(full_track_rows):
+                                wi = worm_row["worm_index"]
+                                _stage(f"Rendering per-worm traces ({j + 1}/{n_full})…")
+                                make_per_worm_trace_png(
+                                    wi, hdf5_path, fps, prefix,
+                                    traces_dir / f"worm_{wi}.png",
+                                    worm_row["bpm"],
+                                    worm_row.get("coverage_pct", 0.0),
+                                    head_angle_prominence,
+                                )
+                                render_per_worm_trace(
+                                    masked_hdf5, skeletons_hdf5, hdf5_path,
+                                    wi, fps,
+                                    traces_dir / f"worm_{wi}.mp4",
+                                    head_angle_prominence,
+                                )
 
                 except Exception as exc:
                     status_str = str(exc)[:200]
