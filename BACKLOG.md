@@ -69,3 +69,6 @@ captures). Need bulk-delete operations:
 Both need confirmation dialogs ("Delete session 'UV survival run 3' and
 all 60 plates?"). Soft-delete semantics should match the existing
 per-plate delete so retention can clean up later.
+
+- [ ] Production motility plots (`make_video_summary_png`, `make_per_worm_trace_png`) draw straight lines across skeleton-failure gaps, which can be misleading. Insert NaN values into time/angle arrays at gap boundaries so matplotlib renders real visual gaps. Discovered during 2026-05-05 calibration revisit; was responsible for the apparent "step pattern" on worm 4 that turned out to be ~50% missing skeleton frames.
+- [ ] Add `signal_coverage_pct` distinct from trajectory `coverage_pct` to motility CSV outputs. Current `coverage_pct` measures trajectory continuity (frames Tierpsy tracked the worm) but not head-angle signal validity (frames where skeleton was finite). Worm 4 reports 100% trajectory coverage but only ~48% signal coverage. Filter on `signal_coverage_pct >= X` would be more meaningful for analysis quality.

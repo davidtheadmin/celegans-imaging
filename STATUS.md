@@ -1,3 +1,9 @@
+## 2026-05-05
+
+**Bend-counting algorithm replaced with head-angle peak counting.** Validated against lab technician's manual counts on 8 worms (4 fast WT, 4 slow). MAE 1.8 bends/30s vs prior method's 5.1. Old midbody-curvature method overcounted noise on slow/dying worms; new method directly implements the lab's manual protocol. `bend_calibration.py` kept in repo as reference implementation and regression validator.
+
+
+
 ## 2026-05-02
 
 **Motility analysis pipeline complete.** Validated end-to-end on reference video (test.avi: 30s, ~15 worms, median 57.1 BPM matching prior manual run at 56.3 BPM). Pipeline lives in `launcher/analysis/`. User flow: launcher → Open Analysis → Motility → folder picker → progress dialog → results in `_analysis/<timestamp>/`. Tierpsy runs headless in ephemeral Docker containers. Render of tracked MP4s is optional via three checkboxes.
@@ -236,3 +242,7 @@ ssh celegans "cd celegans-imaging && .venv/bin/python -m capture.retention --dry
 ssh celegans "cd celegans-imaging && .venv/bin/python -m capture.retention"
 # Check it moved to .trash/
 ```
+
+## 2026-05-05
+
+**Bend-counting method calibration revisited.** Tested 8 head-angle variants against manual counts on 8 calibration worms with full-timeline diagnostic plots. Production method (v1: head=5->0, body=30->20, prominence=0.30) remains the best choice across the motility spectrum (MAE 1.8 bends/30s). Anterior-tangent methods (v5/v6) appeared attractive on fast worms but overcount slow worms by 2x - unsafe for survival assays. Worm fast-WT-4 has only 48% valid skeleton frames, which all methods reflect accurately; the 6-bend miss is a tracking issue, not an algorithm issue. Calibration receipts archived in `docs/calibration/`.

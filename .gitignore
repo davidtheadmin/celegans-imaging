@@ -12,3 +12,6 @@ __pycache__/
 # OS
 .DS_Store
 .claude/
+
+# Generated diagnostic outputs (archived in docs/calibration/ when finalised)
+launcher/worm_diagnostics/
