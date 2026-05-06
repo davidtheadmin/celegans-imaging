@@ -2,6 +2,7 @@ import subprocess
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ..auth import require_token
@@ -62,3 +63,9 @@ async def clock_sync(req: ClockSyncRequest):
         "new_time": req.client_iso,
         "offset_seconds": int(offset_s),
     }
+
+
+@router.post("/shutdown", dependencies=[Depends(require_token)], status_code=202)
+async def shutdown():
+    subprocess.Popen(["sudo", "/sbin/shutdown", "-h", "now"])
+    return Response(status_code=202)

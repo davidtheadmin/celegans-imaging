@@ -6,6 +6,7 @@ It reads sync state only through SyncStatus.snapshot() via root.after().
 No widget method is ever called from the sync thread.
 """
 import os
+import threading
 import tkinter as tk
 import webbrowser
 from dataclasses import replace
@@ -510,6 +511,12 @@ class MainWindow(tk.Tk):
         )
         self._sync_btn.pack(fill="x", pady=3)
 
+        ttk.Separator(btn_frame, orient="horizontal").pack(fill="x", pady=(6, 3))
+
+        ttk.Button(
+            btn_frame, text="Shut down Pi", command=self._shutdown_pi
+        ).pack(fill="x", pady=3)
+
         # --- Info / settings row ---
         bottom = ttk.Frame(self)
         bottom.pack(fill="x", padx=14, pady=(4, 10))
@@ -594,6 +601,27 @@ class MainWindow(tk.Tk):
         self._sync_btn.config(state="disabled")
         self._button_waiting = True
         self._agent.wake()
+
+    def _shutdown_pi(self) -> None:
+        if not messagebox.askyesno(
+            "Shut down Pi",
+            "Shut down the Pi now?\n\nAll active captures will stop.",
+            default="no",
+            parent=self,
+        ):
+            return
+        s = self._settings
+        def _post() -> None:
+            try:
+                import requests
+                requests.post(
+                    f"{s.pi_url}/shutdown",
+                    headers={"X-Auth-Token": s.token},
+                    timeout=3,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_post, daemon=True).start()
 
     def _open_settings(self) -> None:
         SettingsDialog(self, self._settings, self._on_settings_saved)
