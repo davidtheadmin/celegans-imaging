@@ -27,7 +27,8 @@ def make_video_summary_png(
     median_bpm = float(np.median(bpms_sorted))
 
     top3 = sorted(long_rows, key=lambda r: r["duration_s"], reverse=True)[:3]
-    top3_indices = [r["worm_index"] for r in top3]
+    # repr_tierpsy_id is the Tierpsy worm_index_joined for trajectory lookup
+    top3_indices = [r.get("repr_tierpsy_id", r["worm_index"]) for r in top3]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     fig.suptitle(f"{out_path.stem}  —  median BPM: {median_bpm:.1f}")

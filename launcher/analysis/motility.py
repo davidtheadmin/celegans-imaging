@@ -385,15 +385,26 @@ class MotilityAgent(threading.Thread):
                         )
                     hdf5_path = candidates[0]
 
-                    fragment_rows = read_fragments(
+                    fragment_rows, analysis_log = read_fragments(
                         hdf5_path, fps, condition, plate,
                         long_threshold_s=threshold_s,
                         head_angle_prominence=head_angle_prominence,
                     )
                     n_long = sum(1 for r in fragment_rows if r["is_long"])
                     write_log(
-                        f"Fragments: {len(fragment_rows)} total, {n_long} long"
-                        f" (threshold {threshold_s}s)"
+                        f"Worms: {len(fragment_rows)} total, {n_long} long"
+                        f" (threshold {threshold_s}s) | "
+                        f"groups formed: {analysis_log['groups_formed']['total']}"
+                        f" (curl={analysis_log['groups_formed']['curl']},"
+                        f" collision={analysis_log['groups_formed']['collision']})"
+                        f" | dropped: {analysis_log['worms_dropped']['total']}"
+                    )
+
+                    import json as _json
+                    log_sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
+                    log_sidecar.write_text(
+                        _json.dumps({"video": video.name, **analysis_log}, indent=2),
+                        encoding="utf-8",
                     )
 
                     _stage("Writing plots…")
@@ -437,7 +448,7 @@ class MotilityAgent(threading.Thread):
                             traces_dir = per_video_dir / f"{prefix}_traces"
                             traces_dir.mkdir(exist_ok=True)
                             for j, worm_row in enumerate(full_track_rows):
-                                wi = worm_row["worm_index"]
+                                wi = worm_row.get("repr_tierpsy_id", worm_row["worm_index"])
                                 _stage(f"Rendering per-worm traces ({j + 1}/{n_full})…")
                                 make_per_worm_trace_png(
                                     wi, hdf5_path, fps, prefix,
@@ -478,7 +489,11 @@ class MotilityAgent(threading.Thread):
                 )
 
         # Write per-condition Excel workbook + summary CSV
-        _sheet_cols = ["plate", "worm_index", "frames", "duration_s", "bpm", "is_long", "fps_used"]
+        _sheet_cols = [
+            "plate", "worm_index", "frames", "duration_s", "bpm", "is_long", "fps_used",
+            "group_classification", "curl_count", "fragment_count", "valid_frac",
+            "displacement_px", "coverage_pct",
+        ]
         all_df = (pd.DataFrame(all_fragment_rows) if all_fragment_rows
                   else pd.DataFrame(columns=["condition"] + _sheet_cols))
         with pd.ExcelWriter(out_dir / "motility_results.xlsx", engine="openpyxl") as xw:
