@@ -490,7 +490,7 @@ class MotilityAgent(threading.Thread):
 
         # Write per-condition Excel workbook + summary CSV
         _sheet_cols = [
-            "plate", "worm_index", "frames", "duration_s", "bpm", "is_long", "fps_used",
+            "plate", "worm_index", "group_id", "frames", "duration_s", "bpm", "is_long", "fps_used",
             "group_classification", "curl_count", "fragment_count", "valid_frac",
             "displacement_px", "coverage_pct",
         ]
