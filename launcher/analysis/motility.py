@@ -443,7 +443,7 @@ class MotilityAgent(threading.Thread):
                                 and skeletons_hdf5.exists() and masked_hdf5.exists()):
                             from analysis.plots import make_per_worm_trace_png
                             full_track_rows = [r for r in fragment_rows
-                                               if r.get("is_full_track")]
+                                               if r.get("is_long")]
                             n_full = len(full_track_rows)
                             traces_dir = per_video_dir / f"{prefix}_traces"
                             traces_dir.mkdir(exist_ok=True)
