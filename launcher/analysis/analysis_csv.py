@@ -209,6 +209,37 @@ def _select_collision_subtracks(
 
 
 # ---------------------------------------------------------------------------
+# Per-track drop logging helpers
+# ---------------------------------------------------------------------------
+
+def _st_tierpsy_id(st: pd.DataFrame, group) -> int:
+    """Return the Tierpsy worm_index_joined for a clean sub-track."""
+    if "worm_index_joined" in st.columns:
+        ids = st["worm_index_joined"].unique()
+        if len(ids) == 1:
+            return int(ids[0])
+    return group.repr_track_id
+
+
+def _log_drop(
+    dropped_tracks: list,
+    flicker_stats_by_tid: dict,
+    tierpsy_id: int,
+    reason: str,
+    group,
+) -> None:
+    fl = flicker_stats_by_tid.get(tierpsy_id, {})
+    dropped_tracks.append({
+        "tierpsy_id": tierpsy_id,
+        "reason": reason,
+        "longest_clean_duration_s": round(fl.get("longest_clean_duration_s", 0.0), 3),
+        "total_flicker_frames": fl.get("total_flicker_frames", 0),
+        "n_fragments_in_group": group.fragment_count,
+        "group_id": group.virtual_worm_id,
+    })
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline entry point
 # ---------------------------------------------------------------------------
 
@@ -270,6 +301,8 @@ def read_fragments(
     multi_worm_clusters = 0
     collision_worms_per_cluster: dict[int, int] = {}
     next_worm_idx = 0
+    dropped_tracks: list[dict] = []
+    flicker_stats_by_tid: dict[int, dict] = {}
 
     # Pre-index traj by track_id for fast lookup
     traj_by_track: dict[int, pd.DataFrame] = {
@@ -293,12 +326,17 @@ def read_fragments(
                     "longest_clean_s": 0.0,
                     "total_frames": 0,
                 }
+                flicker_stats_by_tid[tid] = {"longest_clean_duration_s": 0.0, "total_flicker_frames": 0}
                 continue
             result = filter_track(track_df, skel_all, fps, FLICKER_WINDOW_SECONDS, FLICKER_STD_THRESHOLD_PIXELS)
             per_track_filtered[tid] = result
             total_flicker_frames += result["flicker_frame_count"]
             if result["flicker_frame_count"] > 0:
                 tracks_with_any_flicker += 1
+            flicker_stats_by_tid[tid] = {
+                "longest_clean_duration_s": result["longest_clean_s"],
+                "total_flicker_frames": result["flicker_frame_count"],
+            }
 
         # Collect all clean sub-tracks for this group
         all_clean_subtracks: list[pd.DataFrame] = []
@@ -313,8 +351,12 @@ def read_fragments(
             if total_clean_s < MIN_OBSERVATION_TIME_SECONDS:
                 if total_clean_frames == 0:
                     tracks_dropped_flicker += 1
+                    drop_reason = "flicker_killed_track"
                 else:
                     dropped_curl_too_short += 1
+                    drop_reason = "curl_too_short"
+                for tid in group.track_ids:
+                    _log_drop(dropped_tracks, flicker_stats_by_tid, tid, drop_reason, group)
                 continue
             row = _metrics_curl(
                 group, per_track_filtered, all_clean_subtracks,
@@ -328,6 +370,8 @@ def read_fragments(
         else:  # collision — multi-worm expansion
             if not all_clean_subtracks:
                 dropped_collision_too_short += 1
+                for tid in group.track_ids:
+                    _log_drop(dropped_tracks, flicker_stats_by_tid, tid, "collision_too_short", group)
                 continue
             N_obs = _max_concurrent(all_clean_subtracks, frame_col)
             N = min(max(N_obs, 1), COLLISION_WORM_COUNT_CAP)
@@ -336,6 +380,8 @@ def read_fragments(
             for st in selected_sts:
                 if len(st) / fps < MIN_OBSERVATION_TIME_SECONDS:
                     dropped_collision_too_short += 1
+                    _log_drop(dropped_tracks, flicker_stats_by_tid,
+                               _st_tierpsy_id(st, group), "collision_too_short", group)
                     continue
                 row = _metrics_one_collision_subtrack(
                     st, group, skel_all, fps,
@@ -355,16 +401,28 @@ def read_fragments(
             rows.extend(group_rows)
 
     # ---- Debris filter (applied after multi-collision expansion) ----
-    pre_debris = len(rows)
-    rows = [
-        r for r in rows
-        if not (
+    def _is_debris(r: dict) -> bool:
+        return (
             r["displacement_px"] < DEBRIS_DISPLACEMENT_PIXELS
             and r["curl_count"] == 0
             and r["bpm"] < DEBRIS_BPM_THRESHOLD
         )
-    ]
-    dropped_debris = pre_debris - len(rows)
+
+    for r in rows:
+        if _is_debris(r):
+            tid = r.get("repr_tierpsy_id", -1)
+            fl = flicker_stats_by_tid.get(tid, {})
+            dropped_tracks.append({
+                "tierpsy_id": tid,
+                "reason": "debris",
+                "longest_clean_duration_s": round(r["duration_s"], 3),
+                "total_flicker_frames": fl.get("total_flicker_frames", 0),
+                "n_fragments_in_group": r.get("fragment_count", 1),
+                "group_id": r.get("group_id", -1),
+            })
+
+    rows = [r for r in rows if not _is_debris(r)]
+    dropped_debris = sum(1 for entry in dropped_tracks if entry["reason"] == "debris")
 
     # ---- Build analysis log ----
     dropped_total = (
@@ -399,6 +457,7 @@ def read_fragments(
         "collision_worms_per_cluster": {
             str(k): v for k, v in sorted(collision_worms_per_cluster.items())
         },
+        "dropped_tracks": dropped_tracks,
     }
 
     return rows, analysis_log
@@ -421,6 +480,7 @@ def _empty_log() -> dict:
         "fragment_counts": {"distribution": {}},
         "multi_worm_clusters": 0,
         "collision_worms_per_cluster": {},
+        "dropped_tracks": [],
     }
 
 
