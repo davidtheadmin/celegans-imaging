@@ -23,6 +23,9 @@ TIME_GAP_THRESHOLD_SECONDS: float = 5.0     # max wall-clock gap for adjacency (
 FLICKER_WINDOW_SECONDS: float = 0.5         # rolling-std window for skeleton-length flicker detection
 FLICKER_STD_THRESHOLD_PIXELS: float = 20    # rolling-std ceiling; expect to tighten after first run
 MIN_OBSERVATION_TIME_SECONDS: float = 10.0  # drop worm if total clean observation time is below this
+COLLISION_WORM_COUNT_CAP: int = 3           # max worms extracted from one collision cluster
+DEBRIS_DISPLACEMENT_PIXELS: float = 20.0   # debris filter: max displacement
+DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +153,62 @@ def _displacement_px(track_dfs: List[pd.DataFrame]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Collision sub-track selection helpers
+# ---------------------------------------------------------------------------
+
+def _max_concurrent(subtracks: List[pd.DataFrame], frame_col: str) -> int:
+    """Return the maximum number of sub-tracks simultaneously active at any frame."""
+    if not subtracks:
+        return 0
+    check_frames: set = set()
+    for st in subtracks:
+        check_frames.add(int(st[frame_col].iloc[0]))
+        check_frames.add(int(st[frame_col].iloc[-1]))
+    best = 0
+    for f in check_frames:
+        count = sum(
+            1 for st in subtracks
+            if int(st[frame_col].iloc[0]) <= f <= int(st[frame_col].iloc[-1])
+        )
+        best = max(best, count)
+    return best
+
+
+def _select_collision_subtracks(
+    subtracks: List[pd.DataFrame], frame_col: str, N: int
+) -> List[pd.DataFrame]:
+    """
+    Select up to N sub-tracks that all share at least one concurrent frame,
+    maximising combined frame count.
+    """
+    if len(subtracks) <= N:
+        return list(subtracks)
+    check_frames: set = set()
+    for st in subtracks:
+        check_frames.add(int(st[frame_col].iloc[0]))
+        check_frames.add(int(st[frame_col].iloc[-1]))
+    best_indices: "list[int] | None" = None
+    best_total = -1
+    for f in check_frames:
+        active = [
+            i for i, st in enumerate(subtracks)
+            if int(st[frame_col].iloc[0]) <= f <= int(st[frame_col].iloc[-1])
+        ]
+        if len(active) < N:
+            continue
+        active.sort(key=lambda i: -len(subtracks[i]))
+        selected = active[:N]
+        total = sum(len(subtracks[i]) for i in selected)
+        if total > best_total:
+            best_total = total
+            best_indices = selected
+    if best_indices is None:
+        sorted_by_len = sorted(range(len(subtracks)), key=lambda i: -len(subtracks[i]))
+        best_indices = sorted_by_len[:N]
+    return [subtracks[i] for i in best_indices]
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline entry point
 # ---------------------------------------------------------------------------
 
@@ -208,6 +267,9 @@ def read_fragments(
     dropped_curl_too_short = 0
     dropped_collision_too_short = 0
     fragment_count_dist: dict[int, int] = {}
+    multi_worm_clusters = 0
+    collision_worms_per_cluster: dict[int, int] = {}
+    next_worm_idx = 0
 
     # Pre-index traj by track_id for fast lookup
     traj_by_track: dict[int, pd.DataFrame] = {
@@ -246,7 +308,7 @@ def read_fragments(
         total_clean_frames = sum(len(st) for st in all_clean_subtracks)
         total_clean_s = total_clean_frames / fps
 
-        # ---- Step 4: drop short worms ----
+        # ---- Steps 4+5: drop short worms and compute metrics ----
         if group.classification == "curl":
             if total_clean_s < MIN_OBSERVATION_TIME_SECONDS:
                 if total_clean_frames == 0:
@@ -254,35 +316,61 @@ def read_fragments(
                 else:
                     dropped_curl_too_short += 1
                 continue
-        else:  # collision
-            # Find the longest single clean sub-track across all tracks in the group
-            longest_clean_st = max(
-                all_clean_subtracks, key=lambda df: len(df), default=None
-            )
-            longest_clean_s = len(longest_clean_st) / fps if longest_clean_st is not None else 0.0
-            if longest_clean_s < MIN_OBSERVATION_TIME_SECONDS:
-                dropped_collision_too_short += 1
-                continue
-
-        # ---- Step 5: per-worm metrics ----
-        if group.classification == "curl":
             row = _metrics_curl(
                 group, per_track_filtered, all_clean_subtracks,
                 traj_by_track, skel_all, fps, frame_col,
                 total_frames, long_threshold_s, head_angle_prominence, condition, plate,
             )
-        else:
-            row = _metrics_collision(
-                group, per_track_filtered, all_clean_subtracks,
-                skel_all, fps,
-                total_frames, long_threshold_s, head_angle_prominence, condition, plate,
-            )
+            if row is not None:
+                row["worm_index"] = next_worm_idx
+                next_worm_idx += 1
+                rows.append(row)
+        else:  # collision — multi-worm expansion
+            if not all_clean_subtracks:
+                dropped_collision_too_short += 1
+                continue
+            N_obs = _max_concurrent(all_clean_subtracks, frame_col)
+            N = min(max(N_obs, 1), COLLISION_WORM_COUNT_CAP)
+            selected_sts = _select_collision_subtracks(all_clean_subtracks, frame_col, N)
+            group_rows: list[dict] = []
+            for st in selected_sts:
+                if len(st) / fps < MIN_OBSERVATION_TIME_SECONDS:
+                    dropped_collision_too_short += 1
+                    continue
+                row = _metrics_one_collision_subtrack(
+                    st, group, skel_all, fps,
+                    total_frames, long_threshold_s, head_angle_prominence, condition, plate,
+                )
+                if row is not None:
+                    group_rows.append(row)
+            if not group_rows:
+                continue
+            if len(group_rows) > 1:
+                multi_worm_clusters += 1
+            n_ext = len(group_rows)
+            collision_worms_per_cluster[n_ext] = collision_worms_per_cluster.get(n_ext, 0) + 1
+            for row in group_rows:
+                row["worm_index"] = next_worm_idx
+                next_worm_idx += 1
+            rows.extend(group_rows)
 
-        if row is not None:
-            rows.append(row)
+    # ---- Debris filter (applied after multi-collision expansion) ----
+    pre_debris = len(rows)
+    rows = [
+        r for r in rows
+        if not (
+            r["displacement_px"] < DEBRIS_DISPLACEMENT_PIXELS
+            and r["curl_count"] == 0
+            and r["bpm"] < DEBRIS_BPM_THRESHOLD
+        )
+    ]
+    dropped_debris = pre_debris - len(rows)
 
     # ---- Build analysis log ----
-    dropped_total = dropped_curl_too_short + dropped_collision_too_short + tracks_dropped_flicker
+    dropped_total = (
+        dropped_curl_too_short + dropped_collision_too_short
+        + tracks_dropped_flicker + dropped_debris
+    )
     analysis_log = {
         "input_track_count": input_track_count,
         "groups_formed": {
@@ -296,6 +384,7 @@ def read_fragments(
                 "curl_too_short": dropped_curl_too_short,
                 "collision_too_short": dropped_collision_too_short,
                 "flicker_killed_track": tracks_dropped_flicker,
+                "debris": dropped_debris,
             },
         },
         "flicker_stats": {
@@ -306,6 +395,10 @@ def read_fragments(
         "fragment_counts": {
             "distribution": {str(k): v for k, v in sorted(fragment_count_dist.items())}
         },
+        "multi_worm_clusters": multi_worm_clusters,
+        "collision_worms_per_cluster": {
+            str(k): v for k, v in sorted(collision_worms_per_cluster.items())
+        },
     }
 
     return rows, analysis_log
@@ -315,9 +408,19 @@ def _empty_log() -> dict:
     return {
         "input_track_count": 0,
         "groups_formed": {"total": 0, "curl": 0, "collision": 0},
-        "worms_dropped": {"total": 0, "by_reason": {"curl_too_short": 0, "collision_too_short": 0, "flicker_killed_track": 0}},
+        "worms_dropped": {
+            "total": 0,
+            "by_reason": {
+                "curl_too_short": 0,
+                "collision_too_short": 0,
+                "flicker_killed_track": 0,
+                "debris": 0,
+            },
+        },
         "flicker_stats": {"total_flicker_frames": 0, "tracks_with_any_flicker": 0, "tracks_dropped_due_to_flicker": 0},
         "fragment_counts": {"distribution": {}},
+        "multi_worm_clusters": 0,
+        "collision_worms_per_cluster": {},
     }
 
 
@@ -372,7 +475,6 @@ def _metrics_curl(
     return {
         "condition": condition,
         "plate": plate,
-        "worm_index": group.virtual_worm_id,
         "repr_tierpsy_id": repr_id,
         "frames": total_clean_frames,
         "duration_s": round(total_obs_s, 3),
@@ -387,19 +489,22 @@ def _metrics_curl(
         "fragment_count": group.fragment_count,
         "valid_frac": round(valid_frac, 3),
         "displacement_px": round(displacement, 1),
+        "group_id": group.virtual_worm_id,
     }
 
 
-def _metrics_collision(
-    group, per_track_filtered, all_clean_subtracks,
-    skel_all, fps,
-    total_frames, long_threshold_s, head_angle_prominence, condition, plate,
+def _metrics_one_collision_subtrack(
+    repr_st: pd.DataFrame,
+    group,
+    skel_all: np.ndarray,
+    fps: float,
+    total_frames: int,
+    long_threshold_s: float,
+    head_angle_prominence: float,
+    condition: str,
+    plate: str,
 ) -> "dict | None":
-    """Compute per-worm metrics for a collision group (representative = longest clean sub-track)."""
-    if not all_clean_subtracks:
-        return None
-
-    repr_st = max(all_clean_subtracks, key=lambda df: len(df))
+    """Compute per-worm metrics for one selected sub-track from a collision group."""
     repr_len = len(repr_st)
     total_obs_s = repr_len / fps
 
@@ -408,14 +513,10 @@ def _metrics_collision(
         return None
 
     bpm = bends_per_minute(sig, fps)
-    bend_count = (len(sig["pos_peaks"]) + len(sig["neg_peaks"])) / 2.0
-
     displacement = _displacement_px([repr_st])
     coverage_pct = round(repr_len / total_frames * 100, 1)
 
-    # repr_tierpsy_id: Tierpsy track_id that the longest clean sub-track came from
-    # We find it by matching the sub-track's index back to the original track DataFrames
-    repr_tierpsy_id = group.repr_track_id  # best-effort default
+    repr_tierpsy_id = group.repr_track_id
     if "worm_index_joined" in repr_st.columns:
         ids = repr_st["worm_index_joined"].unique()
         if len(ids) == 1:
@@ -424,7 +525,6 @@ def _metrics_collision(
     return {
         "condition": condition,
         "plate": plate,
-        "worm_index": group.virtual_worm_id,
         "repr_tierpsy_id": repr_tierpsy_id,
         "frames": repr_len,
         "duration_s": round(total_obs_s, 3),
@@ -436,9 +536,10 @@ def _metrics_collision(
         "bend_method": "head_angle_peaks_v2",
         "group_classification": "collision",
         "curl_count": 0,
-        "fragment_count": group.fragment_count,
+        "fragment_count": 1,
         "valid_frac": 1.0,
         "displacement_px": round(displacement, 1),
+        "group_id": group.virtual_worm_id,
     }
 
 
