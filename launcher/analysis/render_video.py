@@ -412,8 +412,13 @@ def render_per_worm_trace(
         mw = int(mask_ds.shape[2])
         last_center = (mw // 2, mh // 2)
 
+        # Constrain render to the worm's actual tracked frame range.
+        frame_min = min(worm_frame_map.keys()) if worm_frame_map else 0
+        frame_max = min(max(worm_frame_map.keys()) if worm_frame_map else n_masked - 1,
+                        n_masked - 1)
+
         with _ffmpeg_writer(out_path, fps, total_w, panel_h) as pipe:
-            for frame_num in range(n_masked):
+            for frame_num in range(frame_min, frame_max + 1):
                 try:
                     # Left panel — cumulative trace up to this video frame
                     idx = int(np.searchsorted(frames_col, frame_num + 1))
