@@ -139,6 +139,14 @@ PHASE2_EXTRA_METRIC_COLS: list[str] = [
     "bpm_median_surviving",
 ]
 
+# Phase 3: segmentation-layer parameters (binary mask before skeletonisation).
+# worm_bw_thresh_factor baseline = 1.05, strel_size baseline = 5 in motility_params.json;
+# Tierpsy defaults are ~1.0 and ~3 (covered by the sanity-check run).
+SWEEP_PARAMS_3: list[tuple[str, list]] = [
+    ("worm_bw_thresh_factor", [0.7, 0.85, 1.15, 1.3]),
+    ("strel_size",            [1,   5,    7         ]),
+]
+
 METRIC_COLS: list[str] = [
     "total_fragments",
     "mean_fragment_duration_s",
@@ -707,17 +715,17 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--video", required=True, nargs="+",
-                        help="Path to one or more test MP4s "
-                             "(phase 2 accepts multiple: --video v1.mp4 v2.mp4)")
+    parser.add_argument("--video", required=True, action="append",
+                        help="Path to a test MP4 (repeat for multi-video: "
+                             "--video v1.mp4 --video v2.mp4)")
     parser.add_argument("--base-params", default=str(_DEFAULT_PARAMS),
                         help="Path to motility_params.json "
                              f"(default: {_DEFAULT_PARAMS})")
     parser.add_argument("--sweep-root", default=None,
                         help="Output directory "
                              "(default: <video_dir>/sweep_phase<N>_<UTC_timestamp>/)")
-    parser.add_argument("--phase", default="1", choices=["1", "1b", "1c", "1d", "2"],
-                        help="Sweep phase: '1' (default), '1b', '1c', '1d', or '2'")
+    parser.add_argument("--phase", default="1", choices=["1", "1b", "1c", "1d", "2", "3"],
+                        help="Sweep phase: '1' (default), '1b', '1c', '1d', '2', or '3'")
     args = parser.parse_args()
 
     phase = args.phase
@@ -745,6 +753,9 @@ def main() -> None:
         base_overrides = None
     elif phase == "2":
         sweep_params = SWEEP_PARAMS_2
+        base_overrides = None
+    elif phase == "3":
+        sweep_params = SWEEP_PARAMS_3
         base_overrides = None
     else:
         sweep_params = SWEEP_PARAMS_1
@@ -789,8 +800,8 @@ def main() -> None:
     # Build run plan (shared across all videos for phase 2).
     runs = build_run_plan(base_params, sweep_params, base_overrides)
 
-    # Phase 1d and Phase 2: append sanity-check run using Tierpsy bare defaults.
-    if phase in ("1d", "2"):
+    # Phase 1d, 2, 3: append sanity-check run using Tierpsy bare defaults.
+    if phase in ("1d", "2", "3"):
         print("\nQuerying Tierpsy defaults for sanity-check run…", flush=True)
         tierpsy_defaults = _tierpsy_default_params(tierpsy_image, docker_cmd)
         runs.append({
@@ -875,6 +886,7 @@ def main() -> None:
                  phase=phase, base_overrides=base_overrides)
 
     # Execute all runs sequentially.
+    use_extra_metrics = phase in ("3",)
     print(f"\nRunning {len(runs)} Tierpsy jobs…\n")
     single_rows: list[dict] = []
     for i, run in enumerate(runs):
@@ -888,6 +900,7 @@ def main() -> None:
             tierpsy_image=tierpsy_image,
             docker_cmd=docker_cmd,
             timeout_s=timeout_s,
+            compute_extra_metrics=use_extra_metrics,
         )
         single_rows.append(row)
         headline = row.get("total_seconds_in_10s_runs", float("nan"))
@@ -897,7 +910,10 @@ def main() -> None:
 
     # Write aggregate outputs.
     csv_path = sweep_root / "comparison.csv"
-    write_comparison_csv(single_rows, csv_path)
+    write_comparison_csv(
+        single_rows, csv_path,
+        extra_cols=PHASE2_EXTRA_METRIC_COLS if use_extra_metrics else None,
+    )
     print(f"comparison.csv  → {csv_path}")
 
     png_path = sweep_root / "summary.png"
