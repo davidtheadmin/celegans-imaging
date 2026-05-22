@@ -27,8 +27,25 @@ _CACHE_DIR = "_wormscan_cache"
 _WORMSCAN_ONLY_KEYS: frozenset[str] = frozenset({"head_angle_prominence"})
 
 
-def _condition_for(video: Path, selected_folder: Path) -> str:
-    return "unlabeled" if video.parent == selected_folder else video.parent.name
+def _resolve_video_path(video: Path, selected_folder: Path) -> tuple[str, str]:
+    """
+    Return (condition, plate) for a video relative to selected_folder.
+
+    Depth 0  root/video.mp4                  → condition="default",  plate=video.stem
+    Depth 1  root/plate/video.mp4             → condition="default",  plate=parent.name
+    Depth 2+ root/condition/plate/video.mp4   → condition=grandparent.name, plate=parent.name
+    """
+    try:
+        rel = video.relative_to(selected_folder)
+    except ValueError:
+        return "default", video.stem
+    depth = len(rel.parts) - 1
+    if depth == 0:
+        return "default", video.stem
+    elif depth == 1:
+        return "default", video.parent.name
+    else:
+        return video.parent.parent.name, video.parent.name
 
 
 def _cache_dir_for(video: Path) -> Path:
@@ -318,8 +335,7 @@ class MotilityAgent(threading.Thread):
                     write_log("Run cancelled by user")
                     break
 
-                condition = _condition_for(video, folder)
-                plate = video.stem
+                condition, plate = _resolve_video_path(video, folder)
                 short_label = f"{video.name} ({i + 1}/{total})"
 
                 def _stage(stage: str) -> None:
@@ -490,9 +506,9 @@ class MotilityAgent(threading.Thread):
 
         # Write per-condition Excel workbook + summary CSV
         _sheet_cols = [
-            "plate", "worm_index", "group_id", "frames", "duration_s", "bpm", "is_long", "fps_used",
-            "group_classification", "curl_count", "fragment_count", "valid_frac",
-            "displacement_px", "coverage_pct",
+            "plate", "worm_index", "group_id", "frames", "duration_s", "bpm", "bend_interval_cv",
+            "is_long", "fps_used", "group_classification", "curl_count", "fragment_count",
+            "valid_frac", "displacement_px", "coverage_pct",
         ]
         all_df = (pd.DataFrame(all_fragment_rows) if all_fragment_rows
                   else pd.DataFrame(columns=["condition"] + _sheet_cols))
