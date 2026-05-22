@@ -24,7 +24,7 @@ FLICKER_WINDOW_SECONDS: float = 0.5         # rolling-std window for skeleton-le
 FLICKER_STD_THRESHOLD_PIXELS: float = 20    # rolling-std ceiling; expect to tighten after first run
 MIN_OBSERVATION_TIME_SECONDS: float = 10.0  # drop worm if total clean observation time is below this
 COLLISION_WORM_COUNT_CAP: int = 3           # max worms extracted from one collision cluster
-DEBRIS_DISPLACEMENT_PIXELS: float = 20.0   # debris filter: max displacement
+DEBRIS_DISPLACEMENT_PIXELS: float = 8.0    # debris filter: max displacement
 DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
 
 
@@ -227,6 +227,8 @@ def _log_drop(
     tierpsy_id: int,
     reason: str,
     group,
+    displacement_px: float = 0.0,
+    bpm: "float | None" = None,
 ) -> None:
     fl = flicker_stats_by_tid.get(tierpsy_id, {})
     dropped_tracks.append({
@@ -236,6 +238,8 @@ def _log_drop(
         "total_flicker_frames": fl.get("total_flicker_frames", 0),
         "n_fragments_in_group": group.fragment_count,
         "group_id": group.virtual_worm_id,
+        "displacement_px": round(displacement_px, 3),
+        "bpm": (round(bpm, 3) if bpm is not None else None),
     })
 
 
@@ -355,8 +359,11 @@ def read_fragments(
                 else:
                     dropped_curl_too_short += 1
                     drop_reason = "curl_too_short"
+                _group_tdfs = [traj_by_track[tid] for tid in group.track_ids if tid in traj_by_track]
+                _group_disp = _displacement_px(_group_tdfs)
                 for tid in group.track_ids:
-                    _log_drop(dropped_tracks, flicker_stats_by_tid, tid, drop_reason, group)
+                    _log_drop(dropped_tracks, flicker_stats_by_tid, tid, drop_reason, group,
+                              displacement_px=_group_disp, bpm=None)
                 continue
             row = _metrics_curl(
                 group, per_track_filtered, all_clean_subtracks,
@@ -370,8 +377,11 @@ def read_fragments(
         else:  # collision — multi-worm expansion
             if not all_clean_subtracks:
                 dropped_collision_too_short += 1
+                _group_tdfs = [traj_by_track[tid] for tid in group.track_ids if tid in traj_by_track]
+                _group_disp = _displacement_px(_group_tdfs)
                 for tid in group.track_ids:
-                    _log_drop(dropped_tracks, flicker_stats_by_tid, tid, "collision_too_short", group)
+                    _log_drop(dropped_tracks, flicker_stats_by_tid, tid, "collision_too_short", group,
+                              displacement_px=_group_disp, bpm=None)
                 continue
             N_obs = _max_concurrent(all_clean_subtracks, frame_col)
             N = min(max(N_obs, 1), COLLISION_WORM_COUNT_CAP)
@@ -381,7 +391,8 @@ def read_fragments(
                 if len(st) / fps < MIN_OBSERVATION_TIME_SECONDS:
                     dropped_collision_too_short += 1
                     _log_drop(dropped_tracks, flicker_stats_by_tid,
-                               _st_tierpsy_id(st, group), "collision_too_short", group)
+                               _st_tierpsy_id(st, group), "collision_too_short", group,
+                               displacement_px=_displacement_px([st]), bpm=None)
                     continue
                 row = _metrics_one_collision_subtrack(
                     st, group, skel_all, fps,
@@ -419,6 +430,8 @@ def read_fragments(
                 "total_flicker_frames": fl.get("total_flicker_frames", 0),
                 "n_fragments_in_group": r.get("fragment_count", 1),
                 "group_id": r.get("group_id", -1),
+                "displacement_px": round(r["displacement_px"], 3),
+                "bpm": round(r["bpm"], 3),
             })
 
     rows = [r for r in rows if not _is_debris(r)]
