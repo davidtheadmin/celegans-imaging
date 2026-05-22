@@ -122,6 +122,21 @@ def bends_per_minute(signal: dict, fps: float) -> float:
     return bends / duration_min
 
 
+def bend_interval_cv(all_peak_frames: np.ndarray, fps: float) -> float:
+    """
+    Coefficient of variation of inter-peak intervals (seconds).
+    Returns NaN when fewer than 3 peaks are present (need ≥2 intervals for stdev).
+    Lower = more regular bending rhythm.
+    """
+    if len(all_peak_frames) < 3:
+        return float("nan")
+    intervals = np.diff(np.sort(all_peak_frames)) / fps
+    mean_interval = float(np.mean(intervals))
+    if mean_interval < 1e-9:
+        return float("nan")
+    return float(np.std(intervals) / mean_interval)
+
+
 # ---------------------------------------------------------------------------
 # Displacement helper
 # ---------------------------------------------------------------------------
@@ -529,12 +544,17 @@ def _metrics_curl(
 
     # Run bend counter on each clean sub-track independently; sum bends
     bend_count = 0
+    all_peak_frames: list[int] = []
     for st in all_clean_subtracks:
         sig = compute_head_angle_signal(st, skel_all, fps, head_angle_prominence)
         if sig is None:
             continue
         bend_count += len(sig["pos_peaks"]) + len(sig["neg_peaks"])
+        fns = sig["frame_nums"]
+        all_peak_frames.extend(fns[sig["pos_peaks"]].tolist())
+        all_peak_frames.extend(fns[sig["neg_peaks"]].tolist())
     bend_count = bend_count / 2.0 + group.curl_count  # half-bends → bends + curl bonus
+    cv = bend_interval_cv(np.array(all_peak_frames, dtype=float), fps)
 
     duration_min = total_obs_s / 60.0
     bpm = bend_count / duration_min if duration_min > 1e-9 else 0.0
@@ -552,6 +572,7 @@ def _metrics_curl(
         "frames": total_clean_frames,
         "duration_s": round(total_obs_s, 3),
         "bpm": round(float(bpm), 2),
+        "bend_interval_cv": cv,
         "is_long": total_obs_s >= long_threshold_s,
         "coverage_pct": coverage_pct,
         "is_full_track": coverage_pct >= 90.0,
@@ -586,6 +607,11 @@ def _metrics_one_collision_subtrack(
         return None
 
     bpm = bends_per_minute(sig, fps)
+    peak_frames = np.concatenate([
+        sig["frame_nums"][sig["pos_peaks"]],
+        sig["frame_nums"][sig["neg_peaks"]],
+    ]).astype(float)
+    cv = bend_interval_cv(peak_frames, fps)
     displacement = _displacement_px([repr_st])
     coverage_pct = round(repr_len / total_frames * 100, 1)
 
@@ -602,6 +628,7 @@ def _metrics_one_collision_subtrack(
         "frames": repr_len,
         "duration_s": round(total_obs_s, 3),
         "bpm": round(float(bpm), 2),
+        "bend_interval_cv": cv,
         "is_long": total_obs_s >= long_threshold_s,
         "coverage_pct": coverage_pct,
         "is_full_track": coverage_pct >= 90.0,
@@ -640,6 +667,11 @@ def build_summary_row(
         float(np.mean([r["fragment_count"] for r in long_rows])) if long_rows else None
     )
 
+    long_cvs = [
+        r["bend_interval_cv"] for r in long_rows
+        if not np.isnan(r.get("bend_interval_cv", float("nan")))
+    ]
+
     return {
         "condition": condition,
         "plate": plate,
@@ -650,6 +682,8 @@ def build_summary_row(
         "bpm_std_long":    round(float(np.std(long_bpms)),    2) if long_bpms else None,
         "bpm_min_long":    round(float(np.min(long_bpms)),    2) if long_bpms else None,
         "bpm_max_long":    round(float(np.max(long_bpms)),    2) if long_bpms else None,
+        "bend_cv_mean_long":   round(float(np.mean(long_cvs)),   4) if long_cvs else None,
+        "bend_cv_median_long": round(float(np.median(long_cvs)), 4) if long_cvs else None,
         "n_curl_long": curl_long,
         "n_collision_long": coll_long,
         "mean_valid_frac_long": round(mean_valid_frac, 3) if mean_valid_frac is not None else None,
