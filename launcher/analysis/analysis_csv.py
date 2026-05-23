@@ -631,10 +631,10 @@ def _metrics_curl(
         fns = sig["frame_nums"]
         all_peak_frames.extend(fns[sig["pos_peaks"]].tolist())
         all_peak_frames.extend(fns[sig["neg_peaks"]].tolist())
-    bend_count = bend_count / 2.0 + group.curl_count  # half-bends → bends + curl bonus
+    bend_count = bend_count / 2.0  # half-bends → bends
     cv = bend_interval_cv(np.array(all_peak_frames, dtype=float), fps)
 
-    duration_min = total_obs_s / 60.0
+    duration_min = total_clean_s / 60.0
     bpm = bend_count / duration_min if duration_min > 1e-9 else 0.0
 
     displacement = _displacement_px(all_clean_subtracks)
