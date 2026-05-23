@@ -53,6 +53,18 @@ def _cache_dir_for(video: Path) -> Path:
     return video.parent / _CACHE_DIR / video.stem
 
 
+def _hdf5_cache_valid(hdf5_path: Path) -> bool:
+    """Return True if hdf5_path exists and contains /trajectories_data."""
+    if not hdf5_path.exists():
+        return False
+    try:
+        import h5py
+        with h5py.File(str(hdf5_path), "r") as fh:
+            return "trajectories_data" in fh
+    except Exception:
+        return False
+
+
 def _safe_sheet_name(name: str, seen: dict[str, int]) -> str:
     """Return a valid Excel sheet name (≤31 chars), de-duplicated via seen."""
     import re
@@ -365,41 +377,49 @@ class MotilityAgent(threading.Thread):
 
                     video_duration_s = probe_duration(video)
 
-                    _stage("Converting to AVI…")
-                    cache_dir.mkdir(parents=True, exist_ok=True)
-                    avi = cache_dir / (video.stem + ".avi")
-                    convert_to_avi(video, avi)
-                    write_log(f"AVI ready: {avi}")
+                    candidate_hdf5 = cache_dir / "Results" / (video.stem + "_featuresN.hdf5")
+                    cache_hit = not clear_cache and _hdf5_cache_valid(candidate_hdf5)
 
-                    params = copy.deepcopy(self._params_template)
-                    if "expected_fps" in params:
-                        params["expected_fps"] = fps
-                    for _k in _WORMSCAN_ONLY_KEYS:
-                        params.pop(_k, None)
-                    json_file = cache_dir / (video.stem + ".json")
-                    json_file.write_text(
-                        json.dumps(params, indent=2), encoding="utf-8"
-                    )
+                    if cache_hit:
+                        write_log(f"[CACHE HIT] Skipping Tierpsy for {video.name}")
+                        _stage("Reading cached features…")
+                        hdf5_path = candidate_hdf5
+                    else:
+                        _stage("Converting to AVI…")
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+                        avi = cache_dir / (video.stem + ".avi")
+                        convert_to_avi(video, avi)
+                        write_log(f"AVI ready: {avi}")
 
-                    _stage("Running Tierpsy…")
-                    stdout, stderr = run_tierpsy(
-                        avi, json_file,
-                        image=image,
-                        docker_cmd=s.docker_command,
-                        timeout_s=s.analysis_video_timeout_s,
-                    )
-                    write_log(f"Tierpsy stdout:\n{stdout}")
-                    if stderr.strip():
-                        write_log(f"Tierpsy stderr:\n{stderr}")
-
-                    _stage("Reading features…")
-                    results_dir = cache_dir / "Results"
-                    candidates = list(results_dir.glob(f"{video.stem}_featuresN.hdf5"))
-                    if not candidates:
-                        raise FileNotFoundError(
-                            f"No _featuresN.hdf5 in {results_dir}"
+                        params = copy.deepcopy(self._params_template)
+                        if "expected_fps" in params:
+                            params["expected_fps"] = fps
+                        for _k in _WORMSCAN_ONLY_KEYS:
+                            params.pop(_k, None)
+                        json_file = cache_dir / (video.stem + ".json")
+                        json_file.write_text(
+                            json.dumps(params, indent=2), encoding="utf-8"
                         )
-                    hdf5_path = candidates[0]
+
+                        _stage("Running Tierpsy…")
+                        stdout, stderr = run_tierpsy(
+                            avi, json_file,
+                            image=image,
+                            docker_cmd=s.docker_command,
+                            timeout_s=s.analysis_video_timeout_s,
+                        )
+                        write_log(f"Tierpsy stdout:\n{stdout}")
+                        if stderr.strip():
+                            write_log(f"Tierpsy stderr:\n{stderr}")
+
+                        _stage("Reading features…")
+                        results_dir = cache_dir / "Results"
+                        candidates = list(results_dir.glob(f"{video.stem}_featuresN.hdf5"))
+                        if not candidates:
+                            raise FileNotFoundError(
+                                f"No _featuresN.hdf5 in {results_dir}"
+                            )
+                        hdf5_path = candidates[0]
 
                     fragment_rows, analysis_log = read_fragments(
                         hdf5_path, fps, condition, plate,
