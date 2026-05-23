@@ -26,6 +26,9 @@ MIN_OBSERVATION_TIME_SECONDS: float = 10.0  # drop worm if total clean observati
 COLLISION_WORM_COUNT_CAP: int = 3           # max worms extracted from one collision cluster
 DEBRIS_DISPLACEMENT_PIXELS: float = 8.0    # debris filter: max displacement
 DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
+DEBRIS_LENGTH_CV_MIN: float = 0.10         # debris filter: flickery if length_cv exceeds this
+DEBRIS_SOLIDITY_MIN: float = 0.6           # debris filter: blob-shaped if solidity_median exceeds this
+DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real worm (safety gate)
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +171,48 @@ def _displacement_px(track_dfs: List[pd.DataFrame]) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Shape-stability metrics (from timeseries_data / blob_features)
+# ---------------------------------------------------------------------------
+
+def _shape_metrics(
+    track_ids: list,
+    traj: pd.DataFrame,
+    timeseries_df: "pd.DataFrame | None",
+    blob_feats: "pd.DataFrame | None",
+) -> "tuple[float, float, float]":
+    """
+    Compute (length_cv, solidity_median, speed_median_abs) for a worm group.
+    Returns NaN for any metric with insufficient data.
+    """
+    length_cv = float("nan")
+    speed_median_abs = float("nan")
+    solidity_median = float("nan")
+
+    if timeseries_df is not None and "worm_index" in timeseries_df.columns:
+        ts_sub = timeseries_df[timeseries_df["worm_index"].isin(track_ids)]
+        if "length" in ts_sub.columns:
+            lengths = ts_sub["length"].values.astype(float)
+            lengths = lengths[np.isfinite(lengths)]
+            if len(lengths) >= 10 and np.mean(lengths) > 0:
+                length_cv = float(np.std(lengths) / np.mean(lengths))
+        if "speed" in ts_sub.columns:
+            speeds = np.abs(ts_sub["speed"].values.astype(float))
+            speeds = speeds[np.isfinite(speeds)]
+            if len(speeds) > 0:
+                speed_median_abs = float(np.median(speeds))
+
+    if blob_feats is not None and "solidity" in blob_feats.columns:
+        n = min(len(traj), len(blob_feats))
+        mask = traj["worm_index_joined"].iloc[:n].isin(track_ids).values
+        solids = blob_feats["solidity"].values[:n][mask].astype(float)
+        solids = solids[np.isfinite(solids)]
+        if len(solids) > 0:
+            solidity_median = float(np.median(solids))
+
+    return length_cv, solidity_median, speed_median_abs
+
+
+# ---------------------------------------------------------------------------
 # Collision sub-track selection helpers
 # ---------------------------------------------------------------------------
 
@@ -296,6 +341,17 @@ def read_fragments(
         log.error("Failed to read skeletons from %s: %s", hdf5_path, exc)
         return [], _empty_log()
 
+    timeseries_df = None
+    blob_feats = None
+    try:
+        timeseries_df = pd.read_hdf(str(hdf5_path), key="timeseries_data")
+    except Exception:
+        pass
+    try:
+        blob_feats = pd.read_hdf(str(hdf5_path), key="blob_features")
+    except Exception:
+        pass
+
     frame_col = "timestamp_raw" if "timestamp_raw" in traj.columns else "frame_number"
     total_frames = max(int(traj[frame_col].max()) + 1, 1)
 
@@ -386,6 +442,10 @@ def read_fragments(
                 total_frames, long_threshold_s, head_angle_prominence, condition, plate,
             )
             if row is not None:
+                lcv, sol, spd = _shape_metrics(group.track_ids, traj, timeseries_df, blob_feats)
+                row["length_cv"] = round(lcv, 4) if np.isfinite(lcv) else None
+                row["solidity_median"] = round(sol, 4) if np.isfinite(sol) else None
+                row["speed_median_abs"] = round(spd, 2) if np.isfinite(spd) else None
                 row["worm_index"] = next_worm_idx
                 next_worm_idx += 1
                 rows.append(row)
@@ -414,6 +474,12 @@ def read_fragments(
                     total_frames, long_threshold_s, head_angle_prominence, condition, plate,
                 )
                 if row is not None:
+                    st_tids = (list(st["worm_index_joined"].unique())
+                               if "worm_index_joined" in st.columns else [])
+                    lcv, sol, spd = _shape_metrics(st_tids, traj, timeseries_df, blob_feats)
+                    row["length_cv"] = round(lcv, 4) if np.isfinite(lcv) else None
+                    row["solidity_median"] = round(sol, 4) if np.isfinite(sol) else None
+                    row["speed_median_abs"] = round(spd, 2) if np.isfinite(spd) else None
                     group_rows.append(row)
             if not group_rows:
                 continue
@@ -427,29 +493,41 @@ def read_fragments(
             rows.extend(group_rows)
 
     # ---- Debris filter (applied after multi-collision expansion) ----
-    def _is_debris(r: dict) -> bool:
-        return (
-            r["displacement_px"] < DEBRIS_DISPLACEMENT_PIXELS
-            and r["curl_count"] == 0
-            and r["bpm"] < DEBRIS_BPM_THRESHOLD
-        )
-
+    keep_rows: list[dict] = []
     for r in rows:
-        if _is_debris(r):
+        # Rule 1: stationary debris (curl_count guard removed)
+        rule1 = (r["displacement_px"] < DEBRIS_DISPLACEMENT_PIXELS
+                 and r["bpm"] < DEBRIS_BPM_THRESHOLD)
+        # Rule 2: flickery debris — all three shape metrics must be finite and pass threshold
+        lcv = r.get("length_cv")
+        sol = r.get("solidity_median")
+        spd = r.get("speed_median_abs")
+        rule2 = (
+            lcv is not None and lcv == lcv and lcv > DEBRIS_LENGTH_CV_MIN
+            and sol is not None and sol == sol and sol > DEBRIS_SOLIDITY_MIN
+            and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
+        )
+        if rule1 or rule2:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
             dropped_tracks.append({
                 "tierpsy_id": tid,
                 "reason": "debris",
+                "debris_rule": "rule1" if rule1 else "rule2",
                 "longest_clean_duration_s": round(r["duration_s"], 3),
                 "total_flicker_frames": fl.get("total_flicker_frames", 0),
                 "n_fragments_in_group": r.get("fragment_count", 1),
                 "group_id": r.get("group_id", -1),
                 "displacement_px": round(r["displacement_px"], 3),
                 "bpm": round(r["bpm"], 3),
+                "length_cv": lcv,
+                "solidity_median": sol,
+                "speed_median_abs": spd,
             })
+        else:
+            keep_rows.append(r)
 
-    rows = [r for r in rows if not _is_debris(r)]
+    rows = keep_rows
     dropped_debris = sum(1 for entry in dropped_tracks if entry["reason"] == "debris")
 
     # ---- Build analysis log ----
@@ -672,6 +750,10 @@ def build_summary_row(
         if not np.isnan(r.get("bend_interval_cv", float("nan")))
     ]
 
+    def _finite_medians(key: str) -> "float | None":
+        vals = [r[key] for r in long_rows if r.get(key) is not None and r[key] == r[key]]
+        return round(float(np.median(vals)), 4) if vals else None
+
     return {
         "condition": condition,
         "plate": plate,
@@ -684,6 +766,9 @@ def build_summary_row(
         "bpm_max_long":    round(float(np.max(long_bpms)),    2) if long_bpms else None,
         "bend_cv_mean_long":   round(float(np.mean(long_cvs)),   4) if long_cvs else None,
         "bend_cv_median_long": round(float(np.median(long_cvs)), 4) if long_cvs else None,
+        "length_cv_median_long":      _finite_medians("length_cv"),
+        "solidity_median_long":       _finite_medians("solidity_median"),
+        "speed_median_abs_median_long": _finite_medians("speed_median_abs"),
         "n_curl_long": curl_long,
         "n_collision_long": coll_long,
         "mean_valid_frac_long": round(mean_valid_frac, 3) if mean_valid_frac is not None else None,

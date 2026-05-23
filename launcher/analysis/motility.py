@@ -509,6 +509,7 @@ class MotilityAgent(threading.Thread):
             "plate", "worm_index", "group_id", "frames", "duration_s", "bpm", "bend_interval_cv",
             "is_long", "fps_used", "group_classification", "curl_count", "fragment_count",
             "valid_frac", "displacement_px", "coverage_pct",
+            "length_cv", "solidity_median", "speed_median_abs",
         ]
         all_df = (pd.DataFrame(all_fragment_rows) if all_fragment_rows
                   else pd.DataFrame(columns=["condition"] + _sheet_cols))
