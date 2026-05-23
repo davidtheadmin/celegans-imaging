@@ -377,17 +377,29 @@ class MotilityAgent(threading.Thread):
 
                     video_duration_s = probe_duration(video)
 
+                    avi = cache_dir / (video.stem + ".avi")
                     candidate_hdf5 = cache_dir / "Results" / (video.stem + "_featuresN.hdf5")
                     cache_hit = not clear_cache and _hdf5_cache_valid(candidate_hdf5)
 
                     if cache_hit:
-                        write_log(f"[CACHE HIT] Skipping Tierpsy for {video.name}")
-                        _stage("Reading cached features…")
                         hdf5_path = candidate_hdf5
+                        needs_avi = (want_tracked or want_curvature
+                                     or want_sidebyside or want_per_worm_traces)
+                        if avi.exists():
+                            write_log(f"[CACHE HIT] Skipping Tierpsy; AVI present: {video.name}")
+                            _stage("Reading cached features…")
+                        elif needs_avi:
+                            write_log(f"[CACHE HIT] Skipping Tierpsy; converting AVI for rendering: {video.name}")
+                            _stage("Converting to AVI (for rendering)…")
+                            cache_dir.mkdir(parents=True, exist_ok=True)
+                            convert_to_avi(video, avi)
+                            write_log(f"AVI ready: {avi}")
+                        else:
+                            write_log(f"[CACHE HIT] Skipping Tierpsy + AVI: {video.name}")
+                            _stage("Reading cached features…")
                     else:
                         _stage("Converting to AVI…")
                         cache_dir.mkdir(parents=True, exist_ok=True)
-                        avi = cache_dir / (video.stem + ".avi")
                         convert_to_avi(video, avi)
                         write_log(f"AVI ready: {avi}")
 
@@ -457,19 +469,19 @@ class MotilityAgent(threading.Thread):
                         skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
                         masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
                         prefix = f"{condition}__{plate}"
-                        if want_tracked and skeletons_hdf5.exists():
+                        if want_tracked and skeletons_hdf5.exists() and avi.exists():
                             _stage("Rendering tracked video…")
                             render_tracked(
                                 avi, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_tracked.mp4", fps,
                             )
-                        if want_curvature and skeletons_hdf5.exists() and hdf5_path:
+                        if want_curvature and skeletons_hdf5.exists() and hdf5_path and avi.exists():
                             _stage("Rendering curvature video…")
                             render_curvature(
                                 avi, skeletons_hdf5, hdf5_path,
                                 per_video_dir / f"{prefix}_curvature.mp4", fps,
                             )
-                        if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists():
+                        if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists() and avi.exists():
                             _stage("Rendering side-by-side video…")
                             render_sidebyside(
                                 avi, masked_hdf5, skeletons_hdf5,
