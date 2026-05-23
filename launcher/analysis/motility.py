@@ -19,7 +19,7 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
-_ANALYSIS_DIR = "_analysis"
+_ANALYSIS_PREFIX = "_analysis"
 _CACHE_DIR = "_wormscan_cache"
 
 # Keys in motility_params.json that are consumed by our post-Tierpsy code and
@@ -300,7 +300,7 @@ class MotilityAgent(threading.Thread):
         s = self._get_settings()
         t_start = time.monotonic()
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        out_dir = folder / _ANALYSIS_DIR / timestamp
+        out_dir = folder / f"{_ANALYSIS_PREFIX}_{timestamp}"
         out_dir.mkdir(parents=True, exist_ok=True)
         per_video_dir = out_dir / "per_video"
         per_video_dir.mkdir(exist_ok=True)
