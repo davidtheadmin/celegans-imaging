@@ -469,11 +469,27 @@ class MotilityAgent(threading.Thread):
                         skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
                         masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
                         prefix = f"{condition}__{plate}"
+
+                        # Map every worm_index_joined fragment of a kept worm to
+                        # its stable worm_index so the renders label/colour by
+                        # worm_index; fragments absent from the map were filtered
+                        # out and the renders mark them faintly (Phase 3).
+                        worm_index_map: dict[int, int] = {}
+                        for r in fragment_rows:
+                            wi = r.get("worm_index")
+                            if wi is None:
+                                continue
+                            members = r.get("member_tierpsy_ids") or [r.get("repr_tierpsy_id")]
+                            for tid in members:
+                                if tid is not None:
+                                    worm_index_map[int(tid)] = int(wi)
+
                         if want_tracked and skeletons_hdf5.exists() and avi.exists():
                             _stage("Rendering tracked video…")
                             render_tracked(
                                 avi, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_tracked.mp4", fps,
+                                worm_index_map=worm_index_map,
                             )
                         if want_curvature and skeletons_hdf5.exists() and hdf5_path and avi.exists():
                             _stage("Rendering curvature video…")
@@ -486,6 +502,7 @@ class MotilityAgent(threading.Thread):
                             render_sidebyside(
                                 avi, masked_hdf5, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_sidebyside.mp4", fps,
+                                worm_index_map=worm_index_map,
                             )
                         if (want_per_worm_traces and hdf5_path
                                 and skeletons_hdf5.exists() and masked_hdf5.exists()):
@@ -497,9 +514,10 @@ class MotilityAgent(threading.Thread):
                             traces_dir.mkdir(exist_ok=True)
                             for j, worm_row in enumerate(full_track_rows):
                                 wi = worm_row.get("repr_tierpsy_id", worm_row["worm_index"])
+                                member_ids = worm_row.get("member_tierpsy_ids", [wi])
                                 _stage(f"Rendering per-worm traces ({j + 1}/{n_full})…")
                                 make_per_worm_trace_png(
-                                    wi, hdf5_path, fps, prefix,
+                                    wi, member_ids, hdf5_path, fps, prefix,
                                     traces_dir / f"worm_{wi}.png",
                                     worm_row["bpm"],
                                     worm_row.get("coverage_pct", 0.0),
@@ -507,7 +525,7 @@ class MotilityAgent(threading.Thread):
                                 )
                                 render_per_worm_trace(
                                     masked_hdf5, skeletons_hdf5, hdf5_path,
-                                    wi, fps,
+                                    member_ids, wi, fps,
                                     traces_dir / f"worm_{wi}.mp4",
                                     head_angle_prominence,
                                 )
@@ -538,9 +556,9 @@ class MotilityAgent(threading.Thread):
 
         # Write per-condition Excel workbook + summary CSV
         _sheet_cols = [
-            "plate", "worm_index", "group_id", "frames", "duration_s", "bpm", "bend_interval_cv",
-            "is_long", "fps_used", "group_classification", "curl_count", "fragment_count",
-            "valid_frac", "displacement_px", "coverage_pct",
+            "plate", "worm_index", "repr_tierpsy_id", "group_id", "frames", "duration_s",
+            "bpm", "bend_interval_cv", "is_long", "fps_used", "group_classification",
+            "curl_count", "fragment_count", "valid_frac", "displacement_px", "coverage_pct",
             "length_cv", "solidity_median", "speed_median_abs",
         ]
         all_df = (pd.DataFrame(all_fragment_rows) if all_fragment_rows

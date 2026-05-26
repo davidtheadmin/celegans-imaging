@@ -31,6 +31,27 @@ _WORM_INDEX_COL = "worm_index_joined"
 _ID_FONT_SCALE: float = 1.4
 _ID_FONT_THICKNESS: int = 3
 
+# 12-colour BGR palette for stable per-worm (worm_index) colouring in the
+# motility tracked / side-by-side renders. Indexed by worm_index % 12 so a
+# worm's colour persists across every fragment belonging to it. Distinct from
+# _PALETTE below, which colours individual worm_index_joined fragments for the
+# crawling / legacy label path.
+_WORM_PALETTE: list[tuple[int, int, int]] = [
+    ( 66, 135, 245), ( 60, 180,  75), ( 48,  48, 230), ( 30, 200, 255),
+    (205,  95,  40), (190,  70, 200), ( 80, 205, 205), ( 40, 110, 240),
+    (150, 150,  40), ( 95,  60, 205), ( 60, 160,  95), (205, 135,  60),
+]
+
+# Faint grey marker for fragments tracked by Tierpsy but filtered out of the
+# scored set (Phase 3): drawn at the fragment centroid, no label, no skeleton.
+_FILTERED_MARKER_COLOR: tuple[int, int, int] = (135, 135, 135)
+_FILTERED_MARKER_RADIUS: int = 4
+
+
+def _worm_color(worm_index: int) -> tuple[int, int, int]:
+    """Stable colour for a grouped worm_index (motility renders)."""
+    return _WORM_PALETTE[int(worm_index) % len(_WORM_PALETTE)]
+
 
 def _check_skel_col(skeletons_hdf5: Path, caller: str) -> bool:
     """Return True if _WORM_INDEX_COL is present in /trajectories_data; else log and return False."""
@@ -125,6 +146,23 @@ def _load_skeleton_map(
     return frame_map, skel
 
 
+def _skel_centroid(skel: np.ndarray, row_idx: int) -> "tuple[int, int] | None":
+    """Mean of the finite skeleton points for a row, or None if none are finite."""
+    pts = skel[row_idx]
+    finite = pts[np.isfinite(pts).all(axis=1)]
+    if len(finite) == 0:
+        return None
+    return (int(finite[:, 0].mean()), int(finite[:, 1].mean()))
+
+
+def _draw_faint_marker(frame: np.ndarray, pos: tuple[int, int]) -> None:
+    """Draw a small faint grey dot for a filtered-out fragment (Phase 3)."""
+    import cv2
+
+    cv2.circle(frame, pos, _FILTERED_MARKER_RADIUS,
+               _FILTERED_MARKER_COLOR, -1, cv2.LINE_AA)
+
+
 def _draw_skeleton(
     frame: np.ndarray,
     skel: np.ndarray,
@@ -133,16 +171,25 @@ def _draw_skeleton(
     thickness: int = 1,
     label: str = "",
 ) -> None:
-    """Draw a 49-point polyline on frame in-place, with an optional ID label."""
+    """Draw a 49-point polyline on frame in-place, with an optional ID label.
+
+    The label anchors at the head endpoint (skeleton point 0), falling back to
+    the skeleton centroid when the head point is non-finite for this frame.
+    """
     import cv2
 
     pts = skel[row_idx].astype(np.int32).reshape(-1, 1, 2)  # (49, 1, 2)
     cv2.polylines(frame, [pts], False, color, thickness, cv2.LINE_AA)
     if label:
-        head = (int(skel[row_idx, 0, 0]), int(skel[row_idx, 0, 1]))
-        cv2.putText(frame, label, head,
-                    cv2.FONT_HERSHEY_SIMPLEX, _ID_FONT_SCALE, color,
-                    _ID_FONT_THICKNESS, cv2.LINE_AA)
+        head_pt = skel[row_idx, 0]
+        if np.isfinite(head_pt).all():
+            anchor = (int(head_pt[0]), int(head_pt[1]))
+        else:
+            anchor = _skel_centroid(skel, row_idx)
+        if anchor is not None:
+            cv2.putText(frame, label, anchor,
+                        cv2.FONT_HERSHEY_SIMPLEX, _ID_FONT_SCALE, color,
+                        _ID_FONT_THICKNESS, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +202,7 @@ def render_tracked(
     out_path: Path,
     fps: float,
     kept_ids: "set[int] | None" = None,
+    worm_index_map: "dict[int, int] | None" = None,
 ) -> None:
     """
     Render the AVI with skeleton polylines and worm-index labels.
@@ -162,6 +210,12 @@ def render_tracked(
     kept_ids, when given, restricts drawing to those worm_index_joined values
     (used by the crawling pipeline so renders match the quality filter). When
     None (the motility default) every tracked worm is drawn.
+
+    worm_index_map (motility), when given, maps each worm_index_joined fragment
+    to its stable grouped worm_index. Mapped fragments are drawn in that worm's
+    persistent palette colour and labelled with the worm_index (matching the
+    Excel); fragments absent from the map are filtered-out, so they get a faint
+    grey centroid marker only (Phase 3). Takes precedence over kept_ids.
     """
     import cv2
 
@@ -190,15 +244,29 @@ def render_tracked(
                 ret, frame = cap.read()
                 if not ret:
                     break
-                for wi, skel_idx in frame_map.get(frame_num, []):
-                    if kept_ids is not None and wi not in kept_ids:
+                for tid, skel_idx in frame_map.get(frame_num, []):
+                    if worm_index_map is not None:
+                        worm_id = worm_index_map.get(tid)
+                        if worm_id is None:
+                            pos = _skel_centroid(skel, skel_idx)
+                            if pos is not None:
+                                _draw_faint_marker(frame, pos)
+                            continue
+                        try:
+                            _draw_skeleton(frame, skel, skel_idx,
+                                           _worm_color(worm_id), label=str(worm_id))
+                        except Exception:
+                            log.debug("render_tracked: bad skeleton frame %d worm %d — skipping",
+                                      frame_num, worm_id)
+                        continue
+                    if kept_ids is not None and tid not in kept_ids:
                         continue
                     try:
                         _draw_skeleton(frame, skel, skel_idx,
-                                       _palette_color(wi), label=str(wi))
+                                       _palette_color(tid), label=str(tid))
                     except Exception:
                         log.debug("render_tracked: bad skeleton frame %d worm %d — skipping",
-                                  frame_num, wi)
+                                  frame_num, tid)
                 pipe.write(frame.tobytes())
                 frame_num += 1
         log.info("Render complete: %s", out_path)
@@ -534,12 +602,17 @@ def render_sidebyside(
     out_path: Path,
     fps: float,
     kept_ids: "set[int] | None" = None,
+    worm_index_map: "dict[int, int] | None" = None,
 ) -> None:
     """
     Render original frame (left) beside masked+tracked frame (right).
 
     kept_ids, when given, restricts drawing to those worm_index_joined values
     (crawling quality filter). None (motility default) draws every worm.
+
+    worm_index_map (motility) behaves as in render_tracked: mapped fragments are
+    drawn in their stable worm colour and labelled with the worm_index, filtered
+    fragments get a faint grey marker. Takes precedence over kept_ids.
     """
     import cv2
     import h5py
@@ -582,15 +655,29 @@ def render_sidebyside(
                     else:
                         right = np.zeros((h, w, 3), dtype=np.uint8)
 
-                    for wi, skel_idx in frame_map.get(frame_num, []):
-                        if kept_ids is not None and wi not in kept_ids:
+                    for tid, skel_idx in frame_map.get(frame_num, []):
+                        if worm_index_map is not None:
+                            worm_id = worm_index_map.get(tid)
+                            if worm_id is None:
+                                pos = _skel_centroid(skel, skel_idx)
+                                if pos is not None:
+                                    _draw_faint_marker(right, pos)
+                                continue
+                            try:
+                                _draw_skeleton(right, skel, skel_idx,
+                                               _worm_color(worm_id), label=str(worm_id))
+                            except Exception:
+                                log.debug("render_sidebyside: bad skeleton frame %d worm %d — skipping",
+                                          frame_num, worm_id)
+                            continue
+                        if kept_ids is not None and tid not in kept_ids:
                             continue
                         try:
-                            _draw_skeleton(right, skel, skel_idx, _palette_color(wi),
-                                           label=str(wi))
+                            _draw_skeleton(right, skel, skel_idx, _palette_color(tid),
+                                           label=str(tid))
                         except Exception:
                             log.debug("render_sidebyside: bad skeleton frame %d worm %d — skipping",
-                                      frame_num, wi)
+                                      frame_num, tid)
 
                     pipe.write(np.hstack([orig, right]).tobytes())
                     frame_num += 1
