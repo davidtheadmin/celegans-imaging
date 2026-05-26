@@ -328,23 +328,26 @@ class AnalysisDialog(tk.Toplevel):
             row=1, column=2, **pad
         )
 
-        # Row 2 — threshold spinbox
-        ttk.Label(self, text="Min fragment length (s)").grid(
-            row=2, column=0, sticky="w", **pad
-        )
+        # Row 2 — threshold spinbox (motility-only; hidden when Crawling selected)
+        self._threshold_label = ttk.Label(self, text="Min fragment length (s)")
+        self._threshold_label.grid(row=2, column=0, sticky="w", **pad)
         self._threshold_var = tk.StringVar(
             value=str(self._settings.motility_long_threshold_s)
         )
-        ttk.Spinbox(
+        self._threshold_spin = ttk.Spinbox(
             self, textvariable=self._threshold_var,
             from_=1.0, to=30.0, increment=0.5, width=6, format="%.1f",
-        ).grid(row=2, column=1, sticky="w", **pad)
+        )
+        self._threshold_spin.grid(row=2, column=1, sticky="w", **pad)
 
-        ttk.Label(
+        self._threshold_help = ttk.Label(
             self,
             text="Recommended: 5–10 s.  Higher = stricter but biases toward slower worms.",
             font="TkSmallCaptionFont", foreground="#555555",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4))
+        )
+        self._threshold_help.grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4)
+        )
 
         # Row 4 — clear-cache checkbox
         self._clear_cache_var = tk.BooleanVar(value=False)
@@ -409,7 +412,7 @@ class AnalysisDialog(tk.Toplevel):
         ).pack(anchor="w")
         ttk.Label(
             self._crawling_render_frame,
-            text="Adds 30–90 s render time per video per option.",
+            text="Adds 1–3 min render time per video per option.",
             font="TkSmallCaptionFont", foreground="#888888",
         ).pack(anchor="w", pady=(2, 0))
 
@@ -451,13 +454,23 @@ class AnalysisDialog(tk.Toplevel):
             self._folder_var.set(path)
 
     def _on_mode_change(self, *_args) -> None:
-        """Show the render-options frame matching the selected analysis type."""
+        """Show the controls matching the selected analysis type.
+
+        'Min fragment length (s)' (rows 2–3) is motility-only — threshold_s is
+        inert for crawling — so it is hidden when Crawling is selected.
+        """
         if self._mode.get() == "crawling":
+            self._threshold_label.grid_remove()
+            self._threshold_spin.grid_remove()
+            self._threshold_help.grid_remove()
             self._motility_render_frame.grid_remove()
             self._crawling_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
         else:
+            self._threshold_label.grid()
+            self._threshold_spin.grid()
+            self._threshold_help.grid()
             self._crawling_render_frame.grid_remove()
             self._motility_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
