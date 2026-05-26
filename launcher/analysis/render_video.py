@@ -147,8 +147,15 @@ def render_tracked(
     skeletons_hdf5: Path,
     out_path: Path,
     fps: float,
+    kept_ids: "set[int] | None" = None,
 ) -> None:
-    """Render the AVI with skeleton polylines and worm-index labels."""
+    """
+    Render the AVI with skeleton polylines and worm-index labels.
+
+    kept_ids, when given, restricts drawing to those worm_index_joined values
+    (used by the crawling pipeline so renders match the quality filter). When
+    None (the motility default) every tracked worm is drawn.
+    """
     import cv2
 
     log.info("Starting render: %s", out_path)
@@ -177,6 +184,8 @@ def render_tracked(
                 if not ret:
                     break
                 for wi, skel_idx in frame_map.get(frame_num, []):
+                    if kept_ids is not None and wi not in kept_ids:
+                        continue
                     try:
                         _draw_skeleton(frame, skel, skel_idx,
                                        _palette_color(wi), label=str(wi))
@@ -271,13 +280,14 @@ def render_per_worm_trace(
     masked_hdf5: Path,
     skeletons_hdf5: Path,
     featuresN_hdf5: Path,
-    worm_index: int,
+    worm_ids: list[int],
+    repr_worm_index: int,
     fps: float,
     out_path: Path,
     head_angle_prominence: float = 0.30,
 ) -> None:
     """
-    Two-panel MP4 for one fully-tracked worm:
+    Two-panel MP4 for one worm (possibly spanning multiple Tierpsy fragments):
       Left  — curvature trace drawing in left-to-right at native fps.
       Right — cropped masked video centred on the worm with skeleton overlay.
     """
@@ -288,7 +298,7 @@ def render_per_worm_trace(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    log.info("Starting render: worm %d → %s", worm_index, out_path)
+    log.info("Starting render: worms %s → %s", worm_ids, out_path)
 
     if not _check_skel_col(skeletons_hdf5, "render_per_worm_trace"):
         return
@@ -296,43 +306,55 @@ def render_per_worm_trace(
     try:
         frame_map, skel = _load_skeleton_map(skeletons_hdf5)
     except Exception:
-        log.warning("render_per_worm_trace: could not load skeleton data for worm %d",
-                    worm_index, exc_info=True)
+        log.warning("render_per_worm_trace: could not load skeleton data for worms %s",
+                    worm_ids, exc_info=True)
         return
 
-    # Filter to this worm only: frame_num → skel_row_idx
-    # _load_skeleton_map already skipped NaN frame_number / worm_index_joined rows.
+    # Build worm_frame_map from all member TIDs; lower TID wins on overlap.
+    worm_ids_set = set(worm_ids)
     worm_frame_map: dict[int, int] = {}
     for fn, entries in frame_map.items():
-        for wi, skel_idx in entries:
-            if wi == worm_index:
+        for wi_entry, skel_idx in sorted(entries, key=lambda x: x[0]):
+            if wi_entry in worm_ids_set:
                 worm_frame_map[fn] = skel_idx
                 break
 
-    # Compute head-angle signal
+    # Compute combined head-angle signal across all member TIDs.
     try:
         _traj = pd.read_hdf(str(featuresN_hdf5), key="trajectories_data")
         with h5py.File(str(featuresN_hdf5), "r") as _fh:
             _skel_all = _fh["coordinates"]["skeletons"][:]
         _frame_col = "timestamp_raw" if "timestamp_raw" in _traj.columns else "frame_number"
-        _worm_traj = (_traj[_traj["worm_index_joined"] == worm_index]
-                      .sort_values(_frame_col).reset_index(drop=True))
         from analysis.analysis_csv import compute_head_angle_signal
-        signal = compute_head_angle_signal(_worm_traj, _skel_all, fps, head_angle_prominence)
+        _combined_fn: list[int] = []
+        _combined_dt: list[float] = []
+        _all_peak_fns: list[int] = []
+        for tid in worm_ids:
+            _worm_traj = (_traj[_traj["worm_index_joined"] == tid]
+                          .sort_values(_frame_col).reset_index(drop=True))
+            _sig = compute_head_angle_signal(_worm_traj, _skel_all, fps, head_angle_prominence)
+            if _sig is None:
+                continue
+            _combined_fn.extend(_sig["frame_nums"].tolist())
+            _combined_dt.extend(_sig["detrended"].tolist())
+            _all_peak_fns.extend(_sig["frame_nums"][_sig["pos_peaks"]].tolist())
+            _all_peak_fns.extend(_sig["frame_nums"][_sig["neg_peaks"]].tolist())
     except Exception:
-        log.warning("render_per_worm_trace: could not compute head-angle signal for worm %d",
-                    worm_index, exc_info=True)
+        log.warning("render_per_worm_trace: could not compute head-angle signal for worms %s",
+                    worm_ids, exc_info=True)
         return
 
-    if signal is None:
-        log.warning("render_per_worm_trace: no valid head-angle signal for worm %d", worm_index)
+    if not _combined_fn:
+        log.warning("render_per_worm_trace: no valid head-angle signal for worms %s", worm_ids)
         return
 
-    frames_col = signal["frame_nums"]
-    detrended = signal["detrended"]
-    t_sec = frames_col / fps
-    pos_peaks = signal["pos_peaks"]
-    neg_peaks = signal["neg_peaks"]
+    _sort = np.argsort(_combined_fn)
+    frames_col = np.array(_combined_fn)[_sort]
+    detrended = np.array(_combined_dt)[_sort]
+    t_sec = frames_col / fps  # absolute video time
+    _peak_fn_arr = np.array(sorted(set(_all_peak_fns)), dtype=int)
+    peak_indices = (np.where(np.isin(frames_col, _peak_fn_arr))[0]
+                    if len(_peak_fn_arr) else np.array([], dtype=int))
 
     # Compute crop size from skeleton bounding-box diagonals.
     # Guard: NaN coords produce NaN from min/max, which propagates silently through
@@ -352,15 +374,15 @@ def render_per_worm_trace(
                       skel_idx)
 
     if not body_lengths:
-        log.warning("render_per_worm_trace: no clean skeleton bounding boxes for worm %d",
-                    worm_index)
+        log.warning("render_per_worm_trace: no clean skeleton bounding boxes for worms %s",
+                    worm_ids)
         return
 
     body_len = float(np.median(body_lengths))
     crop_raw = body_len * 1.5          # guard at the cast site — not upstream
     if not np.isfinite(crop_raw):
-        log.warning("render_per_worm_trace: non-finite crop size for worm %d (body_len=%g)",
-                    worm_index, body_len)
+        log.warning("render_per_worm_trace: non-finite crop size for worms %s (body_len=%g)",
+                    worm_ids, body_len)
         return
     crop_size = max(int(crop_raw), 80)
     if crop_size % 2:
@@ -381,11 +403,13 @@ def render_per_worm_trace(
     finite_vals = detrended[np.isfinite(detrended)]
     y_abs = float(np.max(np.abs(finite_vals))) if len(finite_vals) else 1.0
     y_margin = y_abs * 0.1 + 1e-6
-    t_max = float(t_sec[-1]) if len(t_sec) else 1.0
-    ax.set_xlim(0, t_max)
+    t_min_plot = float(t_sec[0]) if len(t_sec) else 0.0
+    t_max_plot = float(t_sec[-1]) if len(t_sec) else t_min_plot + 1.0
+    ax.set_xlim(t_min_plot - 0.5, t_max_plot + 0.5)
     ax.set_ylim(-y_abs - y_margin, y_abs + y_margin)
     ax.axhline(0, color="gray", linewidth=0.5, linestyle="--")
-    ax.set_xticks(np.arange(0, t_max + 5, 5))
+    tick_start = int(t_min_plot / 5) * 5
+    ax.set_xticks(np.arange(tick_start, t_max_plot + 5, 5))
     ax.set_xlabel("Time (s)", fontsize=7)
     ax.set_ylabel("Head angle (rad)", fontsize=7)
     ax.tick_params(labelsize=6)
@@ -395,7 +419,7 @@ def render_per_worm_trace(
     fig.canvas.draw()
     canvas_w, canvas_h = fig.canvas.get_width_height()
 
-    color = _palette_color(worm_index)
+    color = _palette_color(repr_worm_index)
     last_center: tuple[int, int] = (0, 0)  # updated once a clean skeleton is seen
 
     try:
@@ -423,9 +447,7 @@ def render_per_worm_trace(
                     # Left panel — cumulative trace up to this video frame
                     idx = int(np.searchsorted(frames_col, frame_num + 1))
                     line.set_data(t_sec[:idx], detrended[:idx])
-                    vis_peaks = np.concatenate(
-                        [pos_peaks[pos_peaks < idx], neg_peaks[neg_peaks < idx]]
-                    )
+                    vis_peaks = peak_indices[peak_indices < idx]
                     if len(vis_peaks):
                         peak_scatter.set_offsets(
                             np.column_stack([t_sec[vis_peaks], detrended[vis_peaks]])
@@ -467,8 +489,8 @@ def render_per_worm_trace(
                                     last_center = (int(cx_f), int(cy_f))
                         except Exception:
                             log.debug(
-                                "render_per_worm_trace: bad skeleton at frame %d worm %d — skipping",
-                                frame_num, worm_index,
+                                "render_per_worm_trace: bad skeleton at frame %d — skipping",
+                                frame_num,
                             )
 
                     cx, cy = last_center
@@ -492,7 +514,7 @@ def render_per_worm_trace(
 
         log.info("Render complete: %s", out_path)
     except Exception:
-        log.warning("render_per_worm_trace failed for worm %d", worm_index, exc_info=True)
+        log.warning("render_per_worm_trace failed for worms %s", worm_ids, exc_info=True)
     finally:
         mf.close()
         plt.close(fig)
@@ -504,8 +526,14 @@ def render_sidebyside(
     skeletons_hdf5: Path,
     out_path: Path,
     fps: float,
+    kept_ids: "set[int] | None" = None,
 ) -> None:
-    """Render original frame (left) beside masked+tracked frame (right)."""
+    """
+    Render original frame (left) beside masked+tracked frame (right).
+
+    kept_ids, when given, restricts drawing to those worm_index_joined values
+    (crawling quality filter). None (motility default) draws every worm.
+    """
     import cv2
     import h5py
 
@@ -548,6 +576,8 @@ def render_sidebyside(
                         right = np.zeros((h, w, 3), dtype=np.uint8)
 
                     for wi, skel_idx in frame_map.get(frame_num, []):
+                        if kept_ids is not None and wi not in kept_ids:
+                            continue
                         try:
                             _draw_skeleton(right, skel, skel_idx, _palette_color(wi))
                         except Exception:

@@ -17,6 +17,7 @@ from typing import Callable, Optional
 import config as cfg
 from analysis.docker_utils import run_preflight
 from analysis.motility import MotilityAgent, MotilityStatus
+from analysis.crawling import CrawlingAgent, CrawlingStatus
 from sync import SyncAgent, SyncStatus
 
 _DOT_COLORS: dict[str, str] = {
@@ -185,18 +186,20 @@ class SettingsDialog(tk.Toplevel):
 
 class AnalysisProgressDialog(tk.Toplevel):
     """
-    Modeless progress window that tracks motility analysis in real time.
-    Polls MotilityStatus at 200ms. Auto-closes when running becomes False.
+    Modeless progress window that tracks an analysis run in real time.
+    Polls the status object at 200ms. Auto-closes when running becomes False.
+    Works with either the motility or crawling agent/status (identical interface).
     """
 
     def __init__(
         self,
         parent: tk.Tk,
-        agent: MotilityAgent,
-        status: MotilityStatus,
+        agent: "MotilityAgent | CrawlingAgent",
+        status: "MotilityStatus | CrawlingStatus",
+        title: str = "WormScan Analysis",
     ) -> None:
         super().__init__(parent)
-        self.title("WormScan Motility Analysis")
+        self.title(title)
         self.resizable(False, False)
         self.transient(parent)
         # Not modal — no grab_set()
@@ -276,6 +279,8 @@ class AnalysisDialog(tk.Toplevel):
         settings: cfg.Settings,
         motility_agent: MotilityAgent,
         motility_status: MotilityStatus,
+        crawling_agent: CrawlingAgent,
+        crawling_status: CrawlingStatus,
         on_settings_update: Callable[[cfg.Settings], None],
     ) -> None:
         super().__init__(parent)
@@ -287,6 +292,8 @@ class AnalysisDialog(tk.Toplevel):
         self._settings = settings
         self._agent = motility_agent
         self._status = motility_status
+        self._crawling_agent = crawling_agent
+        self._crawling_status = crawling_status
         self._on_settings_update = on_settings_update
         self._build()
 
@@ -301,6 +308,9 @@ class AnalysisDialog(tk.Toplevel):
         ttk.Radiobutton(
             rb_frame, text="Motility", variable=self._mode, value="motility"
         ).pack(side="left")
+        ttk.Radiobutton(
+            rb_frame, text="Crawling", variable=self._mode, value="crawling"
+        ).pack(side="left", padx=(12, 0))
         counting_rb = ttk.Radiobutton(
             rb_frame, text="Counting", variable=self._mode,
             value="counting", state="disabled",
@@ -343,9 +353,14 @@ class AnalysisDialog(tk.Toplevel):
             variable=self._clear_cache_var,
         ).grid(row=4, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4))
 
-        # Row 5 — render options
-        render_frame = ttk.LabelFrame(self, text="Video render options", padding=(8, 4))
-        render_frame.grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2))
+        # Row 5 — render options (motility): unchanged motility binding
+        self._motility_render_frame = ttk.LabelFrame(
+            self, text="Video render options", padding=(8, 4)
+        )
+        self._motility_render_frame.grid(
+            row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
+        )
+        render_frame = self._motility_render_frame
         self._want_tracked = tk.BooleanVar(value=False)
         self._want_curvature = tk.BooleanVar(value=False)
         self._want_sidebyside = tk.BooleanVar(value=False)
@@ -373,6 +388,52 @@ class AnalysisDialog(tk.Toplevel):
             font="TkSmallCaptionFont", foreground="#888888",
         ).pack(anchor="w", pady=(2, 0))
 
+        # Row 5 — render options (crawling): tracking, side-by-side, path traces
+        self._crawling_render_frame = ttk.LabelFrame(
+            self, text="Video render options", padding=(8, 4)
+        )
+        self._crawl_tracked = tk.BooleanVar(value=False)
+        self._crawl_sidebyside = tk.BooleanVar(value=False)
+        self._crawl_path_traces = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self._crawling_render_frame, text="Tracked (skeleton + worm IDs)",
+            variable=self._crawl_tracked,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            self._crawling_render_frame, text="Side-by-side (original | masked + tracked)",
+            variable=self._crawl_sidebyside,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            self._crawling_render_frame, text="Path traces (fading centroid trails)",
+            variable=self._crawl_path_traces,
+        ).pack(anchor="w")
+        ttk.Label(
+            self._crawling_render_frame,
+            text="Adds 30–90 s render time per video per option.",
+            font="TkSmallCaptionFont", foreground="#888888",
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Min track duration — quality filter; renders show only passing worms.
+        _min_track_row = ttk.Frame(self._crawling_render_frame)
+        _min_track_row.pack(anchor="w", fill="x", pady=(6, 0))
+        ttk.Label(_min_track_row, text="Min track duration (s)").pack(side="left")
+        self._crawl_min_track = tk.StringVar(
+            value=str(int(getattr(self._settings, "crawling_min_track_s", 60)))
+        )
+        ttk.Spinbox(
+            _min_track_row, textvariable=self._crawl_min_track,
+            from_=1, to=600, increment=5, width=6, format="%.0f",
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            self._crawling_render_frame,
+            text="Tracks shorter than this are dropped from the aggregate and not drawn.",
+            font="TkSmallCaptionFont", foreground="#888888",
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Show the render frame matching the selected analysis type.
+        self._mode.trace_add("write", self._on_mode_change)
+        self._on_mode_change()
+
         # Buttons
         btn_frame = ttk.Frame(self)
         btn_frame.grid(row=6, column=0, columnspan=3, pady=(4, 12))
@@ -389,8 +450,31 @@ class AnalysisDialog(tk.Toplevel):
         if path:
             self._folder_var.set(path)
 
+    def _on_mode_change(self, *_args) -> None:
+        """Show the render-options frame matching the selected analysis type."""
+        if self._mode.get() == "crawling":
+            self._motility_render_frame.grid_remove()
+            self._crawling_render_frame.grid(
+                row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
+            )
+        else:
+            self._crawling_render_frame.grid_remove()
+            self._motility_render_frame.grid(
+                row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
+            )
+
     def _start(self) -> None:
-        if self._status.is_running():
+        # Select the pipeline agent/status based on the chosen analysis type.
+        if self._mode.get() == "crawling":
+            agent = self._crawling_agent
+            status = self._crawling_status
+            progress_title = "WormScan Crawling Analysis"
+        else:
+            agent = self._agent
+            status = self._status
+            progress_title = "WormScan Motility Analysis"
+
+        if self._status.is_running() or self._crawling_status.is_running():
             messagebox.showwarning(
                 "Already running",
                 "An analysis is already in progress.",
@@ -417,6 +501,20 @@ class AnalysisDialog(tk.Toplevel):
             )
             return
 
+        min_track_s = 60.0
+        if self._mode.get() == "crawling":
+            try:
+                min_track_s = float(self._crawl_min_track.get())
+                if not (1.0 <= min_track_s <= 600.0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid track duration",
+                    "Min track duration must be a number between 1 and 600 seconds.",
+                    parent=self,
+                )
+                return
+
         errors = run_preflight(self._settings, folder)
         if errors:
             messagebox.showerror(
@@ -431,17 +529,28 @@ class AnalysisDialog(tk.Toplevel):
         self._on_settings_update(new_settings)
 
         # Open progress dialog before waking the agent (so it's ready to poll)
-        AnalysisProgressDialog(self._parent, self._agent, self._status)
+        AnalysisProgressDialog(self._parent, agent, status, title=progress_title)
 
-        self._agent.start_analysis(
-            folder,
-            threshold_s=threshold_s,
-            clear_cache=self._clear_cache_var.get(),
-            want_tracked=self._want_tracked.get(),
-            want_curvature=self._want_curvature.get(),
-            want_sidebyside=self._want_sidebyside.get(),
-            want_per_worm_traces=self._want_per_worm_traces.get(),
-        )
+        if self._mode.get() == "crawling":
+            agent.start_analysis(
+                folder,
+                threshold_s=threshold_s,
+                clear_cache=self._clear_cache_var.get(),
+                want_tracked=self._crawl_tracked.get(),
+                want_sidebyside=self._crawl_sidebyside.get(),
+                want_path_traces=self._crawl_path_traces.get(),
+                min_track_s=min_track_s,
+            )
+        else:
+            agent.start_analysis(
+                folder,
+                threshold_s=threshold_s,
+                clear_cache=self._clear_cache_var.get(),
+                want_tracked=self._want_tracked.get(),
+                want_curvature=self._want_curvature.get(),
+                want_sidebyside=self._want_sidebyside.get(),
+                want_per_worm_traces=self._want_per_worm_traces.get(),
+            )
         self.destroy()
 
 
@@ -457,6 +566,8 @@ class MainWindow(tk.Tk):
         status: SyncStatus,
         motility_agent: MotilityAgent,
         motility_status: MotilityStatus,
+        crawling_agent: CrawlingAgent,
+        crawling_status: CrawlingStatus,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -464,6 +575,8 @@ class MainWindow(tk.Tk):
         self._status = status
         self._motility_agent = motility_agent
         self._motility_status = motility_status
+        self._crawling_agent = crawling_agent
+        self._crawling_status = crawling_status
         self._button_waiting = False
 
         self.title("WormScan Launcher")
@@ -533,22 +646,28 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------
 
     def _poll(self) -> None:
-        # --- Check motility completion and surface result dialog ---
-        result = self._motility_status.pop_completed()
-        if result:
-            n_ok = result["n_ok"]
-            n_fail = result["n_fail"]
-            out_dir = result["out_dir"]
-            msg = (
-                f"Motility analysis complete:\n"
-                f"  {n_ok} videos processed, {n_fail} failed.\n\n"
-                f"Open results folder?"
-            )
-            if messagebox.askyesno("Analysis Complete", msg):
-                os.startfile(str(out_dir))
+        # --- Check analysis completion and surface result dialog ---
+        for kind, st in (
+            ("Motility", self._motility_status),
+            ("Crawling", self._crawling_status),
+        ):
+            result = st.pop_completed()
+            if result:
+                n_ok = result["n_ok"]
+                n_fail = result["n_fail"]
+                out_dir = result["out_dir"]
+                msg = (
+                    f"{kind} analysis complete:\n"
+                    f"  {n_ok} videos processed, {n_fail} failed.\n\n"
+                    f"Open results folder?"
+                )
+                if messagebox.askyesno("Analysis Complete", msg):
+                    os.startfile(str(out_dir))
 
-        # --- Status row: motility takes priority when running ---
-        snap = self._motility_status.snapshot()
+        # --- Status row: a running analysis takes priority ---
+        motility_snap = self._motility_status.snapshot()
+        crawling_snap = self._crawling_status.snapshot()
+        snap = motility_snap if motility_snap.running else crawling_snap
         s_color, s_label, last_sync, files, nbytes = self._status.snapshot()
 
         if snap.running:
@@ -589,6 +708,8 @@ class MainWindow(tk.Tk):
             self._settings,
             self._motility_agent,
             self._motility_status,
+            self._crawling_agent,
+            self._crawling_status,
             self._on_settings_saved,
         )
 
