@@ -25,6 +25,12 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 # (_featuresN.hdf5 timeseries_data uses worm_index — a different table entirely.)
 _WORM_INDEX_COL = "worm_index_joined"
 
+# Worm-ID label sizing for tracked + side-by-side renders. Tuned for the
+# ~2028x1520 whole-plate frames; bump these two lines to retune. Shared by both
+# the motility and crawling pipelines via _draw_skeleton.
+_ID_FONT_SCALE: float = 1.4
+_ID_FONT_THICKNESS: int = 3
+
 
 def _check_skel_col(skeletons_hdf5: Path, caller: str) -> bool:
     """Return True if _WORM_INDEX_COL is present in /trajectories_data; else log and return False."""
@@ -135,7 +141,8 @@ def _draw_skeleton(
     if label:
         head = (int(skel[row_idx, 0, 0]), int(skel[row_idx, 0, 1]))
         cv2.putText(frame, label, head,
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, _ID_FONT_SCALE, color,
+                    _ID_FONT_THICKNESS, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
@@ -579,7 +586,8 @@ def render_sidebyside(
                         if kept_ids is not None and wi not in kept_ids:
                             continue
                         try:
-                            _draw_skeleton(right, skel, skel_idx, _palette_color(wi))
+                            _draw_skeleton(right, skel, skel_idx, _palette_color(wi),
+                                           label=str(wi))
                         except Exception:
                             log.debug("render_sidebyside: bad skeleton frame %d worm %d — skipping",
                                       frame_num, wi)
