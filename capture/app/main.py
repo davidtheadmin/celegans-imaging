@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .auth import require_token
 from .camera import camera_manager
@@ -136,8 +137,40 @@ async def delete_session(session_id: str):
 
 
 @app.delete("/sessions/{session_id}/conditions/{condition_id}", dependencies=[Depends(require_token)])
-async def delete_condition(session_id: str, condition_id: str) -> Session:
-    return await asyncio.to_thread(session_store.delete_condition, session_id, condition_id)
+async def delete_condition(session_id: str, condition_id: str,
+                           name: Optional[str] = None) -> Session:
+    return await asyncio.to_thread(
+        session_store.delete_condition, session_id, condition_id, name
+    )
+
+
+class ConditionRef(BaseModel):
+    condition_id: str
+    name: str
+
+
+class ReorderConditionsRequest(BaseModel):
+    order: List[ConditionRef]
+
+
+@app.post("/sessions/{session_id}/conditions/reorder", dependencies=[Depends(require_token)])
+async def reorder_conditions(session_id: str, req: ReorderConditionsRequest) -> Session:
+    order = [(c.condition_id, c.name) for c in req.order]
+    return await asyncio.to_thread(session_store.reorder_conditions, session_id, order)
+
+
+class RenameConditionRequest(BaseModel):
+    strain_label: Optional[str] = None
+    treatment_label: Optional[str] = None
+
+
+@app.patch("/sessions/{session_id}/conditions/{condition_id}", dependencies=[Depends(require_token)])
+async def rename_condition(session_id: str, condition_id: str, req: RenameConditionRequest,
+                           name: str) -> Session:
+    return await asyncio.to_thread(
+        session_store.rename_condition, session_id, condition_id, name,
+        req.strain_label, req.treatment_label,
+    )
 
 
 app.mount("/", StaticFiles(directory="app/static", html=True), name="static")

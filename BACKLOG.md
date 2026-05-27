@@ -56,6 +56,8 @@ previous friendly folder names. A future fix would write a
 `.wormscan-meta` marker per folder recording the original session_id,
 allowing the launcher to detect renames and move the folder.
 
+- On rename, offer to clean orphaned mirror folders from the launcher side (currently they stay).
+
 ## UI: delete sessions and conditions, not just plates
 
 Currently the timeline only supports deleting individual plates (and free

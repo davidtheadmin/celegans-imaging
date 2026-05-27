@@ -1,10 +1,13 @@
 import hashlib
 import json
+import logging
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
+
+log = logging.getLogger(__name__)
 
 from .config import settings
 from .models import CreatePlateRequest, CreateSessionRequest, Plate, Session
@@ -139,12 +142,25 @@ def delete_session(session_id: str) -> None:
     shutil.move(str(session_dir), str(trash_dest))
 
 
-def delete_condition(session_id: str, condition_id: str) -> Session:
+def delete_condition(session_id: str, condition_id: str,
+                     name: Optional[str] = None) -> Session:
     from fastapi import HTTPException
     session = get_session(session_id)
-    targets = [p for p in session.plates if p.condition_id == condition_id]
+
+    def matches(p):
+        return p.condition_id == condition_id and (name is None or p.name == name)
+
+    targets = [p for p in session.plates if matches(p)]
     if not targets:
         raise HTTPException(404, "Condition not found or has no plates")
+    if name is None:
+        distinct_names = {p.name for p in targets}
+        if len(distinct_names) > 1:
+            log.warning(
+                "delete_condition called without name for condition_id %r in "
+                "session %s; deleting %d distinct names: %s",
+                condition_id, session_id, len(distinct_names), sorted(distinct_names),
+            )
     for plate in targets:
         plate_dir = get_plate_dir(session_id, plate.folder_name)
         trash_dest = (
@@ -157,7 +173,65 @@ def delete_condition(session_id: str, condition_id: str) -> Session:
             trash_dest = trash_dest.with_name(f"{trash_dest.name}_{ts}")
         if plate_dir.exists():
             shutil.move(str(plate_dir), str(trash_dest))
-    session.plates = [p for p in session.plates if p.condition_id != condition_id]
+    session.plates = [p for p in session.plates if not matches(p)]
+    _write_manifest(session)
+    return session
+
+
+def rename_condition(session_id: str, condition_id: str, name: str,
+                     strain_label, treatment_label) -> Session:
+    """Update display labels across every plate matching (condition_id, name).
+    If a label is empty/None, set the field to None (reverts to default)."""
+    from fastapi import HTTPException
+    session = get_session(session_id)
+
+    targets = [p for p in session.plates
+               if p.condition_id == condition_id and p.name == name]
+    if not targets:
+        raise HTTPException(404, "Condition not found or has no plates")
+
+    new_strain = strain_label or None
+    new_treatment = treatment_label or None
+    for plate in targets:
+        plate.condition_name = new_strain
+        plate.treatment_label = new_treatment
+
+    _write_manifest(session)
+    return session
+
+
+def reorder_conditions(session_id: str, order) -> Session:
+    """`order` is a list of (condition_id, name) tuples in desired order.
+    Reorder session.plates to group plates by condition in that order;
+    within each condition, preserve plate_number ordering. Plates whose
+    (condition_id, name) isn't in `order` go at the end in current
+    relative order (be tolerant — never drop data)."""
+    session = get_session(session_id)
+
+    order_index = {(cid, name): i for i, (cid, name) in enumerate(order)}
+
+    # Group plates by condition, recording current first-seen order for fallback.
+    groups: dict = {}
+    group_order: list = []
+    for plate in session.plates:
+        key = (plate.condition_id, plate.name)
+        if key not in groups:
+            groups[key] = []
+            group_order.append(key)
+        groups[key].append(plate)
+
+    def sort_key(key):
+        # Known conditions first, in `order` position; unknown ones after,
+        # in current relative order.
+        if key in order_index:
+            return (0, order_index[key])
+        return (1, group_order.index(key))
+
+    new_plates = []
+    for key in sorted(group_order, key=sort_key):
+        new_plates.extend(sorted(groups[key], key=lambda p: p.plate_number))
+
+    session.plates = new_plates
     _write_manifest(session)
     return session
 

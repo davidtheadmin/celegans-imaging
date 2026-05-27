@@ -201,6 +201,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 /* Session items */
 .session-item { border-bottom: 1px solid var(--border-sub); }
+.session-item.inactive { opacity: 0.5; transition: opacity 150ms ease; }
+.session-item.active   { opacity: 1; }
 .session-hdr {
   display: flex; align-items: center; gap: 6px;
   padding: 7px 12px; cursor: pointer; user-select: none;
@@ -286,6 +288,20 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .cond-hdr:hover .cond-del-btn { display: block; }
 .sess-del-btn:hover, .cond-del-btn:hover { color: var(--danger); }
 
+.cond-up-btn, .cond-down-btn, .cond-edit-btn {
+  display: none; background: none; border: none; cursor: pointer;
+  color: var(--text-dim); font-size: 9px; line-height: 1;
+  padding: 0 1px; flex-shrink: 0;
+}
+.cond-edit-btn { font-size: 11px; }
+.cond-hdr:hover .cond-up-btn,
+.cond-hdr:hover .cond-down-btn,
+.cond-hdr:hover .cond-edit-btn { display: block; }
+.cond-up-btn:hover:not(:disabled),
+.cond-down-btn:hover:not(:disabled),
+.cond-edit-btn:hover { color: var(--text-muted); }
+.cond-up-btn:disabled, .cond-down-btn:disabled { opacity: .3; cursor: default; }
+
 .add-plate-btn {
   width: 100%; justify-content: flex-start; margin-top: 4px;
   background: transparent; border-color: transparent; color: var(--text-dim);
@@ -299,6 +315,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .add-plate-form[hidden] { display: none; }
 .add-plate-form input { font-size: 11px; padding: 4px 6px; }
+.add-plate-form textarea {
+  display: block; width: 100%; font-size: 11px; padding: 4px 6px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); color: var(--text);
+  font-family: var(--font); outline: none; resize: vertical;
+  transition: border-color .12s;
+}
+.add-plate-form textarea:focus { border-color: var(--accent); }
 
 .add-plates-form {
   display: flex; flex-direction: column; gap: 5px; margin: 4px 0;

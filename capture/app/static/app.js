@@ -16,6 +16,8 @@ const S = {
   activePlateId: null,
   addingConditionFor: null,
   addingPlatesFor: null,
+  bulkAddingFor: null,
+  editingConditionFor: null,
   showNewSession: false,
   thumbnails: [],
 };
@@ -60,7 +62,9 @@ async function api(path, opts = {}) {
   if (!resp.ok) {
     let detail = resp.statusText;
     try { detail = (await resp.clone().json()).detail ?? detail; } catch {}
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = resp.status;
+    throw err;
   }
   return resp;
 }
@@ -397,6 +401,14 @@ function groupByCondition(plates) {
   return [...map.values()];
 }
 
+function condDisplay(cond) {
+  const p = cond.plates[0] || {};
+  return {
+    strain: p.condition_name || cond.name,
+    treatment: p.treatment_label || cond.condition_id,
+  };
+}
+
 // ── Sessions ───────────────────────────────────────────────────────────────────
 async function loadSessions() {
   try { S.sessions = await apiJson('/sessions'); } catch {}
@@ -448,6 +460,9 @@ function renderSessionSidebar() {
     const isExpanded = S.expandedIds.has(sess.id);
     const item = document.createElement('div');
     item.className = 'session-item' + (isExpanded ? ' open' : '');
+    if (S.activeSessionId !== null) {
+      item.classList.add(sess.id === S.activeSessionId ? 'active' : 'inactive');
+    }
     item.setAttribute('role', 'listitem');
 
     const hdr = document.createElement('div');
@@ -490,6 +505,8 @@ function renderSessionSidebar() {
       }
 
       for (const cond of conditions) {
+        const condIdx = conditions.indexOf(cond);
+        const display = condDisplay(cond);
         const ck = condKey(sess.id, cond.condition_id, cond.name);
         const isCondOpen = S.expandedConditions.has(ck);
         const condEl = document.createElement('div');
@@ -504,8 +521,11 @@ function renderSessionSidebar() {
           <svg class="s-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="3,2 7,5 3,8"/>
           </svg>
-          <span class="cond-label">${esc(cond.name)} / ${esc(cond.condition_id)}</span>
+          <span class="cond-label">${esc(display.strain)} / ${esc(display.treatment)}</span>
           <span class="cond-count">${cond.plates.length}</span>
+          <button class="cond-up-btn" aria-label="Move condition up" title="Move up"${condIdx === 0 ? ' disabled' : ''}>▲</button>
+          <button class="cond-down-btn" aria-label="Move condition down" title="Move down"${condIdx === conditions.length - 1 ? ' disabled' : ''}>▼</button>
+          <button class="cond-edit-btn" aria-label="Rename condition" title="Rename condition">✎</button>
           <button class="cond-del-btn" aria-label="Delete condition" title="Delete condition">×</button>`;
         condHdr.addEventListener('click', e => {
           if (e.target.classList.contains('cond-del-btn')) return;
@@ -514,11 +534,45 @@ function renderSessionSidebar() {
         condHdr.addEventListener('keydown', e => {
           if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCondition(sess.id, cond); }
         });
+        condHdr.querySelector('.cond-up-btn').addEventListener('click', e => {
+          e.stopPropagation();
+          moveCondition(sess, conditions, condIdx, -1);
+        });
+        condHdr.querySelector('.cond-down-btn').addEventListener('click', e => {
+          e.stopPropagation();
+          moveCondition(sess, conditions, condIdx, +1);
+        });
+        condHdr.querySelector('.cond-edit-btn').addEventListener('click', e => {
+          e.stopPropagation();
+          S.editingConditionFor = (S.editingConditionFor === ck) ? null : ck;
+          renderSessionSidebar();
+        });
         condHdr.querySelector('.cond-del-btn').addEventListener('click', e => {
           e.stopPropagation();
           confirmDeleteCondition(sess, cond);
         });
         condEl.appendChild(condHdr);
+
+        if (S.editingConditionFor === ck) {
+          const p0 = cond.plates[0] || {};
+          const strainVal = p0.condition_name ?? cond.name;
+          const treatmentVal = p0.treatment_label ?? cond.condition_id;
+          const form = document.createElement('div');
+          form.className = 'add-plate-form';
+          form.innerHTML = `
+            <input class="rc-strain" type="text" placeholder="Strain label" value="${esc(strainVal)}">
+            <input class="rc-treatment" type="text" placeholder="Treatment label" value="${esc(treatmentVal)}">
+            <div class="form-actions">
+              <button class="btn btn-sm btn-primary rc-save">Save</button>
+              <button class="btn btn-sm rc-cancel">Cancel</button>
+            </div>`;
+          form.querySelector('.rc-save').addEventListener('click', () => submitRenameCondition(sess.id, cond, form));
+          form.querySelector('.rc-cancel').addEventListener('click', () => {
+            S.editingConditionFor = null; renderSessionSidebar();
+          });
+          setTimeout(() => form.querySelector('.rc-strain')?.focus(), 0);
+          condEl.appendChild(form);
+        }
 
         if (isCondOpen) {
           const platesDiv = document.createElement('div');
@@ -637,6 +691,57 @@ function renderSessionSidebar() {
         sec.appendChild(form);
       }
 
+      // "Bulk add" button / form
+      const isBulkAdding = S.bulkAddingFor === sess.id;
+      const bulkBtn = document.createElement('button');
+      bulkBtn.className = 'btn btn-sm add-plate-btn';
+      bulkBtn.innerHTML = `<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
+        <line x1="6" y1="2" x2="6" y2="10"/><line x1="2" y1="6" x2="10" y2="6"/>
+      </svg> Bulk add`;
+      bulkBtn.hidden = isBulkAdding;
+      bulkBtn.addEventListener('click', () => { S.bulkAddingFor = sess.id; renderSessionSidebar(); });
+      sec.appendChild(bulkBtn);
+
+      if (isBulkAdding) {
+        const form = document.createElement('div');
+        form.className = 'add-plate-form';
+        form.innerHTML = `
+          <label class="field-label">Strains
+            <textarea class="bulk-strains" rows="2" placeholder="N2 WT, CB1234"></textarea>
+          </label>
+          <label class="field-label">Treatments
+            <textarea class="bulk-treatments" rows="2" placeholder="0J 10J 50J"></textarea>
+          </label>
+          <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0">
+            ×<input class="bulk-rep mono" type="number" value="5" min="1" max="50" style="width:44px"> replicates per condition
+          </label>
+          <div class="bulk-preview" style="font-size:10px;color:var(--text-dim);font-family:var(--mono);min-height:13px"></div>
+          <p class="bulk-error form-error" hidden></p>
+          <div class="form-actions">
+            <button class="btn btn-sm btn-primary bulk-submit">Create</button>
+            <button class="btn btn-sm bulk-cancel">Cancel</button>
+          </div>`;
+
+        const updatePreview = () => {
+          const strains = parseBulkList(form.querySelector('.bulk-strains').value);
+          const treatments = parseBulkList(form.querySelector('.bulk-treatments').value);
+          const r = Math.max(1, Math.min(50, parseInt(form.querySelector('.bulk-rep').value) || 1));
+          const n = strains.length, m = treatments.length;
+          form.querySelector('.bulk-preview').textContent =
+            `This will create ${n} strains × ${m} treatments × ${r} replicates = ${n * m * r} plates`;
+        };
+        ['bulk-strains', 'bulk-treatments', 'bulk-rep'].forEach(cls => {
+          form.querySelector(`.${cls}`).addEventListener('input', () => { updatePreview(); form.querySelector('.bulk-error').hidden = true; });
+        });
+        updatePreview();
+        form.querySelector('.bulk-submit').addEventListener('click', () => submitBulkAdd(sess.id, form));
+        form.querySelector('.bulk-cancel').addEventListener('click', () => {
+          S.bulkAddingFor = null; renderSessionSidebar();
+        });
+        setTimeout(() => form.querySelector('.bulk-strains')?.focus(), 0);
+        sec.appendChild(form);
+      }
+
       item.appendChild(sec);
     }
 
@@ -676,6 +781,49 @@ async function submitCreateSession() {
   } catch (err) {
     announce(`Failed: ${err.message}`);
   }
+}
+
+function parseBulkList(value) {
+  return value.split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+}
+
+async function submitBulkAdd(sessionId, form) {
+  const strains = parseBulkList(form.querySelector('.bulk-strains').value);
+  const treatments = parseBulkList(form.querySelector('.bulk-treatments').value);
+  const replicates = Math.max(1, Math.min(50, parseInt(form.querySelector('.bulk-rep').value) || 1));
+  const errEl = form.querySelector('.bulk-error');
+  if (!strains.length || !treatments.length) {
+    errEl.textContent = 'Enter at least one strain and one treatment.';
+    errEl.hidden = false;
+    return;
+  }
+
+  const submitBtn = form.querySelector('.bulk-submit');
+  submitBtn.disabled = true;
+
+  let created = 0, skipped = 0, failed = 0;
+  for (const strain of strains) {           // outer loop: strains
+    for (const treatment of treatments) {   // inner loop: treatments
+      try {
+        await apiJson(`/sessions/${sessionId}/plates`, {
+          method: 'POST',
+          body: { condition_id: treatment, name: strain, condition_name: strain, plate_number: 1, replicates },
+        });
+        created++;
+      } catch (err) {
+        if (err.status === 409) {
+          skipped++;
+        } else {
+          failed++;
+          console.error(err);
+        }
+      }
+    }
+  }
+
+  S.bulkAddingFor = null;
+  await loadSessions();
+  announce(`Created ${created}, skipped ${skipped} existing, ${failed} failed`);
 }
 
 async function submitAddCondition(sessionId, form) {
@@ -779,7 +927,7 @@ async function confirmDeleteCondition(sess, cond) {
   const msg = `Delete condition "${cond.name} / ${cond.condition_id}" and all ${countStr}?\nThis can be undone manually from .trash on the Pi.`;
   if (!confirm(msg)) return;
   try {
-    const updated = await apiJson(`/sessions/${sess.id}/conditions/${encodeURIComponent(cond.condition_id)}`, { method: 'DELETE' });
+    const updated = await apiJson(`/sessions/${sess.id}/conditions/${encodeURIComponent(cond.condition_id)}?name=${encodeURIComponent(cond.name)}`, { method: 'DELETE' });
     const idx = S.sessions.findIndex(s => s.id === sess.id);
     if (idx >= 0) S.sessions[idx] = updated;
     const conditionHadActivePlate = cond.plates.some(p => p.id === S.activePlateId) && S.activeSessionId === sess.id;
@@ -791,6 +939,42 @@ async function confirmDeleteCondition(sess, cond) {
     announce(`Condition "${cond.name} / ${cond.condition_id}" deleted`);
   } catch (err) {
     announce(`Delete failed: ${err.message}`);
+  }
+}
+
+async function moveCondition(sess, conditions, idx, delta) {
+  const target = idx + delta;
+  if (target < 0 || target >= conditions.length) return;
+  // Build the full current order, then swap this condition with its neighbour.
+  const order = conditions.map(c => ({ condition_id: c.condition_id, name: c.name }));
+  [order[idx], order[target]] = [order[target], order[idx]];
+  try {
+    const updated = await apiJson(`/sessions/${sess.id}/conditions/reorder`, {
+      method: 'POST', body: { order },
+    });
+    const i = S.sessions.findIndex(s => s.id === sess.id);
+    if (i >= 0) S.sessions[i] = updated;
+    renderSessionSidebar();
+  } catch (err) {
+    announce(`Reorder failed: ${err.message}`);
+  }
+}
+
+async function submitRenameCondition(sessionId, cond, form) {
+  const strain_label = form.querySelector('.rc-strain').value.trim();
+  const treatment_label = form.querySelector('.rc-treatment').value.trim();
+  try {
+    const updated = await apiJson(
+      `/sessions/${sessionId}/conditions/${encodeURIComponent(cond.condition_id)}?name=${encodeURIComponent(cond.name)}`,
+      { method: 'PATCH', body: { strain_label, treatment_label } },
+    );
+    const idx = S.sessions.findIndex(s => s.id === sessionId);
+    if (idx >= 0) S.sessions[idx] = updated;
+    S.editingConditionFor = null;
+    renderSessionSidebar();
+    announce('Renamed');
+  } catch (err) {
+    announce(`Rename failed: ${err.message}`);
   }
 }
 

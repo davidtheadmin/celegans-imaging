@@ -6,7 +6,8 @@ class Plate(BaseModel):
     id: str
     condition_id: str
     name: str
-    condition_name: Optional[str] = None  # user-given name; None on legacy plates
+    condition_name: Optional[str] = None  # mutable; display label for strain (None on legacy plates)
+    treatment_label: Optional[str] = None  # mutable; display label for treatment
     plate_number: int
     created_at: str
 
