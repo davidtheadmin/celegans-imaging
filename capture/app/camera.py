@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -40,6 +42,7 @@ class CameraManager:
         self._recording = False
         self._encoder: Optional[H264Encoder] = None
         self._video_fps: float = DEFAULT_VIDEO_FPS
+        self._ev_bias: float = -1.0  # one stop darker than native AE; overridden by state file
 
     def start(self) -> None:
         try:
@@ -52,6 +55,7 @@ class CameraManager:
             )
             cam.configure(config)
             cam.start()
+            self._load_state()
             self._apply_still_controls(cam)
             time.sleep(2.0)  # AE / AWB settle
 
@@ -108,8 +112,7 @@ class CameraManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _apply_still_controls(cam: Picamera2) -> None:
+    def _apply_still_controls(self, cam: Picamera2) -> None:
         """Apply still-mode FrameDurationLimits. Must be called after every cam.start()
         in still mode because cam.configure() resets controls to hardware defaults."""
         min_frame_us = 1_000
@@ -118,6 +121,39 @@ class CameraManager:
             "Camera: still-mode FrameDurationLimits (%d, %d) µs — AE shutter capped at %.0f ms",
             min_frame_us, settings.MAX_AUTO_SHUTTER_US, settings.MAX_AUTO_SHUTTER_US / 1000,
         )
+        cam.set_controls({"ExposureValue": self._ev_bias})
+        log.info("Camera: applied ExposureValue bias %.2f EV", self._ev_bias)
+
+    # ------------------------------------------------------------------
+    # Persistent state
+    # ------------------------------------------------------------------
+
+    def _state_path(self) -> Path:
+        return Path(settings.DATA_ROOT) / "camera_settings.json"
+
+    def _load_state(self) -> None:
+        """Load persisted settings (ev_bias) into self. Tolerant of a missing or
+        malformed file — falls back to the in-code default."""
+        try:
+            with open(self._state_path()) as f:
+                data = json.load(f)
+            ev = data.get("ev_bias")
+            if isinstance(ev, (int, float)):
+                self._ev_bias = max(-3.0, min(3.0, float(ev)))
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def _save_state(self) -> None:
+        """Atomically persist current settings to <DATA_ROOT>/camera_settings.json."""
+        path = self._state_path()
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "w") as f:
+                json.dump({"ev_bias": self._ev_bias}, f)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log.warning("Failed to persist camera state: %s", exc)
 
     # ------------------------------------------------------------------
     # Properties
@@ -195,6 +231,25 @@ class CameraManager:
         }
 
     # ------------------------------------------------------------------
+    # EV bias (exposure compensation)
+    # ------------------------------------------------------------------
+
+    def get_ev_bias(self) -> float:
+        return self._ev_bias
+
+    def set_ev_bias(self, value: float) -> float:
+        """Clamp to [-3.0, 3.0], apply immediately, persist, return the clamped value.
+        ExposureValue only affects exposure while AE is enabled; if AE is locked the
+        bias applies on next unlock."""
+        clamped = max(-3.0, min(3.0, float(value)))
+        with self._capture_lock:
+            self._ev_bias = clamped
+            if self._cam is not None:
+                self._cam.set_controls({"ExposureValue": clamped})
+        self._save_state()
+        return clamped
+
+    # ------------------------------------------------------------------
     # Capture
     # ------------------------------------------------------------------
 
@@ -228,7 +283,10 @@ class CameraManager:
             video_config = self._cam.create_video_configuration(
                 main={"size": (VIDEO_W, VIDEO_H), "format": "RGB888"},
                 lores={"size": (PREVIEW_W, PREVIEW_H), "format": "YUV420"},
-                controls={"FrameDurationLimits": (VIDEO_FRAME_US, VIDEO_FRAME_US)},  # lock to 30 fps
+                controls={
+                    "FrameDurationLimits": (VIDEO_FRAME_US, VIDEO_FRAME_US),  # lock to 30 fps
+                    "ExposureValue": self._ev_bias,
+                },
             )
             self._cam.configure(video_config)
             self._cam.start()

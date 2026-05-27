@@ -1,11 +1,16 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
 from ..auth import require_token
 from ..camera import camera_manager
 
 router = APIRouter(prefix="/camera")
+
+
+class EvBias(BaseModel):
+    value: float
 
 
 def _require_camera():
@@ -29,3 +34,14 @@ async def ae_unlock():
 @router.get("/exposure", dependencies=[Depends(require_token)])
 async def exposure_state():
     return camera_manager.get_exposure_state()
+
+
+@router.get("/ev", dependencies=[Depends(require_token)])
+async def get_ev():
+    return {"value": camera_manager.get_ev_bias()}
+
+
+@router.post("/ev", dependencies=[Depends(require_token)])
+async def set_ev(body: EvBias):
+    clamped = await asyncio.to_thread(camera_manager.set_ev_bias, body.value)
+    return {"value": clamped}

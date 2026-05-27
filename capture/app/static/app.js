@@ -218,6 +218,45 @@ function renderAE() {
   }
 }
 
+// ── EV bias ──────────────────────────────────────────────────────────────────
+let _evDebounce = null;
+
+function _formatEv(v) {
+  return (v >= 0 ? '+' : '') + Number(v).toFixed(1);
+}
+
+async function initEvBias() {
+  const slider = document.getElementById('ev-slider');
+  const readout = document.getElementById('ev-readout');
+  try {
+    const { value } = await apiJson('/camera/ev');
+    slider.value = value;
+    readout.textContent = _formatEv(value);
+  } catch (err) {
+    announce(`EV load failed: ${err.message}`);
+  }
+}
+
+async function postEv(value) {
+  try {
+    await api('/camera/ev', { method: 'POST', body: { value } });
+  } catch (err) {
+    announce(`EV update failed: ${err.message}`);
+  }
+}
+
+function onEvInput(e) {
+  const value = parseFloat(e.target.value);
+  document.getElementById('ev-readout').textContent = _formatEv(value);
+  if (_evDebounce) clearTimeout(_evDebounce);
+  _evDebounce = setTimeout(() => { _evDebounce = null; postEv(value); }, 150);
+}
+
+function onEvChange(e) {
+  if (_evDebounce) { clearTimeout(_evDebounce); _evDebounce = null; }
+  postEv(parseFloat(e.target.value));
+}
+
 // ── Status polling ─────────────────────────────────────────────────────────────
 let _statusInterval = null;
 let _focusInterval = null;
@@ -1296,6 +1335,9 @@ function bindEvents() {
 
   document.getElementById('ae-lock-btn').addEventListener('click', toggleAELock);
 
+  document.getElementById('ev-slider').addEventListener('input', onEvInput);
+  document.getElementById('ev-slider').addEventListener('change', onEvChange);
+
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (!document.getElementById('modal-overlay').hidden) { closeModal(); return; }
@@ -1345,6 +1387,7 @@ function startApp() {
   initExpandedIds();
   initExpandedConditions();
   initPreview();
+  initEvBias();
   startPolling();
   loadSessions().then(() => refreshThumbnails());
 }
