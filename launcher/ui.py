@@ -5,6 +5,7 @@ Thread boundary: this module runs entirely on the main (Tk) thread.
 It reads sync state only through SyncStatus.snapshot() via root.after().
 No widget method is ever called from the sync thread.
 """
+import logging
 import os
 import threading
 import tkinter as tk
@@ -19,6 +20,8 @@ from analysis.docker_utils import run_preflight
 from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
 from sync import SyncAgent, SyncStatus
+
+_log = logging.getLogger(__name__)
 
 _DOT_COLORS: dict[str, str] = {
     "green": "#4caf50",
@@ -538,7 +541,13 @@ class AnalysisDialog(tk.Toplevel):
             return
 
         # Persist the chosen threshold for next launch
-        new_settings = replace(self._settings, motility_long_threshold_s=threshold_s)
+        mode = self._mode.get()
+        if mode == "motility":
+            new_settings = replace(self._settings, motility_long_threshold_s=threshold_s)
+        elif mode == "crawling":
+            new_settings = replace(self._settings, crawling_min_track_s=int(min_track_s))
+        else:
+            new_settings = self._settings
         self._on_settings_update(new_settings)
 
         # Open progress dialog before waking the agent (so it's ready to poll)
@@ -765,6 +774,8 @@ class MainWindow(tk.Tk):
         self._settings = new
         self._agent.update_settings(new)
         self._motility_agent.update_settings(new)
+        self._crawling_agent.update_settings(new)
+        _log.info("Settings update propagated to: sync, motility, crawling")
 
     def _on_close(self) -> None:
         self._agent.stop()
