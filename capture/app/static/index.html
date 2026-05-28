@@ -114,6 +114,32 @@
               <span id="focus-readout" class="readout mono">focus —</span>
               <span id="ae-readout" class="readout mono" hidden></span>
             </div>
+
+            <!-- Spatial calibration overlay (shown while calibrating) -->
+            <div id="calib-overlay" class="calib-overlay" hidden aria-hidden="true">
+              <div id="calib-rect" class="calib-rect">
+                <span class="calib-rect__label">1 cm</span>
+                <div id="calib-handle" class="calib-handle" role="slider"
+                     tabindex="0" aria-label="Drag to match 1 cm on the ruler">
+                  <span class="calib-handle__grip" aria-hidden="true">⟷</span>
+                </div>
+              </div>
+              <div id="calib-readout" class="calib-readout mono"></div>
+            </div>
+
+            <!-- Calibration controls panel -->
+            <div id="calib-panel" class="calib-panel" hidden>
+              <span class="calib-panel__title">Spatial calibration</span>
+              <p class="calib-panel__hint">Drag the right edge of the band to span exactly 1 cm on a ruler under the scope, then save.</p>
+              <div class="calib-panel__row">
+                <input id="calib-label" type="text" placeholder="Name (e.g. 4x)" spellcheck="false">
+                <button id="calib-save" class="btn btn-sm btn-primary">Save</button>
+              </div>
+              <div id="calib-list" class="calib-list"></div>
+              <div class="calib-panel__foot">
+                <button id="calib-done" class="btn btn-sm">Done</button>
+              </div>
+            </div>
           </div>
           <div class="preview-btns">
             <button id="ae-lock-btn" class="btn" aria-pressed="false">
@@ -122,6 +148,15 @@
                 <path d="M5 7V5a3 3 0 0 1 6 0v2"/>
               </svg>
               <span id="ae-lock-label">Lock AE</span> <span class="kbd-hint">[L]</span>
+            </button>
+            <button id="calibrate-btn" class="btn" aria-pressed="false" title="Spatial calibration">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <rect x="1.5" y="5" width="13" height="6" rx="1"/>
+                <line x1="4.5" y1="5" x2="4.5" y2="8"/>
+                <line x1="8" y1="5" x2="8" y2="8.5"/>
+                <line x1="11.5" y1="5" x2="11.5" y2="8"/>
+              </svg>
+              <span>Calibrate</span>
             </button>
             <label class="ev-control" title="Exposure value bias (stops)">
               <span class="ev-label">EV</span>

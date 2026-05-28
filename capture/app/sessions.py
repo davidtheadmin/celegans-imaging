@@ -74,6 +74,29 @@ def create_session(req: CreateSessionRequest) -> Session:
         plates=[],
     )
 
+    # Stamp the active spatial calibration (metadata only; no behaviour depends on
+    # it yet). Tolerant of any failure — a missing calibration must not block
+    # session creation.
+    try:
+        from .camera import camera_manager, FULL_W, VIDEO_W
+        cal = camera_manager.get_calibrations()
+        active_label = cal.get("active")
+        if active_label:
+            entry = next(
+                (c for c in cal["calibrations"] if c["label"] == active_label), None
+            )
+            if entry:
+                fov = float(entry["fov_cm"])
+                session.calibration = {
+                    "label": entry["label"],
+                    "fov_cm": fov,
+                    "um_per_px_full": fov * 10000 / FULL_W,
+                    "um_per_px_video": fov * 10000 / VIDEO_W,
+                    "stamped_at": now.isoformat(),
+                }
+    except Exception:
+        log.debug("calibration stamping skipped", exc_info=True)
+
     session_dir = _session_dir(session_id)
     (session_dir / "plates").mkdir(parents=True, exist_ok=True)
     _write_manifest(session)

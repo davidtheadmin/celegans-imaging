@@ -104,7 +104,8 @@ async def serve_freecapture_file(
         data = await asyncio.to_thread(capture_ops.make_thumb, file_path)
         return Response(content=data, media_type="image/jpeg")
 
-    return FileResponse(str(file_path))
+    media_type = "image/tiff" if file_path.suffix.lower() in (".tif", ".tiff") else None
+    return FileResponse(str(file_path), media_type=media_type)
 
 
 @router.delete("/files/{date}/{filename}", dependencies=[Depends(require_token)])

@@ -24,6 +24,9 @@ class Session(BaseModel):
     assay_config: Dict[str, Any] = Field(default_factory=dict)
     created_at: str
     plates: List[Plate] = Field(default_factory=list)
+    # Spatial calibration stamped at creation if one was active. Metadata only;
+    # None on legacy sessions and when uncalibrated. Tolerant on read.
+    calibration: Optional[Dict[str, Any]] = None
     schema_version: int = 1
 
 

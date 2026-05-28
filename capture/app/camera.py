@@ -44,6 +44,11 @@ class CameraManager:
         self._video_fps: float = DEFAULT_VIDEO_FPS
         self._ev_bias: float = -1.0  # one stop darker than native AE; overridden by state file
 
+        # Spatial calibration. Field-of-view width in cm is resolution-independent;
+        # microns-per-pixel for any width is fov_cm * 10000 / width_px.
+        self._calibrations: list[dict] = []   # [{"label", "fov_cm", "created_at"}]
+        self._active_calibration: Optional[str] = None
+
     def start(self) -> None:
         try:
             cam = Picamera2()
@@ -132,16 +137,38 @@ class CameraManager:
         return Path(settings.DATA_ROOT) / "camera_settings.json"
 
     def _load_state(self) -> None:
-        """Load persisted settings (ev_bias) into self. Tolerant of a missing or
-        malformed file — falls back to the in-code default."""
+        """Load persisted settings (ev_bias, calibrations) into self. Tolerant of a
+        missing or malformed file — falls back to the in-code defaults."""
         try:
             with open(self._state_path()) as f:
                 data = json.load(f)
-            ev = data.get("ev_bias")
-            if isinstance(ev, (int, float)):
-                self._ev_bias = max(-3.0, min(3.0, float(ev)))
-        except (OSError, ValueError, AttributeError):
-            pass
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+
+        ev = data.get("ev_bias")
+        if isinstance(ev, (int, float)):
+            self._ev_bias = max(-3.0, min(3.0, float(ev)))
+
+        cals = data.get("calibrations")
+        if isinstance(cals, list):
+            clean = []
+            for c in cals:
+                if (isinstance(c, dict) and isinstance(c.get("label"), str)
+                        and isinstance(c.get("fov_cm"), (int, float)) and c["fov_cm"] > 0):
+                    created = c.get("created_at")
+                    clean.append({
+                        "label": c["label"],
+                        "fov_cm": float(c["fov_cm"]),
+                        "created_at": created if isinstance(created, str)
+                                      else datetime.now(timezone.utc).isoformat(),
+                    })
+            self._calibrations = clean
+
+        active = data.get("active_calibration")
+        if isinstance(active, str) and any(c["label"] == active for c in self._calibrations):
+            self._active_calibration = active
 
     def _save_state(self) -> None:
         """Atomically persist current settings to <DATA_ROOT>/camera_settings.json."""
@@ -150,7 +177,11 @@ class CameraManager:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp, "w") as f:
-                json.dump({"ev_bias": self._ev_bias}, f)
+                json.dump({
+                    "ev_bias": self._ev_bias,
+                    "calibrations": self._calibrations,
+                    "active_calibration": self._active_calibration,
+                }, f)
             os.replace(tmp, path)
         except OSError as exc:
             log.warning("Failed to persist camera state: %s", exc)
@@ -248,6 +279,64 @@ class CameraManager:
                 self._cam.set_controls({"ExposureValue": clamped})
         self._save_state()
         return clamped
+
+    # ------------------------------------------------------------------
+    # Spatial calibration
+    # ------------------------------------------------------------------
+
+    def get_calibrations(self) -> dict:
+        return {
+            "calibrations": [dict(c) for c in self._calibrations],
+            "active": self._active_calibration,
+        }
+
+    def upsert_calibration(self, label: str, fov_cm: float) -> dict:
+        """Replace fov_cm if the label exists, else append a new entry. The
+        upserted label becomes active. Persists and returns get_calibrations()."""
+        fov_cm = float(fov_cm)
+        existing = next((c for c in self._calibrations if c["label"] == label), None)
+        if existing is not None:
+            existing["fov_cm"] = fov_cm
+        else:
+            self._calibrations.append({
+                "label": label,
+                "fov_cm": fov_cm,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        self._active_calibration = label
+        self._save_state()
+        return self.get_calibrations()
+
+    def set_active_calibration(self, label: str) -> dict:
+        from fastapi import HTTPException
+        if not any(c["label"] == label for c in self._calibrations):
+            raise HTTPException(404, f"Calibration not found: {label}")
+        self._active_calibration = label
+        self._save_state()
+        return self.get_calibrations()
+
+    def delete_calibration(self, label: str) -> dict:
+        from fastapi import HTTPException
+        if not any(c["label"] == label for c in self._calibrations):
+            raise HTTPException(404, f"Calibration not found: {label}")
+        self._calibrations = [c for c in self._calibrations if c["label"] != label]
+        if self._active_calibration == label:
+            self._active_calibration = self._calibrations[0]["label"] if self._calibrations else None
+        self._save_state()
+        return self.get_calibrations()
+
+    def active_um_per_px(self, width_px: int) -> Optional[float]:
+        """Microns-per-pixel for a frame of the given pixel width under the active
+        calibration, or None if uncalibrated. Per-pixel scale is invariant under
+        cropping, so callers pass the FULL-frame width for every still."""
+        if not self._active_calibration:
+            return None
+        entry = next(
+            (c for c in self._calibrations if c["label"] == self._active_calibration), None
+        )
+        if entry is None:
+            return None
+        return entry["fov_cm"] * 10000 / width_px
 
     # ------------------------------------------------------------------
     # Capture

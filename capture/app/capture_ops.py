@@ -13,6 +13,7 @@ import numpy as np
 from fastapi import HTTPException
 from PIL import Image
 
+from .camera import FULL_W
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -98,9 +99,23 @@ def load_flat() -> np.ndarray:
 # Saving
 # ------------------------------------------------------------------
 
-def save_jpeg(arr: np.ndarray, path: Path, quality: int = 90) -> None:
+def save_still(arr: np.ndarray, path: Path, um_per_px: Optional[float] = None) -> None:
+    """Save an RGB array as an LZW-compressed TIFF. When um_per_px is provided,
+    embed ImageJ-readable spatial calibration (resolution tags + unit in the
+    ImageDescription) so the file opens pre-scaled in microns."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(arr, "RGB").save(path, format="JPEG", quality=quality)
+    img = Image.fromarray(arr, "RGB")
+    if um_per_px is not None and um_per_px > 0:
+        px_per_um = 1.0 / um_per_px
+        tiffinfo = {
+            282: px_per_um,                 # XResolution (pixels per unit)
+            283: px_per_um,                 # YResolution
+            296: 1,                         # ResolutionUnit = none; unit given in description
+            270: "ImageJ=1.54f\nunit=um\n",  # ImageDescription
+        }
+        img.save(path, format="TIFF", compression="tiff_lzw", tiffinfo=tiffinfo)
+    else:
+        img.save(path, format="TIFF", compression="tiff_lzw")
 
 
 # ------------------------------------------------------------------
@@ -150,11 +165,12 @@ def free_still(cam_mgr, apply_ff: bool = False) -> dict:
     if apply_ff:
         arr = apply_flat_field(arr, load_flat())
     ts = _ts()
-    filename = f"{ts}_still.jpg"
+    filename = f"{ts}_still.tif"
     path = _free_dir() / filename
+    um_per_px = cam_mgr.active_um_per_px(FULL_W)  # full-frame scale; cropping-invariant
     t0 = time.perf_counter()
-    save_jpeg(arr, path)
-    log.debug("[TIMING] free_still: save_jpeg=%.3fs", time.perf_counter() - t0)
+    save_still(arr, path, um_per_px)
+    log.debug("[TIMING] free_still: save_still=%.3fs", time.perf_counter() - t0)
     _write_sha256(path)
     return {"path": str(path), "filename": filename}
 
@@ -221,11 +237,12 @@ def plate_survival(
     if apply_ff:
         arr = apply_flat_field(arr, load_flat())
     ts = _ts()
-    filename = f"{ts}_{quadrant.upper()}.jpg" if quadrant else f"{ts}_still.jpg"
+    filename = f"{ts}_{quadrant.upper()}.tif" if quadrant else f"{ts}_still.tif"
     path = plate_dir / filename
+    um_per_px = cam_mgr.active_um_per_px(FULL_W)  # full-frame scale; cropping-invariant
     t0 = time.perf_counter()
-    save_jpeg(arr, path)
-    log.debug("[TIMING] plate_survival: save_jpeg=%.3fs", time.perf_counter() - t0)
+    save_still(arr, path, um_per_px)
+    log.debug("[TIMING] plate_survival: save_still=%.3fs", time.perf_counter() - t0)
     _write_sha256(path)
     return {
         "path": str(path),
@@ -241,7 +258,7 @@ def plate_survival(
 
 THUMB_LONG = 400
 _VIDEO_EXTS = {".mp4", ".h264", ".mkv"}
-_THUMB_EXTS = {".jpg", ".jpeg"} | _VIDEO_EXTS
+_THUMB_EXTS = {".jpg", ".jpeg", ".tif", ".tiff"} | _VIDEO_EXTS
 _SIDECAR_SUFFIXES = {".sha256", ".acked"}  # never shown in file listings
 
 

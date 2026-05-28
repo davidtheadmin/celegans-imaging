@@ -372,6 +372,86 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .preview-btns { display: flex; gap: 8px; margin-top: 8px; flex-shrink: 0; }
 
+/* ── Spatial calibration overlay ───────────────────────────────────────────── */
+#calibrate-btn[aria-pressed="true"] {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+}
+
+.calib-overlay {
+  position: absolute; inset: 0; z-index: 5;
+  pointer-events: none;  /* only the handle is interactive */
+}
+.calib-overlay[hidden] { display: none; }
+
+.calib-rect {
+  position: absolute; box-sizing: border-box;
+  border: 1.5px solid rgba(255,255,255,.75);
+  background: rgba(79,135,240,.16);
+  display: flex; align-items: center; justify-content: center;
+}
+.calib-rect__label {
+  font-family: var(--mono); font-size: 12px; font-weight: 600; color: #fff;
+  text-shadow: 0 1px 3px rgba(0,0,0,.85); user-select: none; pointer-events: none;
+}
+.calib-handle {
+  position: absolute; top: -1.5px; bottom: -1.5px; right: -5px;
+  width: 11px; pointer-events: auto; cursor: ew-resize;
+  background: var(--accent); border-radius: 2px;
+  display: flex; align-items: center; justify-content: center;
+  touch-action: none;
+}
+.calib-handle:hover { background: var(--accent-h); }
+.calib-handle:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+.calib-handle__grip { font-size: 11px; line-height: 1; color: #fff; pointer-events: none; }
+
+.calib-readout {
+  position: absolute; pointer-events: none;
+  background: rgba(0,0,0,.8); color: #fff;
+  font-size: 11px; padding: 2px 6px; border-radius: 2px; white-space: nowrap;
+}
+
+.calib-panel {
+  position: absolute; top: 8px; right: 8px; z-index: 6; width: 214px;
+  pointer-events: auto;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
+}
+.calib-panel[hidden] { display: none; }
+.calib-panel__title {
+  font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted);
+}
+.calib-panel__hint { margin: 0; font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+.calib-panel__row { display: flex; gap: 6px; align-items: center; }
+.calib-panel__row input { flex: 1; }
+.calib-panel__foot { display: flex; justify-content: flex-end; }
+
+.calib-list {
+  display: flex; flex-direction: column; gap: 3px;
+  max-height: 132px; overflow-y: auto;
+}
+.calib-empty { margin: 0; font-size: 11px; color: var(--text-dim); }
+.calib-row { display: flex; align-items: center; gap: 4px; }
+.calib-row__pick {
+  flex: 1; min-width: 0; text-align: left;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--r-sm); color: var(--text-muted);
+  font-family: var(--mono); font-size: 11px; padding: 4px 6px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: background .1s, border-color .1s, color .1s;
+}
+.calib-row__pick:hover { background: var(--surface-3); color: var(--text); }
+.calib-row.active .calib-row__pick {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--accent);
+}
+.calib-row__del {
+  background: none; border: none; cursor: pointer; flex-shrink: 0;
+  color: var(--text-dim); font-size: 14px; line-height: 1; padding: 0 4px;
+}
+.calib-row__del:hover { color: var(--danger); }
+
 /* ── Controls panel ────────────────────────────────────────────────────────── */
 .ctrl-panel {
   width: var(--ctrl-w); flex-shrink: 0;
@@ -451,6 +531,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .thumb-tile:hover { border-color: var(--accent); transform: translateY(-1px); }
 .thumb-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Still tiles are display-only (no modal); don't imply they're clickable. */
+.thumb-tile:not([role="button"]) { cursor: default; }
 
 .thumb-tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
 

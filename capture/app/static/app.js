@@ -20,7 +20,16 @@ const S = {
   editingConditionFor: null,
   showNewSession: false,
   thumbnails: [],
+  calibFraction: 1 / 1.89,  // 1-cm band as fraction of frame width (default FOV 1.89 cm)
 };
+
+// Spatial-calibration overlay constants.
+const CALIB_DEFAULT_FOV = 1.89;  // cm, at max magnification
+const CALIB_LEFT_FRAC = 0.08;    // left edge anchored 8% from the image's left
+const CALIB_BAND_FRAC = 0.18;    // band height as a fraction of image height
+const CALIB_MIN_W = 40;          // px
+const CALIB_FULL_W = 4056;       // full-res still width (µm/px reference)
+const CALIB_VIDEO_W = 2028;      // video width
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -255,6 +264,200 @@ function onEvInput(e) {
 function onEvChange(e) {
   if (_evDebounce) { clearTimeout(_evDebounce); _evDebounce = null; }
   postEv(parseFloat(e.target.value));
+}
+
+// ── Spatial calibration ────────────────────────────────────────────────────────
+// FOV width in cm is resolution-independent. A 1-cm band occupies
+// fraction = 1/FOV_cm of the frame width, so FOV_cm = 1/fraction and
+// um_per_px(width) = FOV_cm * 10000 / width.
+
+function isCalibrating() {
+  return !document.getElementById('calib-overlay').hidden;
+}
+
+function renderCalibRect() {
+  const img = document.getElementById('preview-img');
+  const rect = document.getElementById('calib-rect');
+  const readout = document.getElementById('calib-readout');
+  // Geometry is measured against the image's rendered content box, so
+  // letterboxing inside .preview-wrap is handled correctly.
+  const iw = img.clientWidth, ih = img.clientHeight;
+  const ix = img.offsetLeft, iy = img.offsetTop;
+  if (!iw || !ih) return;
+
+  const left = ix + CALIB_LEFT_FRAC * iw;
+  const width = Math.max(CALIB_MIN_W, S.calibFraction * iw);
+  const height = CALIB_BAND_FRAC * ih;
+  const top = iy + (ih - height) / 2;
+
+  rect.style.left = `${left}px`;
+  rect.style.top = `${top}px`;
+  rect.style.width = `${width}px`;
+  rect.style.height = `${height}px`;
+
+  const fov = 1 / S.calibFraction;
+  const still = 10000 / (S.calibFraction * CALIB_FULL_W);
+  const video = 10000 / (S.calibFraction * CALIB_VIDEO_W);
+  readout.textContent =
+    `FOV: ${fov.toFixed(2)} cm · ${still.toFixed(2)} µm/px (still) · ${video.toFixed(2)} µm/px (video)`;
+  readout.style.left = `${left}px`;
+  readout.style.top = `${top + height + 6}px`;
+
+  const handle = document.getElementById('calib-handle');
+  handle.setAttribute('aria-valuenow', fov.toFixed(2));
+  handle.setAttribute('aria-valuetext', `${fov.toFixed(2)} centimetres field of view`);
+}
+
+function onCalibPointerDown(e) {
+  e.preventDefault();
+  const handle = e.currentTarget;
+  const img = document.getElementById('preview-img');
+  const wrap = document.querySelector('.preview-wrap');
+  try { handle.setPointerCapture(e.pointerId); } catch {}
+
+  const move = (ev) => {
+    const wrapRect = wrap.getBoundingClientRect();
+    const iw = img.clientWidth;
+    const ix = img.offsetLeft;
+    if (!iw) return;
+    const leftPx = ix + CALIB_LEFT_FRAC * iw;
+    const maxWidth = (ix + iw) - leftPx;
+    let width = (ev.clientX - wrapRect.left) - leftPx;
+    width = Math.max(CALIB_MIN_W, Math.min(width, maxWidth));
+    S.calibFraction = width / iw;
+    renderCalibRect();
+  };
+  const up = () => {
+    handle.removeEventListener('pointermove', move);
+    handle.removeEventListener('pointerup', up);
+    handle.removeEventListener('pointercancel', up);
+  };
+  handle.addEventListener('pointermove', move);
+  handle.addEventListener('pointerup', up);
+  handle.addEventListener('pointercancel', up);
+}
+
+function onCalibHandleKey(e) {
+  const step = e.shiftKey ? 0.05 : 0.01;  // fraction-of-width per keypress
+  let f = S.calibFraction;
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') f -= step;
+  else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') f += step;
+  else return;
+  e.preventDefault();
+  const img = document.getElementById('preview-img');
+  const iw = img.clientWidth || 1;
+  const minFrac = CALIB_MIN_W / iw;
+  S.calibFraction = Math.max(minFrac, Math.min(f, 1 - CALIB_LEFT_FRAC));
+  renderCalibRect();
+}
+
+function renderCalibList(data) {
+  const list = document.getElementById('calib-list');
+  list.innerHTML = '';
+  const cals = data.calibrations || [];
+  if (cals.length === 0) {
+    list.innerHTML = '<p class="calib-empty">No saved calibrations.</p>';
+    return;
+  }
+  for (const c of cals) {
+    const row = document.createElement('div');
+    row.className = 'calib-row' + (c.label === data.active ? ' active' : '');
+
+    const pick = document.createElement('button');
+    pick.className = 'calib-row__pick';
+    pick.textContent = `${c.label} · ${c.fov_cm.toFixed(2)} cm`;
+    pick.title = `Use ${c.label} (${c.fov_cm.toFixed(2)} cm field of view)`;
+    pick.addEventListener('click', () => selectCalibration(c.label, c.fov_cm));
+
+    const del = document.createElement('button');
+    del.className = 'calib-row__del';
+    del.textContent = '×';
+    del.setAttribute('aria-label', `Delete calibration ${c.label}`);
+    del.addEventListener('click', () => deleteCalibrationEntry(c.label));
+
+    row.appendChild(pick);
+    row.appendChild(del);
+    list.appendChild(row);
+  }
+}
+
+async function openCalibration() {
+  let data = { calibrations: [], active: null };
+  try {
+    data = await apiJson('/camera/calibration');
+  } catch (err) {
+    announce(`Calibration load failed: ${err.message}`);
+  }
+  const entry = data.active ? (data.calibrations || []).find(c => c.label === data.active) : null;
+  S.calibFraction = entry ? 1 / entry.fov_cm : 1 / CALIB_DEFAULT_FOV;
+  document.getElementById('calib-label').value = entry ? entry.label : '';
+  renderCalibList(data);
+
+  document.getElementById('calib-overlay').hidden = false;
+  document.getElementById('calib-overlay').setAttribute('aria-hidden', 'false');
+  document.getElementById('calib-panel').hidden = false;
+  document.getElementById('calibrate-btn').setAttribute('aria-pressed', 'true');
+  renderCalibRect();
+  announce('Calibration mode on');
+}
+
+function closeCalibration() {
+  document.getElementById('calib-overlay').hidden = true;
+  document.getElementById('calib-overlay').setAttribute('aria-hidden', 'true');
+  document.getElementById('calib-panel').hidden = true;
+  document.getElementById('calibrate-btn').setAttribute('aria-pressed', 'false');
+}
+
+function toggleCalibration() {
+  if (isCalibrating()) closeCalibration();
+  else openCalibration();
+}
+
+async function saveCalibration() {
+  const input = document.getElementById('calib-label');
+  const label = input.value.trim();
+  if (!label) { announce('Enter a calibration name'); input.focus(); return; }
+  const fov_cm = 1 / S.calibFraction;
+  const btn = document.getElementById('calib-save');
+  btn.disabled = true;
+  try {
+    const data = await apiJson('/camera/calibration', { method: 'POST', body: { label, fov_cm } });
+    renderCalibList(data);
+    announce(`Saved calibration ${label} (${fov_cm.toFixed(2)} cm)`);
+  } catch (err) {
+    announce(`Save failed: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function selectCalibration(label, fovCm) {
+  try {
+    const data = await apiJson('/camera/calibration/active', { method: 'POST', body: { label } });
+    S.calibFraction = 1 / fovCm;
+    document.getElementById('calib-label').value = label;
+    renderCalibRect();
+    renderCalibList(data);
+    announce(`Calibration ${label} active`);
+  } catch (err) {
+    announce(`Activation failed: ${err.message}`);
+  }
+}
+
+async function deleteCalibrationEntry(label) {
+  try {
+    const data = await apiJson(`/camera/calibration/${encodeURIComponent(label)}`, { method: 'DELETE' });
+    const entry = data.active ? (data.calibrations || []).find(c => c.label === data.active) : null;
+    if (entry) {
+      S.calibFraction = 1 / entry.fov_cm;
+      document.getElementById('calib-label').value = entry.label;
+    }
+    renderCalibRect();
+    renderCalibList(data);
+    announce(`Deleted calibration ${label}`);
+  } catch (err) {
+    announce(`Delete failed: ${err.message}`);
+  }
 }
 
 // ── Status polling ─────────────────────────────────────────────────────────────
@@ -1141,7 +1344,7 @@ async function markCapturedQuadrants(sessionId, plateId) {
   try {
     const files = await apiJson(`/sessions/${sessionId}/plates/${plateId}/files`);
     const captured = new Set(
-      files.map(f => { const m = f.filename.match(/_([A-Z]{2})\.jpg$/i); return m ? m[1].toUpperCase() : null; })
+      files.map(f => { const m = f.filename.match(/_([A-Z]{2})\.(tif|tiff|jpg|jpeg)$/i); return m ? m[1].toUpperCase() : null; })
            .filter(Boolean)
     );
     document.querySelectorAll('.btn-quadrant').forEach(btn => {
@@ -1202,35 +1405,35 @@ function renderThumbnailStrip() {
     const tile = document.createElement('div');
     tile.className = 'thumb-tile';
     tile.dataset.filename = f.filename;
-    tile.setAttribute('tabindex', '0');
-    tile.setAttribute('role', 'button');
-    tile.setAttribute('aria-label', `View ${f.filename}`);
+    if (isVideo) {
+      // Videos open and play in the modal — keep them as buttons.
+      tile.setAttribute('tabindex', '0');
+      tile.setAttribute('role', 'button');
+      tile.setAttribute('aria-label', `View ${f.filename}`);
+    } else {
+      // Stills are TIFF (browsers can't render them) — thumbnail is display-only.
+      tile.setAttribute('aria-label', `Captured image ${f.filename}`);
+    }
 
     const label = document.createElement('div');
     label.className = 'thumb-tile__label';
     label.textContent = f.filename;
 
+    const img = new Image();
+    img.src = f.thumbUrl;
+    img.alt = f.filename;
+    img.loading = 'lazy';
+    img.onerror = () => img.replaceWith(createVideoIcon());
+    tile.appendChild(img);
+
     if (isVideo) {
-      const img = new Image();
-      img.src = f.thumbUrl;
-      img.alt = f.filename;
-      img.loading = 'lazy';
-      img.onerror = () => img.replaceWith(createVideoIcon());
-      tile.appendChild(img);
       const play = document.createElement('div');
       play.className = 'thumb-tile__play';
       play.innerHTML = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="rgba(0,0,0,.55)" stroke="none"/><polygon points="10,8 17,12 10,16" fill="#fff" stroke="none"/></svg>`;
       tile.appendChild(play);
-    } else {
-      const img = new Image();
-      img.src = f.thumbUrl;
-      img.alt = f.filename;
-      img.loading = 'lazy';
-      img.onerror = () => img.replaceWith(createVideoIcon());
-      tile.appendChild(img);
     }
 
-    // × delete button
+    // × delete button (both kinds)
     const delBtn = document.createElement('button');
     delBtn.className = 'thumb-tile__del';
     delBtn.setAttribute('aria-label', `Delete ${f.filename}`);
@@ -1239,8 +1442,11 @@ function renderThumbnailStrip() {
     tile.appendChild(delBtn);
 
     tile.appendChild(label);
-    tile.addEventListener('click', () => openModal(f.fullUrl, f.filename, f));
-    tile.addEventListener('keydown', e => { if (e.key === 'Enter') openModal(f.fullUrl, f.filename, f); });
+
+    if (isVideo) {
+      tile.addEventListener('click', () => openModal(f.fullUrl, f.filename, f));
+      tile.addEventListener('keydown', e => { if (e.key === 'Enter') openModal(f.fullUrl, f.filename, f); });
+    }
     list.appendChild(tile);
   }
 }
@@ -1303,7 +1509,7 @@ async function deleteCapture(fileObj) {
     await api(deleteUrl, { method: 'DELETE' });
     closeModal();
     // Revert quadrant button if applicable
-    const m = fileObj.filename.match(/_([A-Z]{2})\.jpg$/i);
+    const m = fileObj.filename.match(/_([A-Z]{2})\.(tif|tiff|jpg|jpeg)$/i);
     if (m) {
       document.querySelectorAll(`.btn-quadrant[data-q="${m[1].toUpperCase()}"]`)
         .forEach(btn => btn.classList.remove('captured'));
@@ -1338,10 +1544,21 @@ function bindEvents() {
   document.getElementById('ev-slider').addEventListener('input', onEvInput);
   document.getElementById('ev-slider').addEventListener('change', onEvChange);
 
+  document.getElementById('calibrate-btn').addEventListener('click', toggleCalibration);
+  document.getElementById('calib-save').addEventListener('click', saveCalibration);
+  document.getElementById('calib-done').addEventListener('click', closeCalibration);
+  document.getElementById('calib-handle').addEventListener('pointerdown', onCalibPointerDown);
+  document.getElementById('calib-handle').addEventListener('keydown', onCalibHandleKey);
+  document.getElementById('calib-label').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); saveCalibration(); }
+  });
+  window.addEventListener('resize', () => { if (isCalibrating()) renderCalibRect(); });
+
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       if (!document.getElementById('modal-overlay').hidden) { closeModal(); return; }
       if (!document.getElementById('shortcuts-overlay').hidden) { toggleShortcutsOverlay(); return; }
+      if (isCalibrating()) { closeCalibration(); return; }
       return;
     }
     if (isTyping()) return;
