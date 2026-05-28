@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from ..auth import require_token
 from ..camera import camera_manager
 from ..config import settings
+from ..disk_guard import ensure_capture_space
 from .. import capture_ops
 from .. import sessions as session_store
 
@@ -35,6 +36,7 @@ class PlateCapRequest(BaseModel):
     dependencies=[Depends(require_token)],
 )
 async def capture_plate(session_id: str, plate_id: str, req: PlateCapRequest = PlateCapRequest()):
+    ensure_capture_space(settings.DATA_ROOT, settings.CAPTURE_MIN_FREE_GB)
     _require_camera()
     session, plate = session_store.get_plate(session_id, plate_id)
     plate_dir = session_store.get_plate_dir(session_id, plate.folder_name)

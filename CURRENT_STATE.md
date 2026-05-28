@@ -195,18 +195,36 @@ Heavy timing is logged at DEBUG throughout.
 Standalone (`python -m capture.retention`), driven by `celegans-retention.timer`
 (2 min after boot, then every 15 min). It re-derives `DATA_ROOT` and the dir
 names from env vars (not from `config.py` — there's a comment noting they must
-match). Knobs (all env, defaults): `GRACE_HOURS=1`, `MIN_FREE_GB=5`,
-`TARGET_FREE_GB=10`, `MAX_AGE_DAYS=30`.
+match). Knobs (all env, defaults): `MIN_FREE_GB=5`, `TARGET_FREE_GB=10`,
+`MAX_AGE_DAYS=30`, `TRASH_MAX_AGE_DAYS=7`.
 
-Logic: collect every data file that has an `.acked` sibling. Classify each as a
-"max age" violation (file mtime older than `MAX_AGE_DAYS`) or "space pressure"
-(acked longer ago than `GRACE_HOURS`). If disk free ≥ `MIN_FREE_GB` **and** there
-are no age violations, exit early. Otherwise trash files oldest-acked-first:
-age-violation files are always trashed regardless of disk; space-pressure files
-stop once free space reaches `max(TARGET_FREE_GB, MIN_FREE_GB)` (the `max` guards
-the MIN>TARGET test configuration). Trashing moves the file plus its `.sha256`,
-`.acked`, and thumbnail into `.trash/`. `--dry-run` and `--verbose` supported. A
-`.retention-last-run` marker is touched on every non-dry run.
+Reclamation **permanently deletes** files (it no longer moves them to `.trash`,
+which sits on the same card and freed nothing). Every file it deletes is either
+acked (verified copy on the laptop) or already user-deleted into `.trash`, so
+deletion is safe. `_delete_file` removes the data file plus its `.sha256`,
+`.acked`, and thumbnail.
+
+Logic, per run:
+1. `purge_expired_trash` unconditionally deletes anything under `.trash/` whose
+   mtime is older than `TRASH_MAX_AGE_DAYS`, then prunes empty dirs. (The UI
+   recycle bin stamps each trashed file's mtime to deletion time, so it ages
+   from when the user deleted it.)
+2. Measure actual disk free. If free ≥ `MIN_FREE_GB` **and** no acked file
+   exceeds `MAX_AGE_DAYS`, exit early.
+3. Otherwise `reclaim(max(TARGET_FREE_GB, MIN_FREE_GB))` deletes oldest-first
+   within tiers, stopping as soon as actual disk free reaches the target:
+   **tier 0** acked files older than `MAX_AGE_DAYS` (always, age violations);
+   **tier 1** all remaining `.trash` contents; **tier 2** remaining acked files,
+   oldest-acked-first. (`max` guards the MIN>TARGET test configuration.)
+
+`--dry-run` and `--verbose` supported; actual disk-free is logged before and
+after. A `.retention-last-run` marker is touched on every non-dry run.
+
+A separate **capture-time guard** (`app/disk_guard.py`, `ensure_capture_space`)
+runs at the top of every capture endpoint before any camera work: if free disk
+is below `CELEGANS_CAPTURE_MIN_FREE_GB` it calls `reclaim` once, and if still
+below, refuses the capture with **HTTP 507** so a full card can't produce
+partial/failed frames.
 
 ---
 
@@ -672,7 +690,8 @@ pydantic-settings; `.env.example` is the committed template):
 - `CELEGANS_DATA_ROOT` (default `/home/pi/celegans-data`).
 - `CELEGANS_HOST` (`0.0.0.0`), `CELEGANS_PORT` (`8000`).
 - `CELEGANS_MAX_AUTO_SHUTTER_US` (`500000` = 500 ms AE shutter cap, so dim scenes go dark rather than freezing the frame rate).
-- Retention (read by `retention.py`, not the service): `CELEGANS_RETENTION_GRACE_HOURS=1`, `..._MIN_FREE_GB=5`, `..._TARGET_FREE_GB=10`, `..._MAX_AGE_DAYS=30`.
+- `CELEGANS_CAPTURE_MIN_FREE_GB` (`2.0`) — capture-time guard floor; below this (after a reclaim attempt) captures are refused with HTTP 507.
+- Retention (read by `retention.py`, not the service): `..._MIN_FREE_GB=5`, `..._TARGET_FREE_GB=10`, `..._MAX_AGE_DAYS=30`, `..._TRASH_MAX_AGE_DAYS=7`.
 
 The systemd capture unit substitutes `${CELEGANS_HOST}`/`${CELEGANS_PORT}` from
 the EnvironmentFile into the uvicorn `ExecStart`.

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from ..auth import require_token
 from ..camera import camera_manager
 from ..config import settings
+from ..disk_guard import ensure_capture_space
 from .. import capture_ops
 
 router = APIRouter(prefix="/capture/free")
@@ -34,6 +35,7 @@ class FreeVideoRequest(BaseModel):
 
 @router.post("/still", dependencies=[Depends(require_token)])
 async def free_still(req: FreeStillRequest = FreeStillRequest()):
+    ensure_capture_space(settings.DATA_ROOT, settings.CAPTURE_MIN_FREE_GB)
     _require_camera()
     return await asyncio.to_thread(
         capture_ops.free_still, camera_manager, req.apply_flat_field
@@ -42,6 +44,7 @@ async def free_still(req: FreeStillRequest = FreeStillRequest()):
 
 @router.post("/video", dependencies=[Depends(require_token)])
 async def free_video(req: FreeVideoRequest):
+    ensure_capture_space(settings.DATA_ROOT, settings.CAPTURE_MIN_FREE_GB)
     _require_camera()
     bitrate = req.bitrate_bps or capture_ops.DEFAULT_BITRATE
     return await asyncio.to_thread(

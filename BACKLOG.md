@@ -2,6 +2,10 @@
 
 Small items deferred from main work. Pick up when convenient.
 
+## Storage (done 2026-05-28)
+
+- `.trash` no longer leaks: reclamation deletes acked files directly (not move-to-trash), the recycle bin auto-purges after `CELEGANS_RETENTION_TRASH_MAX_AGE_DAYS`, and capture refuses on a full card with HTTP 507.
+
 ## UI
 
 - **Soft-deleted thumbnails don't vanish from timeline.** When a file is

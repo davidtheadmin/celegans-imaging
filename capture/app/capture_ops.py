@@ -1,6 +1,7 @@
 import hashlib
 import io
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -275,19 +276,33 @@ def trash_base() -> Path:
 
 
 def trash_file(src: Path, rel_path: str) -> Path:
-    """Move src (and its .thumbs cache) to .trash/<rel_path>. Returns dest path."""
+    """Move src plus its sidecars (.sha256, .acked) and .thumbs cache to
+    .trash/<rel_path>, then stamp every moved file's mtime to *now* so the
+    recycle bin ages by deletion time, not capture time
+    (see retention.purge_expired_trash). Returns the dest data path."""
     dest = trash_base() / rel_path
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.exists():
         ts = datetime.now().strftime("%Y%m%dT%H%M%S")
         dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
+
     shutil.move(str(src), str(dest))
+    os.utime(dest, None)  # mtime = deletion time
+
+    for suffix in (".sha256", ".acked"):
+        sib = src.parent / (src.name + suffix)
+        if sib.exists():
+            sib_dest = dest.parent / (dest.name + suffix)
+            shutil.move(str(sib), str(sib_dest))
+            os.utime(sib_dest, None)
+
     thumb_src = src.parent / ".thumbs" / (src.stem + ".jpg")
     if thumb_src.exists():
         thumb_dest = dest.parent / ".thumbs" / (dest.stem + ".jpg")
         thumb_dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             shutil.move(str(thumb_src), str(thumb_dest))
+            os.utime(thumb_dest, None)
         except OSError:
             pass
     return dest
