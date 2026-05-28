@@ -379,30 +379,53 @@ input[type="checkbox"] { accent-color: var(--accent); }
 
 .calib-overlay {
   position: absolute; inset: 0; z-index: 5;
-  pointer-events: none;  /* only the handle is interactive */
+  pointer-events: none;  /* the band body + right handle re-enable events */
 }
 .calib-overlay[hidden] { display: none; }
 
+/* Band body: the move-drag area. Minimal fill so the ruler shows through. */
 .calib-rect {
   position: absolute; box-sizing: border-box;
-  border: 1.5px solid rgba(255,255,255,.75);
-  background: rgba(79,135,240,.16);
-  display: flex; align-items: center; justify-content: center;
+  background: rgba(79,135,240,.10);
+  pointer-events: auto; cursor: grab; touch-action: none;
 }
+.calib-rect.dragging { cursor: grabbing; }
 .calib-rect__label {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
   font-family: var(--mono); font-size: 12px; font-weight: 600; color: #fff;
   text-shadow: 0 1px 3px rgba(0,0,0,.85); user-select: none; pointer-events: none;
 }
+
+/* Thin caliper edges — the exact reference the user aligns to ruler ticks.
+   Each is a vertical line (outer border) with short inward jaws (top+bottom
+   borders). The right edge is the accent (adjustable) edge, the left neutral. */
+.calib-edge {
+  position: absolute; top: 0; bottom: 0; width: 8px; box-sizing: border-box;
+  pointer-events: none;
+  filter: drop-shadow(0 0 1px rgba(0,0,0,.9));  /* halo so lines read on any background */
+}
+.calib-edge--left {
+  left: -1px;
+  border-left: 2px solid #22d3ee;   /* neutral bright cyan */
+  border-top: 2px solid #22d3ee;
+  border-bottom: 2px solid #22d3ee;
+}
+.calib-edge--right {
+  right: -1px;
+  border-right: 2px solid var(--accent);  /* adjustable edge */
+  border-top: 2px solid var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+
+/* Right-edge resize handle: invisible, wide (±9px) grab zone over the right
+   line. The visible line stays thin (drawn by .calib-edge--right above). */
 .calib-handle {
-  position: absolute; top: -1.5px; bottom: -1.5px; right: -5px;
-  width: 11px; pointer-events: auto; cursor: ew-resize;
-  background: var(--accent); border-radius: 2px;
-  display: flex; align-items: center; justify-content: center;
+  position: absolute; top: 0; bottom: 0; right: -9px; width: 18px;
+  pointer-events: auto; cursor: ew-resize; background: transparent;
   touch-action: none;
 }
-.calib-handle:hover { background: var(--accent-h); }
 .calib-handle:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
-.calib-handle__grip { font-size: 11px; line-height: 1; color: #fff; pointer-events: none; }
 
 .calib-readout {
   position: absolute; pointer-events: none;

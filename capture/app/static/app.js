@@ -20,15 +20,16 @@ const S = {
   editingConditionFor: null,
   showNewSession: false,
   thumbnails: [],
-  calibFraction: 1 / 1.89,  // 1-cm band as fraction of frame width (default FOV 1.89 cm)
+  calibFraction: 1 / 1.89,         // band WIDTH as fraction of frame width = the calibration (default FOV 1.89 cm)
+  calibLeftFrac: 0.08,             // band LEFT position as fraction of frame width (cosmetic; not part of calibration)
 };
 
 // Spatial-calibration overlay constants.
-const CALIB_DEFAULT_FOV = 1.89;  // cm, at max magnification
-const CALIB_LEFT_FRAC = 0.08;    // left edge anchored 8% from the image's left
-const CALIB_BAND_FRAC = 0.18;    // band height as a fraction of image height
-const CALIB_MIN_W = 40;          // px
-const CALIB_FULL_W = 4056;       // full-res still width (µm/px reference)
+const CALIB_DEFAULT_FOV = 1.89;      // cm, at max magnification
+const CALIB_DEFAULT_LEFT_FRAC = 0.08; // default left position, 8% from the image's left
+const CALIB_BAND_FRAC = 0.18;        // band height as a fraction of image height
+const CALIB_MIN_W = 40;              // px
+const CALIB_FULL_W = 4056;           // full-res still width (µm/px reference)
 const CALIB_VIDEO_W = 2028;      // video width
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
@@ -285,8 +286,16 @@ function renderCalibRect() {
   const ix = img.offsetLeft, iy = img.offsetTop;
   if (!iw || !ih) return;
 
-  const left = ix + CALIB_LEFT_FRAC * iw;
-  const width = Math.max(CALIB_MIN_W, S.calibFraction * iw);
+  // Width fraction IS the calibration: fraction = (rightX - leftX) / imageWidth.
+  // Left fraction only positions the band over the ruler and never affects it.
+  const minFrac = CALIB_MIN_W / iw;
+  const widthFrac = Math.max(minFrac, Math.min(S.calibFraction, 1));
+  const leftFrac = Math.max(0, Math.min(S.calibLeftFrac, 1 - widthFrac));
+  S.calibFraction = widthFrac;
+  S.calibLeftFrac = leftFrac;
+
+  const left = ix + leftFrac * iw;
+  const width = widthFrac * iw;
   const height = CALIB_BAND_FRAC * ih;
   const top = iy + (ih - height) / 2;
 
@@ -295,9 +304,9 @@ function renderCalibRect() {
   rect.style.width = `${width}px`;
   rect.style.height = `${height}px`;
 
-  const fov = 1 / S.calibFraction;
-  const still = 10000 / (S.calibFraction * CALIB_FULL_W);
-  const video = 10000 / (S.calibFraction * CALIB_VIDEO_W);
+  const fov = 1 / widthFrac;
+  const still = 10000 / (widthFrac * CALIB_FULL_W);
+  const video = 10000 / (widthFrac * CALIB_VIDEO_W);
   readout.textContent =
     `FOV: ${fov.toFixed(2)} cm · ${still.toFixed(2)} µm/px (still) · ${video.toFixed(2)} µm/px (video)`;
   readout.style.left = `${left}px`;
@@ -308,23 +317,28 @@ function renderCalibRect() {
   handle.setAttribute('aria-valuetext', `${fov.toFixed(2)} centimetres field of view`);
 }
 
-function onCalibPointerDown(e) {
-  e.preventDefault();
-  const handle = e.currentTarget;
+// Image content-box geometry in .preview-wrap pixel coordinates.
+function _calibGeom() {
   const img = document.getElementById('preview-img');
-  const wrap = document.querySelector('.preview-wrap');
+  const wrapRect = document.querySelector('.preview-wrap').getBoundingClientRect();
+  return { ix: img.offsetLeft, iw: img.clientWidth, wrapLeft: wrapRect.left };
+}
+
+// Right-edge handle: drag adjusts WIDTH (left edge stays put), which changes the
+// calibration. fraction = (rightX - leftX) / imageWidth.
+function onCalibResizeDown(e) {
+  e.preventDefault();
+  e.stopPropagation();  // takes priority over the body move-drag
+  const handle = e.currentTarget;
   try { handle.setPointerCapture(e.pointerId); } catch {}
 
   const move = (ev) => {
-    const wrapRect = wrap.getBoundingClientRect();
-    const iw = img.clientWidth;
-    const ix = img.offsetLeft;
+    const { ix, iw, wrapLeft } = _calibGeom();
     if (!iw) return;
-    const leftPx = ix + CALIB_LEFT_FRAC * iw;
-    const maxWidth = (ix + iw) - leftPx;
-    let width = (ev.clientX - wrapRect.left) - leftPx;
-    width = Math.max(CALIB_MIN_W, Math.min(width, maxWidth));
-    S.calibFraction = width / iw;
+    const leftX = ix + S.calibLeftFrac * iw;
+    const px = ev.clientX - wrapLeft;
+    const rightX = Math.min(Math.max(px, leftX + CALIB_MIN_W), ix + iw);
+    S.calibFraction = (rightX - leftX) / iw;
     renderCalibRect();
   };
   const up = () => {
@@ -337,6 +351,37 @@ function onCalibPointerDown(e) {
   handle.addEventListener('pointercancel', up);
 }
 
+// Band body: drag TRANSLATES the whole rectangle, preserving width — so it does
+// not change the calibration, only the band's position over the ruler.
+function onCalibMoveDown(e) {
+  e.preventDefault();
+  const rect = e.currentTarget;
+  const { ix, iw, wrapLeft } = _calibGeom();
+  if (!iw) return;
+  const grabOffset = (e.clientX - wrapLeft) - (ix + S.calibLeftFrac * iw);  // keep grab point fixed
+  rect.classList.add('dragging');
+  try { rect.setPointerCapture(e.pointerId); } catch {}
+
+  const move = (ev) => {
+    const g = _calibGeom();
+    if (!g.iw) return;
+    const newLeftX = (ev.clientX - g.wrapLeft) - grabOffset;
+    let leftFrac = (newLeftX - g.ix) / g.iw;
+    leftFrac = Math.max(0, Math.min(leftFrac, 1 - S.calibFraction));  // both edges stay in the image
+    S.calibLeftFrac = leftFrac;
+    renderCalibRect();
+  };
+  const up = () => {
+    rect.classList.remove('dragging');
+    rect.removeEventListener('pointermove', move);
+    rect.removeEventListener('pointerup', up);
+    rect.removeEventListener('pointercancel', up);
+  };
+  rect.addEventListener('pointermove', move);
+  rect.addEventListener('pointerup', up);
+  rect.addEventListener('pointercancel', up);
+}
+
 function onCalibHandleKey(e) {
   const step = e.shiftKey ? 0.05 : 0.01;  // fraction-of-width per keypress
   let f = S.calibFraction;
@@ -347,7 +392,7 @@ function onCalibHandleKey(e) {
   const img = document.getElementById('preview-img');
   const iw = img.clientWidth || 1;
   const minFrac = CALIB_MIN_W / iw;
-  S.calibFraction = Math.max(minFrac, Math.min(f, 1 - CALIB_LEFT_FRAC));
+  S.calibFraction = Math.max(minFrac, Math.min(f, 1 - S.calibLeftFrac));
   renderCalibRect();
 }
 
@@ -390,6 +435,7 @@ async function openCalibration() {
   }
   const entry = data.active ? (data.calibrations || []).find(c => c.label === data.active) : null;
   S.calibFraction = entry ? 1 / entry.fov_cm : 1 / CALIB_DEFAULT_FOV;
+  S.calibLeftFrac = CALIB_DEFAULT_LEFT_FRAC;  // start at the default position each time
   document.getElementById('calib-label').value = entry ? entry.label : '';
   renderCalibList(data);
 
@@ -1547,7 +1593,8 @@ function bindEvents() {
   document.getElementById('calibrate-btn').addEventListener('click', toggleCalibration);
   document.getElementById('calib-save').addEventListener('click', saveCalibration);
   document.getElementById('calib-done').addEventListener('click', closeCalibration);
-  document.getElementById('calib-handle').addEventListener('pointerdown', onCalibPointerDown);
+  document.getElementById('calib-rect').addEventListener('pointerdown', onCalibMoveDown);
+  document.getElementById('calib-handle').addEventListener('pointerdown', onCalibResizeDown);
   document.getElementById('calib-handle').addEventListener('keydown', onCalibHandleKey);
   document.getElementById('calib-label').addEventListener('keydown', e => {
     if (e.key === 'Enter') { e.preventDefault(); saveCalibration(); }

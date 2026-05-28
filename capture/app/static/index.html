@@ -118,11 +118,11 @@
             <!-- Spatial calibration overlay (shown while calibrating) -->
             <div id="calib-overlay" class="calib-overlay" hidden aria-hidden="true">
               <div id="calib-rect" class="calib-rect">
+                <div class="calib-edge calib-edge--left" aria-hidden="true"></div>
+                <div class="calib-edge calib-edge--right" aria-hidden="true"></div>
                 <span class="calib-rect__label">1 cm</span>
                 <div id="calib-handle" class="calib-handle" role="slider"
-                     tabindex="0" aria-label="Drag to match 1 cm on the ruler">
-                  <span class="calib-handle__grip" aria-hidden="true">⟷</span>
-                </div>
+                     tabindex="0" aria-label="Resize band: set its width to 1 cm on the ruler"></div>
               </div>
               <div id="calib-readout" class="calib-readout mono"></div>
             </div>
