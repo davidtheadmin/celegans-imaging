@@ -130,9 +130,10 @@
             <!-- Calibration controls panel -->
             <div id="calib-panel" class="calib-panel" hidden>
               <span class="calib-panel__title">Spatial calibration</span>
-              <p class="calib-panel__hint">Drag the right edge of the band to span exactly 1 cm on a ruler under the scope, then save.</p>
+              <p class="calib-panel__hint">Drag the band over a ruler and resize its right edge to span exactly 1 cm, then name and save it.</p>
               <div class="calib-panel__row">
-                <input id="calib-label" type="text" placeholder="Name (e.g. 4x)" spellcheck="false">
+                <input id="calib-label" type="text" placeholder="e.g. max mag" spellcheck="false"
+                       title="Name this calibration for the working distance or focus you used (e.g. 'max mag', 'WD-2') so you can reselect it for future sessions.">
                 <button id="calib-save" class="btn btn-sm btn-primary">Save</button>
               </div>
               <div id="calib-list" class="calib-list"></div>

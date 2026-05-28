@@ -22,6 +22,7 @@ const S = {
   thumbnails: [],
   calibFraction: 1 / 1.89,         // band WIDTH as fraction of frame width = the calibration (default FOV 1.89 cm)
   calibLeftFrac: 0.08,             // band LEFT position as fraction of frame width (cosmetic; not part of calibration)
+  calibTopFrac: (1 - 0.18) / 2,    // band TOP position as fraction of frame height (cosmetic; not part of calibration)
 };
 
 // Spatial-calibration overlay constants.
@@ -287,17 +288,19 @@ function renderCalibRect() {
   if (!iw || !ih) return;
 
   // Width fraction IS the calibration: fraction = (rightX - leftX) / imageWidth.
-  // Left fraction only positions the band over the ruler and never affects it.
+  // Left/top fractions only position the band over the ruler and never affect it.
   const minFrac = CALIB_MIN_W / iw;
   const widthFrac = Math.max(minFrac, Math.min(S.calibFraction, 1));
   const leftFrac = Math.max(0, Math.min(S.calibLeftFrac, 1 - widthFrac));
+  const topFrac = Math.max(0, Math.min(S.calibTopFrac, 1 - CALIB_BAND_FRAC));
   S.calibFraction = widthFrac;
   S.calibLeftFrac = leftFrac;
+  S.calibTopFrac = topFrac;
 
   const left = ix + leftFrac * iw;
   const width = widthFrac * iw;
   const height = CALIB_BAND_FRAC * ih;
-  const top = iy + (ih - height) / 2;
+  const top = iy + topFrac * ih;
 
   rect.style.left = `${left}px`;
   rect.style.top = `${top}px`;
@@ -321,7 +324,11 @@ function renderCalibRect() {
 function _calibGeom() {
   const img = document.getElementById('preview-img');
   const wrapRect = document.querySelector('.preview-wrap').getBoundingClientRect();
-  return { ix: img.offsetLeft, iw: img.clientWidth, wrapLeft: wrapRect.left };
+  return {
+    ix: img.offsetLeft, iy: img.offsetTop,
+    iw: img.clientWidth, ih: img.clientHeight,
+    wrapLeft: wrapRect.left, wrapTop: wrapRect.top,
+  };
 }
 
 // Right-edge handle: drag adjusts WIDTH (left edge stays put), which changes the
@@ -351,24 +358,31 @@ function onCalibResizeDown(e) {
   handle.addEventListener('pointercancel', up);
 }
 
-// Band body: drag TRANSLATES the whole rectangle, preserving width — so it does
-// not change the calibration, only the band's position over the ruler.
+// Band body: drag TRANSLATES the whole rectangle on both axes, preserving width
+// — so it does not change the calibration, only the band's position over the
+// ruler. Vertical position is purely cosmetic.
 function onCalibMoveDown(e) {
   e.preventDefault();
   const rect = e.currentTarget;
-  const { ix, iw, wrapLeft } = _calibGeom();
-  if (!iw) return;
-  const grabOffset = (e.clientX - wrapLeft) - (ix + S.calibLeftFrac * iw);  // keep grab point fixed
+  const g0 = _calibGeom();
+  if (!g0.iw || !g0.ih) return;
+  // Keep the grabbed point fixed under the pointer on both axes.
+  const grabX = (e.clientX - g0.wrapLeft) - (g0.ix + S.calibLeftFrac * g0.iw);
+  const grabY = (e.clientY - g0.wrapTop) - (g0.iy + S.calibTopFrac * g0.ih);
   rect.classList.add('dragging');
   try { rect.setPointerCapture(e.pointerId); } catch {}
 
   const move = (ev) => {
     const g = _calibGeom();
-    if (!g.iw) return;
-    const newLeftX = (ev.clientX - g.wrapLeft) - grabOffset;
+    if (!g.iw || !g.ih) return;
+    const newLeftX = (ev.clientX - g.wrapLeft) - grabX;
+    const newTopY = (ev.clientY - g.wrapTop) - grabY;
     let leftFrac = (newLeftX - g.ix) / g.iw;
-    leftFrac = Math.max(0, Math.min(leftFrac, 1 - S.calibFraction));  // both edges stay in the image
+    let topFrac = (newTopY - g.iy) / g.ih;
+    leftFrac = Math.max(0, Math.min(leftFrac, 1 - S.calibFraction));      // x edges stay in image
+    topFrac = Math.max(0, Math.min(topFrac, 1 - CALIB_BAND_FRAC));        // y edges stay in image
     S.calibLeftFrac = leftFrac;
+    S.calibTopFrac = topFrac;
     renderCalibRect();
   };
   const up = () => {
@@ -435,7 +449,8 @@ async function openCalibration() {
   }
   const entry = data.active ? (data.calibrations || []).find(c => c.label === data.active) : null;
   S.calibFraction = entry ? 1 / entry.fov_cm : 1 / CALIB_DEFAULT_FOV;
-  S.calibLeftFrac = CALIB_DEFAULT_LEFT_FRAC;  // start at the default position each time
+  S.calibLeftFrac = CALIB_DEFAULT_LEFT_FRAC;          // start at the default x each time
+  S.calibTopFrac = (1 - CALIB_BAND_FRAC) / 2;         // vertically centered each time
   document.getElementById('calib-label').value = entry ? entry.label : '';
   renderCalibList(data);
 

@@ -398,25 +398,16 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 
 /* Thin caliper edges — the exact reference the user aligns to ruler ticks.
-   Each is a vertical line (outer border) with short inward jaws (top+bottom
-   borders). The right edge is the accent (adjustable) edge, the left neutral. */
+   Solid 2px lines that extend 10px past the band top/bottom (caliper jaws),
+   each with a dark 1px outline so they read on bright AND dark backgrounds.
+   Right edge = accent (adjustable); left edge = neutral cyan. */
 .calib-edge {
-  position: absolute; top: 0; bottom: 0; width: 8px; box-sizing: border-box;
+  position: absolute; top: -10px; bottom: -10px; width: 2px;
   pointer-events: none;
-  filter: drop-shadow(0 0 1px rgba(0,0,0,.9));  /* halo so lines read on any background */
+  box-shadow: 0 0 0 1px rgba(0,0,0,.7);
 }
-.calib-edge--left {
-  left: -1px;
-  border-left: 2px solid #22d3ee;   /* neutral bright cyan */
-  border-top: 2px solid #22d3ee;
-  border-bottom: 2px solid #22d3ee;
-}
-.calib-edge--right {
-  right: -1px;
-  border-right: 2px solid var(--accent);  /* adjustable edge */
-  border-top: 2px solid var(--accent);
-  border-bottom: 2px solid var(--accent);
-}
+.calib-edge--left  { left: -1px;  background: #22d3ee; }     /* neutral bright cyan */
+.calib-edge--right { right: -1px; background: var(--accent); }  /* adjustable edge */
 
 /* Right-edge resize handle: invisible, wide (±9px) grab zone over the right
    line. The visible line stays thin (drawn by .calib-edge--right above). */
