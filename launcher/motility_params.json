@@ -67,5 +67,5 @@
     "MWP_whichsideup": "upright",
     "MWP_well_shape": "square",
     "MWP_well_masked_edge": 0.1,
-    "head_angle_prominence": 0.30
+    "head_angle_prominence": 0.50
 }

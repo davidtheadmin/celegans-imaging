@@ -81,7 +81,8 @@ def make_video_summary_png(
 
 
 def make_per_worm_trace_png(
-    worm_index: int,
+    repr_worm_index: int,
+    member_tierpsy_ids: list[int],
     hdf5_path: Path,
     fps: float,
     basename: str,
@@ -90,7 +91,7 @@ def make_per_worm_trace_png(
     coverage_pct: float,
     head_angle_prominence: float = 0.30,
 ) -> None:
-    """Static 800×400 head-angle trace PNG for one fully-tracked worm."""
+    """Static 800×400 head-angle trace PNG for one worm (possibly multi-fragment)."""
     try:
         import h5py
         from analysis.analysis_csv import compute_head_angle_signal
@@ -98,31 +99,51 @@ def make_per_worm_trace_png(
         with h5py.File(str(hdf5_path), "r") as fh:
             skel_all = fh["coordinates"]["skeletons"][:]
         frame_col = "timestamp_raw" if "timestamp_raw" in traj.columns else "frame_number"
-        worm_traj = (traj[traj["worm_index_joined"] == worm_index]
-                     .sort_values(frame_col).reset_index(drop=True))
-        signal = compute_head_angle_signal(worm_traj, skel_all, fps, head_angle_prominence)
-        if signal is None:
-            log.warning("make_per_worm_trace_png: no valid signal for worm %d in %s",
-                        worm_index, hdf5_path.name)
+
+        combined_fn: list[int] = []
+        combined_dt: list[float] = []
+        all_peak_fns: list[int] = []
+        n_valid_total = 0
+
+        for tid in member_tierpsy_ids:
+            worm_traj = (traj[traj["worm_index_joined"] == tid]
+                         .sort_values(frame_col).reset_index(drop=True))
+            signal = compute_head_angle_signal(worm_traj, skel_all, fps, head_angle_prominence)
+            if signal is None:
+                continue
+            combined_fn.extend(signal["frame_nums"].tolist())
+            combined_dt.extend(signal["detrended"].tolist())
+            all_peak_fns.extend(signal["frame_nums"][signal["pos_peaks"]].tolist())
+            all_peak_fns.extend(signal["frame_nums"][signal["neg_peaks"]].tolist())
+            n_valid_total += signal["n_valid"]
+
+        if not combined_fn:
+            log.warning("make_per_worm_trace_png: no valid signal for worms %s in %s",
+                        member_tierpsy_ids, hdf5_path.name)
             return
 
-        t_sec = signal["frame_nums"] / fps
-        t_rel = t_sec - t_sec[0]
-        detrended = signal["detrended"]
-        all_peaks = np.concatenate([signal["pos_peaks"], signal["neg_peaks"]])
-        bends_per_30s = bpm / 2.0
+        sort_order = np.argsort(combined_fn)
+        frame_nums = np.array(combined_fn)[sort_order]
+        detrended = np.array(combined_dt)[sort_order]
+        t_sec = frame_nums / fps  # absolute video time
+
+        peak_fn_arr = np.array(sorted(set(all_peak_fns)), dtype=int)
+        peak_indices = (np.where(np.isin(frame_nums, peak_fn_arr))[0]
+                        if len(peak_fn_arr) else np.array([], dtype=int))
+        n_peaks = len(all_peak_fns)
 
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(t_rel, detrended, color="#1976d2", linewidth=0.8)
-        if len(all_peaks):
-            ax.scatter(t_rel[all_peaks], detrended[all_peaks],
+        ax.plot(t_sec, detrended, color="#1976d2", linewidth=0.8)
+        if len(peak_indices):
+            ax.scatter(t_sec[peak_indices], detrended[peak_indices],
                        color="red", s=20, zorder=5)
         ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
         ax.set_xlabel("Time (s)")
         ax.set_ylabel("Head angle (rad)")
         ax.set_title(
-            f"{basename} — worm {worm_index}\n"
-            f"bends_per_30s = {bends_per_30s:.1f},  coverage = {coverage_pct:.0f}%",
+            f"{basename} — worm {repr_worm_index}\n"
+            f"BPM = {bpm:.1f}  ({n_peaks} peaks over {n_valid_total / fps:.1f}s valid,"
+            f"  coverage = {coverage_pct:.0f}%)",
             fontsize=10,
         )
         plt.tight_layout()
@@ -130,7 +151,7 @@ def make_per_worm_trace_png(
         plt.close(fig)
         log.info("Saved per-worm trace PNG: %s", out_path.name)
     except Exception as exc:
-        log.warning("make_per_worm_trace_png failed for worm %d: %s", worm_index, exc)
+        log.warning("make_per_worm_trace_png failed for worm %d: %s", repr_worm_index, exc)
 
 
 def make_overview_png(

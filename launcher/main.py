@@ -13,6 +13,7 @@ import config
 import sync as sync_mod
 import ui as ui_mod
 from analysis.motility import MotilityAgent, MotilityStatus
+from analysis.crawling import CrawlingAgent, CrawlingStatus
 
 
 def main() -> None:
@@ -30,13 +31,23 @@ def main() -> None:
     motility_agent = MotilityAgent(settings, motility_status)
     motility_agent.start()
 
-    win = ui_mod.MainWindow(settings, agent, status, motility_agent, motility_status)
+    crawling_status = CrawlingStatus()
+    crawling_agent = CrawlingAgent(settings, crawling_status)
+    crawling_agent.start()
+
+    win = ui_mod.MainWindow(
+        settings, agent, status,
+        motility_agent, motility_status,
+        crawling_agent, crawling_status,
+    )
     win.mainloop()
 
     agent.stop()
     agent.join(timeout=5)
     motility_agent.stop()
     motility_agent.join(timeout=5)
+    crawling_agent.stop()
+    crawling_agent.join(timeout=5)
     log.info("WormScan Launcher stopped")
 
 
