@@ -1,14 +1,24 @@
 """
 Crawling per-worm metrics + per-condition aggregation.
 
-Brief 1: crawling now shares motility's grouping + flicker + BPM engine
-(analysis_csv.produce_grouped_worm_rows / read_fragments). The engine returns
-one row per GROUPED worm — fragments stitched into a single identity, with a
-member_tierpsy_ids list — carrying bpm, bend_interval_cv and is_long. This
-module layers crawling's kinematic metrics (speed, reversals, path geometry,
-tortuosity, net displacement, continuous-run length, skeleton coverage) on top
-of each grouped worm's COMBINED track, then applies crawling's own quality gate
-(min track duration + skeleton coverage).
+Grouping uses crawling's own position-based fragment linker
+(crawling_fragment_grouping.link_fragments), NOT the motility engine: crawling
+worms are slow crawlers Tierpsy repeatedly loses, and the linker rejoins their
+shattered fragments by nearest-neighbour end->start matching with an ambiguity
+refusal (see that module). Each linked group becomes one GROUPED worm
+(worm_index = group id, member_tierpsy_ids = members, repr = first by start).
+
+This module then layers crawling's kinematic metrics (speed, reversals, path
+geometry, tortuosity, net displacement, continuous-run length, skeleton coverage)
+plus head-angle bpm / bend_interval_cv on each grouped worm's COMBINED member
+track, and applies crawling's own quality gate (min track duration + skeleton
+coverage). bpm / bend_interval_cv are computed here from the concatenated member
+skeletons (compute_head_angle_signal / bend_interval_cv), so observed-frame-only
+gap exclusion happens naturally; is_long is derived from track_duration_s.
+
+Metrics never impute across gaps: speed fractions average observed frames only,
+path length sums frame-adjacent steps only, bpm divides by valid-skeleton-frame
+seconds, and longest_continuous_run_s is the longest single member fragment.
 
 Heavy third-party imports (numpy/pandas/h5py) live at runtime call sites so this
 module can be imported lazily by crawling.py, mirroring the other analysis
@@ -30,7 +40,10 @@ ID_COLS: list[str] = [
     "worm_index", "repr_tierpsy_id", "member_tierpsy_ids", "group_classification",
 ]
 
-# Engine-derived columns (identical mechanism to motility).
+# Head-angle / duration-derived columns. Kept under the historical ENGINE_COLS
+# name so the spreadsheet schema is unchanged; bpm and bend_interval_cv are now
+# computed from the concatenated member skeletons in this module, and is_long is
+# derived from track_duration_s (no motility engine involved).
 ENGINE_COLS: list[str] = ["bpm", "bend_interval_cv", "is_long"]
 
 # Canonical kinematic metric columns, in output order. Used for per-condition
@@ -68,16 +81,11 @@ PER_WORM_COLS: list[str] = ID_COLS + ENGINE_COLS + METRIC_COLS + [QUALITY_COL]
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10
 
-# Fragment-grouping thresholds passed to the shared engine. Crawling uses a much
-# wider distance than motility's 50px default because crossing handoffs in
-# whole-plate crawling videos reappear hundreds of px away.
-CRAWLING_GROUP_DISTANCE_PX: float = 250.0
-CRAWLING_GROUP_TIME_GAP_S: float = 5.0
-
-# Gap-bridging tolerance for longest_continuous_run_s: a dropout of this many or
-# fewer consecutive missing good frames does NOT reset the run. ~1s at 30fps;
-# genuine multi-second dropouts (> this) still correctly break the run.
-RUN_GAP_BRIDGE_FRAMES: int = 30
+# Max frame separation between two consecutive non-paused frames for a
+# forward->backward transition to count as a reversal. A larger separation means
+# a tracking gap (or pause) sits between them, so the "reversal" spans a gap and
+# is discarded — we only count reversals observed across (near-)adjacent frames.
+REVERSAL_MAX_GAP_FRAMES: int = 2
 
 # ---------------------------------------------------------------------------
 # Quality-filter thresholds — tune freely; raw per-worm rows are always kept,
@@ -137,94 +145,58 @@ def _longest_run_s(frame_numbers: np.ndarray, fps: float) -> float:
     return best / fps
 
 
-def _longest_run_bridged(frame_numbers: np.ndarray, fps: float,
-                         bridge_frames: int) -> float:
+def _linker_log(n_fragments: int, n_groups: int, ambig_skips: int) -> dict:
     """
-    Longest continuous presence span (seconds), bridging short dropouts.
+    Build an analysis_log compatible with the shared-engine sidecar that
+    crawling.py expects.
 
-    Given the frame numbers a worm was actually present (good/skeletonised),
-    walk them in order: a gap of <= bridge_frames missing frames does NOT break
-    the run; a longer gap does. The run length is the span (last - first + 1) of
-    the longest bridged segment, so a worm present 180s with 1% scattered
-    dropout reads ~180s rather than collapsing to its longest gap-free streak.
-    Genuine multi-second dropouts (gap > bridge_frames) still split the run.
+    The position linker neither classifies groups (curl/collision) nor drops
+    fragments — the downstream quality gate does the dropping — so those fields
+    are zero/empty. ambiguity_skips is a linker-specific diagnostic: how often the
+    ambiguity rule refused a link (a genuine crossing left deliberately broken).
     """
-    fr = frame_numbers[np.isfinite(frame_numbers)]
-    if len(fr) == 0 or fps <= 0:
-        return float("nan")
-    frames = np.unique(fr.astype(np.int64))
-    best_span = 1
-    seg_start = frames[0]
-    for i in range(1, len(frames)):
-        gap = int(frames[i] - frames[i - 1]) - 1  # missing frames in between
-        if gap > bridge_frames:
-            best_span = max(best_span, int(frames[i - 1] - seg_start) + 1)
-            seg_start = frames[i]
-    best_span = max(best_span, int(frames[-1] - seg_start) + 1)
-    return best_span / fps
+    return {
+        "input_track_count": int(n_fragments),
+        "groups_formed": {"total": int(n_groups), "curl": 0, "collision": 0},
+        "worms_dropped": {"total": 0, "by_reason": {}},
+        "ambiguity_skips": int(ambig_skips),
+    }
 
 
-def _read_skeleton_traj_raw(skeletons_path: Path) -> dict:
+def _skel_coverage_and_run(
+    skel_by_worm: dict, member_ids: list[int], fps: float, has_skel_col: bool,
+) -> tuple[float, float]:
     """
-    Read trajectories_data from a *_skeletons.hdf5 file and return, per
-    worm_index_joined, a (frames, has_skeleton) tuple of aligned float arrays.
+    Skeleton coverage + longest continuous run over a grouped worm's members.
 
-    has_skeleton is None when the column is absent. Returns an empty dict (and
-    logs) if the file or its columns are unavailable. The has_skeleton column
-    lives here, not in the _featuresN.hdf5 trajectories.
-    """
-    import pandas as pd
-
-    raw: dict[int, tuple[np.ndarray, "np.ndarray | None"]] = {}
-    try:
-        st = pd.read_hdf(str(skeletons_path), key="trajectories_data")
-    except Exception:
-        log.warning("crawling: could not read trajectories_data from %s",
-                    skeletons_path, exc_info=True)
-        return raw
-    if "worm_index_joined" not in st.columns or "frame_number" not in st.columns:
-        log.warning("crawling: %s trajectories_data missing worm_index_joined/frame_number",
-                    getattr(skeletons_path, "name", skeletons_path))
-        return raw
-
-    has_skel = "has_skeleton" in st.columns
-    if not has_skel:
-        log.warning("crawling: %s trajectories_data has no has_skeleton column",
-                    getattr(skeletons_path, "name", skeletons_path))
-    for wi, g in st.groupby("worm_index_joined"):
-        frames = g["frame_number"].values.astype(float)
-        hs = (g["has_skeleton"].values.astype(float) if has_skel else None)
-        raw[int(wi)] = (frames, hs)
-    return raw
-
-
-def _aggregate_skel_meta(skel_raw: dict, member_ids: list[int],
-                         fps: float) -> tuple[float, float]:
-    """
-    Aggregate skeleton coverage + longest continuous run over a grouped worm's
-    member tracks (union of their frames).
-
-    skeleton_coverage      — mean of has_skeleton across all member frames.
-    longest_continuous_run_s — longest continuous presence span over the union of
-                               GOOD (skeletonised) frames, bridging dropouts of
-                               <= RUN_GAP_BRIDGE_FRAMES (Fix 3).
+    skeleton_coverage        — mean of has_skeleton across all member frames
+                               (NaN if no has_skeleton column / no members).
+    longest_continuous_run_s — longest gap-free run of consecutive frames within a
+                               SINGLE member fragment (NOT bridged across members),
+                               over skeletonised frames, in seconds. The linker may
+                               chain many short fragments into one identity, so the
+                               run length is taken per-member to preserve the meaning
+                               of the >=Ns gate: the worm was tracked UNBROKEN for
+                               that long.
     """
     all_hs: list[np.ndarray] = []
-    good_frames: list[np.ndarray] = []
+    longest_run_s = 0.0
     have_any = False
     for mid in member_ids:
-        entry = skel_raw.get(int(mid))
-        if entry is None:
+        sub = skel_by_worm.get(int(mid))
+        if sub is None:
             continue
         have_any = True
-        frames, hs = entry
-        if hs is not None:
+        frames = sub["frame_number"].values.astype(float)
+        if has_skel_col:
+            hs = sub["has_skeleton"].values.astype(float)
             all_hs.append(hs)
-            mask = np.isfinite(hs) & (hs >= 0.5)  # skeletonised frames only
-            good_frames.append(frames[mask])
+            good = frames[np.isfinite(hs) & (hs >= 0.5)]  # skeletonised frames only
         else:
-            # No has_skeleton column: treat every tracked frame as good.
-            good_frames.append(frames)
+            good = frames  # no has_skeleton column: treat every tracked frame as good
+        run_s = _longest_run_s(good, fps)
+        if np.isfinite(run_s):
+            longest_run_s = max(longest_run_s, run_s)
     if not have_any:
         return float("nan"), float("nan")
     coverage = float("nan")
@@ -233,9 +205,7 @@ def _aggregate_skel_meta(skel_raw: dict, member_ids: list[int],
         hs_all = hs_all[np.isfinite(hs_all)]
         if len(hs_all):
             coverage = float(np.mean(hs_all))
-    gf = np.concatenate(good_frames) if good_frames else np.array([], dtype=float)
-    run_s = _longest_run_bridged(gf, fps, RUN_GAP_BRIDGE_FRAMES)
-    return coverage, run_s
+    return coverage, longest_run_s
 
 
 def _combined_path_geometry(member_ids: list[int],
@@ -297,42 +267,63 @@ def compute_crawling_metrics(
     """
     Compute crawling metrics for every GROUPED worm in one _featuresN.hdf5.
 
-    Each row pairs the shared engine's grouped identity (worm_index,
-    repr_tierpsy_id, member_tierpsy_ids), engine BPM (bpm, bend_interval_cv) and
-    is_long flag with crawling's kinematic metrics, computed on the grouped
-    worm's combined track. A "reversal_frames" key (list of frame numbers where a
-    forward->backward reversal fired) is added to every row for the renderer; it
-    is intentionally absent from PER_WORM_COLS (not a spreadsheet column).
+    Worms are grouped by the position-based fragment linker
+    (crawling_fragment_grouping.link_fragments) over the *_skeletons.hdf5
+    trajectories_data (where has_skeleton lives). Each linked group becomes one
+    row: worm_index = the group id, member_tierpsy_ids = its members, and
+    repr_tierpsy_id = the first member by start frame. Crawling's kinematics
+    (speed fractions, reversals, path geometry, tortuosity, net displacement) plus
+    head-angle bpm / bend_interval_cv are computed on the grouped worm's combined
+    member track; is_long is derived from track_duration_s. A "reversal_frames"
+    key (frame numbers where a forward->backward reversal fired) is added for the
+    renderer; it is intentionally absent from PER_WORM_COLS.
 
-    Returns an empty list (and logs) if the engine produced no rows or
-    timeseries_data cannot be read. long_threshold_s drives is_long exactly as in
-    motility; min_run_s sets the passed_filter minimum-duration threshold (None
-    falls back to LONGEST_RUN_MIN_S). When engine_log_out is provided, the shared
-    engine's analysis_log (input_track_count, groups_formed, worms_dropped by
-    reason) is copied into it so callers can surface pre-grouping drop reasons.
+    Returns an empty list (and logs) if the linker produced no groups or
+    timeseries_data cannot be read. long_threshold_s drives is_long; min_run_s
+    sets the passed_filter minimum-duration threshold (None falls back to
+    LONGEST_RUN_MIN_S). When engine_log_out is provided, a linker analysis_log
+    (input_track_count, groups_formed, worms_dropped, ambiguity_skips) is copied
+    into it so callers can surface grouping diagnostics.
     """
     import h5py
     import pandas as pd
 
-    from analysis.analysis_csv import produce_grouped_worm_rows
+    from analysis.crawling_fragment_grouping import link_fragments
+    from analysis.analysis_csv import compute_head_angle_signal, bend_interval_cv
 
-    # ---- Shared grouping + flicker + BPM engine (wider grouping distance) ----
+    _feat_path = Path(hdf5_path)
+    skeletons_path = _feat_path.with_name(_feat_path.name.replace("_featuresN", "_skeletons"))
+
+    # ---- Grouping source: *_skeletons.hdf5 trajectories_data ----
     try:
-        engine_rows, _engine_log = produce_grouped_worm_rows(
-            hdf5_path, fps, condition, plate,
-            long_threshold_s=long_threshold_s,
-            head_angle_prominence=head_angle_prominence,
-            distance_threshold_px=CRAWLING_GROUP_DISTANCE_PX,
-            time_gap_threshold_s=CRAWLING_GROUP_TIME_GAP_S,
-        )
-        if engine_log_out is not None and isinstance(_engine_log, dict):
-            engine_log_out.update(_engine_log)
+        skel_traj = pd.read_hdf(str(skeletons_path), key="trajectories_data")
     except Exception:
-        log.error("crawling: grouping engine failed for %s", hdf5_path, exc_info=True)
+        log.error("crawling: could not read trajectories_data from %s",
+                  skeletons_path, exc_info=True)
         return []
-    if not engine_rows:
-        log.warning("crawling: engine produced no grouped worms for %s", hdf5_path)
+    if (skel_traj is None or len(skel_traj) == 0
+            or "worm_index_joined" not in skel_traj.columns
+            or "frame_number" not in skel_traj.columns):
+        log.warning("crawling: %s trajectories_data empty or missing columns", skeletons_path)
         return []
+
+    groups, ambig_skips = link_fragments(skel_traj, fps)
+    n_fragments = int(skel_traj["worm_index_joined"].nunique())
+    if not groups:
+        log.warning("crawling: linker produced no groups for %s", skeletons_path)
+        if engine_log_out is not None:
+            engine_log_out.update(_linker_log(n_fragments, 0, ambig_skips))
+        return []
+    if engine_log_out is not None:
+        engine_log_out.update(_linker_log(n_fragments, len(groups), ambig_skips))
+
+    has_skel_col = "has_skeleton" in skel_traj.columns
+    if not has_skel_col:
+        log.warning("crawling: %s trajectories_data has no has_skeleton column", skeletons_path)
+    skel_by_worm: dict[int, "pd.DataFrame"] = {
+        int(wid): sub.sort_values("frame_number")
+        for wid, sub in skel_traj.groupby("worm_index_joined")
+    }
 
     # ---- timeseries_data (speed / motion_mode / length / width) ----
     try:
@@ -344,11 +335,20 @@ def compute_crawling_metrics(
         log.warning("crawling: timeseries_data empty or missing worm_index in %s", hdf5_path)
         return []
 
-    # ---- trajectories_data (centroid path geometry) — best effort ----
+    # ---- featuresN trajectories_data (centroid path + skeleton_id) — best effort ----
     try:
-        traj = pd.read_hdf(str(hdf5_path), key="trajectories_data")
+        feat_traj = pd.read_hdf(str(hdf5_path), key="trajectories_data")
     except Exception:
-        traj = None
+        feat_traj = None
+
+    # ---- featuresN skeleton coordinate array (head-angle bpm) — best effort ----
+    try:
+        with h5py.File(str(hdf5_path), "r") as fh:
+            skel_all = fh["coordinates"]["skeletons"][:]
+    except Exception:
+        log.warning("crawling: could not read coordinates/skeletons from %s; bpm will be 0",
+                    hdf5_path, exc_info=True)
+        skel_all = None
 
     has_motion_mode = "motion_mode" in ts.columns
     ts_frame_col = "timestamp" if "timestamp" in ts.columns else "frame_number"
@@ -362,29 +362,36 @@ def compute_crawling_metrics(
         median_abs_speed = 0.0
     paused_threshold = _PAUSED_FRACTION_OF_MEDIAN * median_abs_speed
 
-    # Pre-index timeseries + trajectory rows by Tierpsy worm_index
-    # (worm_index == trajectories worm_index_joined == engine member id).
+    # Pre-index timeseries + featuresN trajectory rows by Tierpsy worm_index
+    # (worm_index == trajectories worm_index_joined == linker member id).
     ts_by_worm: dict[int, "pd.DataFrame"] = {
         int(wi): g.sort_values(ts_frame_col) for wi, g in ts.groupby("worm_index")
     }
-    traj_by_worm: dict[int, "pd.DataFrame"] = {}
-    if traj is not None and "worm_index_joined" in traj.columns:
-        traj_frame_col = "timestamp_raw" if "timestamp_raw" in traj.columns else "frame_number"
-        for wi, g in traj.groupby("worm_index_joined"):
-            traj_by_worm[int(wi)] = g.sort_values(traj_frame_col).reset_index(drop=True)
+    traj_by_worm: dict[int, "pd.DataFrame"] = {}        # path geometry (coords)
+    feat_traj_by_worm: dict[int, "pd.DataFrame"] = {}   # head-angle (needs skeleton_id)
+    if feat_traj is not None and "worm_index_joined" in feat_traj.columns:
+        traj_frame_col = "timestamp_raw" if "timestamp_raw" in feat_traj.columns else "frame_number"
+        for wi, g in feat_traj.groupby("worm_index_joined"):
+            gs = g.sort_values(traj_frame_col).reset_index(drop=True)
+            traj_by_worm[int(wi)] = gs
+            feat_traj_by_worm[int(wi)] = gs
 
-    # skeleton_coverage + longest_continuous_run come from the *_skeletons.hdf5
-    # trajectories_data (the has_skeleton flag is not in *_featuresN.hdf5).
-    _feat_path = Path(hdf5_path)
-    skeletons_path = _feat_path.with_name(_feat_path.name.replace("_featuresN", "_skeletons"))
-    skel_raw = _read_skeleton_traj_raw(skeletons_path)
+    # Order groups by their earliest fragment start so worm_index / row order is
+    # stable run-to-run (the union-find group id is otherwise arbitrary). Each
+    # group's members are ordered by start frame; member[0] is the representative.
+    def _member_fstart(m: int) -> int:
+        sub = skel_by_worm.get(int(m))
+        return int(sub["frame_number"].iloc[0]) if sub is not None and len(sub) else (1 << 60)
+
+    group_list: list[tuple[int, int, list[int]]] = []
+    for gid, members in groups.items():
+        members_sorted = sorted((int(m) for m in members), key=_member_fstart)
+        group_list.append((_member_fstart(members_sorted[0]), int(gid), members_sorted))
+    group_list.sort(key=lambda t: (t[0], t[1]))
 
     rows: list[dict] = []
-    for er in engine_rows:
-        member_ids = [int(t) for t in (er.get("member_tierpsy_ids") or [])]
-        if not member_ids:
-            rid = er.get("repr_tierpsy_id")
-            member_ids = [int(rid)] if rid is not None else []
+    for _first_fstart, gid, member_ids in group_list:
+        repr_id = member_ids[0]
 
         # --- combined timeseries track over all members ---
         member_ts = [ts_by_worm[m] for m in member_ids if m in ts_by_worm]
@@ -404,6 +411,10 @@ def compute_crawling_metrics(
         # --- reversal_count + reversal_frames: forward->backward transitions ---
         # Keep frame numbers aligned through the paused-frame collapse so the
         # frame at which each reversal fires can be recovered for the renderer.
+        # A transition is only counted when the two consecutive non-paused frames
+        # are (near-)adjacent (<= REVERSAL_MAX_GAP_FRAMES apart); a wider
+        # separation means the forward->backward switch spans a tracking gap, so
+        # it is discarded rather than imputed across the gap.
         reversal_count = 0
         reversal_frames: list[int] = []
         frames_ts = (g[ts_frame_col].values.astype(float)
@@ -428,49 +439,81 @@ def compute_crawling_metrics(
             seq_fr = fr_v[nz]
         if len(seq) > 1:
             rev_mask = (seq[:-1] == 1) & (seq[1:] == -1)
+            adjacent = (seq_fr[1:] - seq_fr[:-1]) <= REVERSAL_MAX_GAP_FRAMES
+            rev_mask = rev_mask & adjacent
             reversal_count = int(np.sum(rev_mask))
             # Frame at which backward motion begins = the reversal frame.
             reversal_frames = sorted(
                 {int(f) for f in seq_fr[1:][rev_mask] if np.isfinite(f)}
             )
 
-        # --- track duration (combined) ---
-        ft = frames_ts[np.isfinite(frames_ts)]
-        if len(ft) >= 1 and fps > 0:
-            track_duration_s = (float(ft.max()) - float(ft.min()) + 1.0) / fps
+        # --- track duration: group span over the skeletons member frames ---
+        member_frames: list[np.ndarray] = []
+        for m in member_ids:
+            sub = skel_by_worm.get(m)
+            if sub is not None:
+                member_frames.append(sub["frame_number"].values.astype(float))
+        all_mf = (np.concatenate(member_frames) if member_frames
+                  else np.array([], dtype=float))
+        all_mf = all_mf[np.isfinite(all_mf)]
+        if len(all_mf) and fps > 0:
+            track_duration_s = (float(all_mf.max()) - float(all_mf.min()) + 1.0) / fps
         else:
             track_duration_s = float("nan")
-        dur_min = (track_duration_s / 60.0
-                   if np.isfinite(track_duration_s) else 0.0)
-        reversal_rate_per_min = (reversal_count / dur_min) if dur_min > 1e-9 else 0.0
+
+        # --- reversal rate: per OBSERVED minute (finite-speed frames), not span ---
+        observed_min = (n / fps / 60.0) if fps > 0 else 0.0
+        reversal_rate_per_min = (reversal_count / observed_min) if observed_min > 1e-9 else 0.0
 
         # --- centroid path geometry (combined, gap-aware) ---
         path_length_px, net_displacement_px, tortuosity = _combined_path_geometry(
             member_ids, traj_by_worm, fps
         )
 
-        # --- skeleton coverage + longest continuous run (union of members) ---
-        skeleton_coverage, longest_continuous_run_s = _aggregate_skel_meta(
-            skel_raw, member_ids, fps
+        # --- skeleton coverage + longest single-fragment continuous run ---
+        skeleton_coverage, longest_continuous_run_s = _skel_coverage_and_run(
+            skel_by_worm, member_ids, fps, has_skel_col
         )
-        if not np.isfinite(longest_continuous_run_s) and len(ft):
-            # Fallback to the combined timeseries frames if skeletons lacked them
-            # (same gap-bridging tolerance as the primary skeleton-based path).
-            longest_continuous_run_s = _longest_run_bridged(
-                ft, fps, RUN_GAP_BRIDGE_FRAMES
-            )
+
+        # --- head-angle bpm + bend_interval_cv over the concatenated members ---
+        # Observed-frame-only: each member's signal contributes its valid
+        # skeleton frames; bpm divides by valid-frame seconds so gaps (within or
+        # between members) simply do not count.
+        bpm: float = 0.0
+        bend_cv: float = float("nan")
+        if skel_all is not None:
+            half_bends = 0
+            total_valid = 0
+            all_peak_frames: list[float] = []
+            for m in member_ids:
+                wt = feat_traj_by_worm.get(m)
+                if wt is None or "skeleton_id" not in wt.columns:
+                    continue
+                sig = compute_head_angle_signal(wt, skel_all, fps, head_angle_prominence)
+                if sig is None:
+                    continue
+                half_bends += len(sig["pos_peaks"]) + len(sig["neg_peaks"])
+                total_valid += sig["n_valid"]
+                fns = sig["frame_nums"]
+                all_peak_frames.extend(fns[sig["pos_peaks"]].tolist())
+                all_peak_frames.extend(fns[sig["neg_peaks"]].tolist())
+            duration_min = (total_valid / fps / 60.0) if fps > 0 else 0.0
+            bpm = round((half_bends / 2.0) / duration_min, 2) if duration_min > 1e-9 else 0.0
+            bend_cv = bend_interval_cv(np.array(all_peak_frames, dtype=float), fps)
+
+        is_long = bool(np.isfinite(track_duration_s) and track_duration_s >= long_threshold_s)
 
         rows.append({
             "condition": condition,
             "plate": plate,
             "video_name": video_name,
-            "worm_index": er.get("worm_index"),
-            "repr_tierpsy_id": er.get("repr_tierpsy_id"),
+            "worm_index": gid,
+            "repr_tierpsy_id": repr_id,
             "member_tierpsy_ids": ";".join(str(m) for m in member_ids),
-            "group_classification": er.get("group_classification"),
-            "bpm": er.get("bpm"),
-            "bend_interval_cv": er.get("bend_interval_cv"),
-            "is_long": er.get("is_long"),
+            "group_classification": "linked",
+            "bpm": bpm,
+            "bend_interval_cv": bend_cv,
+            "is_long": is_long,
             "mean_speed_pxs": _mean_finite(abs_speed),
             "mean_forward_speed_pxs": (float(np.mean(fwd)) if len(fwd) else 0.0),
             "mean_backward_speed_pxs": (float(np.mean(np.abs(bwd))) if len(bwd) else 0.0),
