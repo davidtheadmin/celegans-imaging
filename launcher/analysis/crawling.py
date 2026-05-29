@@ -567,13 +567,34 @@ class CrawlingAgent(threading.Thread):
                         hdf5_path = candidates[0]
 
                     _stage("Computing crawling metrics…")
+                    engine_log: dict = {}
                     worm_rows = compute_crawling_metrics(
                         hdf5_path, fps, condition, plate, video.name,
                         head_angle_prominence=head_angle_prominence,
                         long_threshold_s=threshold_s,
                         min_run_s=min_track_s,
+                        engine_log_out=engine_log,
                     )
                     write_log(f"Grouped worms: {len(worm_rows)}")
+
+                    # Surface the shared engine's pre-grouping drop reasons so we
+                    # can see how many tracks die before the 60s gate vs at it.
+                    if engine_log:
+                        gf = engine_log.get("groups_formed", {})
+                        dr = engine_log.get("worms_dropped", {})
+                        write_log(
+                            f"Engine: input_tracks={engine_log.get('input_track_count')}"
+                            f" groups_formed={gf.get('total')}"
+                            f" (curl={gf.get('curl')}, collision={gf.get('collision')})"
+                            f" | dropped_total={dr.get('total')}"
+                            f" by_reason={dr.get('by_reason')}"
+                        )
+                        import json as _json
+                        sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
+                        sidecar.write_text(
+                            _json.dumps({"video": video.name, **engine_log}, indent=2),
+                            encoding="utf-8",
+                        )
 
                     # Map every member Tierpsy id of a filter-passing grouped worm
                     # to its stable grouped worm_index, and collect that worm's

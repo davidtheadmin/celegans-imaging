@@ -292,6 +292,7 @@ def compute_crawling_metrics(
     head_angle_prominence: float = 0.30,
     long_threshold_s: float = 5.0,
     min_run_s: float | None = None,
+    engine_log_out: dict | None = None,
 ) -> list[dict]:
     """
     Compute crawling metrics for every GROUPED worm in one _featuresN.hdf5.
@@ -306,7 +307,9 @@ def compute_crawling_metrics(
     Returns an empty list (and logs) if the engine produced no rows or
     timeseries_data cannot be read. long_threshold_s drives is_long exactly as in
     motility; min_run_s sets the passed_filter minimum-duration threshold (None
-    falls back to LONGEST_RUN_MIN_S).
+    falls back to LONGEST_RUN_MIN_S). When engine_log_out is provided, the shared
+    engine's analysis_log (input_track_count, groups_formed, worms_dropped by
+    reason) is copied into it so callers can surface pre-grouping drop reasons.
     """
     import h5py
     import pandas as pd
@@ -322,6 +325,8 @@ def compute_crawling_metrics(
             distance_threshold_px=CRAWLING_GROUP_DISTANCE_PX,
             time_gap_threshold_s=CRAWLING_GROUP_TIME_GAP_S,
         )
+        if engine_log_out is not None and isinstance(_engine_log, dict):
+            engine_log_out.update(_engine_log)
     except Exception:
         log.error("crawling: grouping engine failed for %s", hdf5_path, exc_info=True)
         return []
