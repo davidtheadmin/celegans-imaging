@@ -25,7 +25,7 @@ class Settings:
     docker_command: str = "docker"
     analysis_video_timeout_s: int = 600
     motility_long_threshold_s: float = 5.0
-    crawling_min_track_s: int = 60
+    crawling_min_track_s: int = 30
 
 
 _FIELD_NAMES = {f.name for f in fields(Settings)}

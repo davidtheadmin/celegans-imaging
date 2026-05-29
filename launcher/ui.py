@@ -424,7 +424,7 @@ class AnalysisDialog(tk.Toplevel):
         _min_track_row.pack(anchor="w", fill="x", pady=(6, 0))
         ttk.Label(_min_track_row, text="Min track duration (s)").pack(side="left")
         self._crawl_min_track = tk.StringVar(
-            value=str(int(getattr(self._settings, "crawling_min_track_s", 60)))
+            value=str(int(getattr(self._settings, "crawling_min_track_s", 30)))
         )
         ttk.Spinbox(
             _min_track_row, textvariable=self._crawl_min_track,
@@ -517,7 +517,7 @@ class AnalysisDialog(tk.Toplevel):
             )
             return
 
-        min_track_s = 60.0
+        min_track_s = 30.0
         if self._mode.get() == "crawling":
             try:
                 min_track_s = float(self._crawl_min_track.get())

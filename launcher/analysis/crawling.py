@@ -322,7 +322,7 @@ class CrawlingAgent(threading.Thread):
         self._wake = threading.Event()
         self._folder: Optional[Path] = None
         self._threshold_s: float = 5.0
-        self._min_track_s: float = 60.0
+        self._min_track_s: float = 30.0
         self._clear_cache: bool = False
         self._want_tracked: bool = False
         self._want_sidebyside: bool = False
@@ -362,7 +362,7 @@ class CrawlingAgent(threading.Thread):
         want_tracked: bool = False,
         want_sidebyside: bool = False,
         want_path_traces: bool = False,
-        min_track_s: float = 60.0,
+        min_track_s: float = 30.0,
     ) -> None:
         """UI thread: trigger an analysis run on the given folder."""
         with self._lock:
@@ -423,7 +423,7 @@ class CrawlingAgent(threading.Thread):
         want_tracked: bool = False,
         want_sidebyside: bool = False,
         want_path_traces: bool = False,
-        min_track_s: float = 60.0,
+        min_track_s: float = 30.0,
     ) -> None:
         from analysis.ffmpeg_utils import find_videos, probe_fps, convert_to_avi
         from analysis.crawling_metrics import (

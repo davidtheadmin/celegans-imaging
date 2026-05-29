@@ -86,7 +86,7 @@ RUN_GAP_BRIDGE_FRAMES: int = 30
 # it per run (e.g. from the UI "Min track duration (s)" input) by passing
 # min_run_s through compute_crawling_metrics / aggregate_per_condition.
 # ---------------------------------------------------------------------------
-LONGEST_RUN_MIN_S: float = 60.0
+LONGEST_RUN_MIN_S: float = 30.0
 SKELETON_COVERAGE_MIN: float = 0.3
 
 
