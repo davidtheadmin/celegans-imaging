@@ -314,6 +314,8 @@ def read_fragments(
     plate: str,
     long_threshold_s: float = 5.0,
     head_angle_prominence: float = 0.30,
+    distance_threshold_px: float = DISTANCE_THRESHOLD_PIXELS,
+    time_gap_threshold_s: float = TIME_GAP_THRESHOLD_SECONDS,
 ) -> "tuple[list[dict], dict]":
     """
     Run the full fragment-grouping + flicker-filter pipeline on one _featuresN.hdf5.
@@ -322,6 +324,10 @@ def read_fragments(
 
     Per-worm rows contain all previous columns plus:
         curl_count, fragment_count, valid_frac, group_classification, repr_tierpsy_id
+
+    distance_threshold_px / time_gap_threshold_s tune fragment grouping; the
+    defaults equal the module constants so motility (which omits them) is
+    unchanged. Crawling passes a wider distance to rejoin crossing handoffs.
     """
     from analysis.fragment_grouping import group_fragments
     from analysis.flicker_filter import filter_track
@@ -358,7 +364,7 @@ def read_fragments(
     input_track_count = int(traj["worm_index_joined"].nunique())
 
     # ---- Step 1 + 2: group and classify fragments ----
-    groups = group_fragments(traj, fps, DISTANCE_THRESHOLD_PIXELS, TIME_GAP_THRESHOLD_SECONDS)
+    groups = group_fragments(traj, fps, distance_threshold_px, time_gap_threshold_s)
 
     n_curl = sum(1 for g in groups if g.classification == "curl")
     n_collision = sum(1 for g in groups if g.classification == "collision")

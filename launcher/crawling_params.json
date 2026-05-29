@@ -34,7 +34,7 @@
     "traj_min_area": 500,
     "traj_min_box_width": 5,
     "traj_max_allowed_dist": 30,
-    "traj_max_frames_gap": 10,
+    "traj_max_frames_gap": 25,
     "traj_area_ratio_lim": 2,
     "roi_size": -1,
     "w_num_segments": 24,

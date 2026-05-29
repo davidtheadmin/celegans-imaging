@@ -68,6 +68,17 @@ PER_WORM_COLS: list[str] = ID_COLS + ENGINE_COLS + METRIC_COLS + [QUALITY_COL]
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10
 
+# Fragment-grouping thresholds passed to the shared engine. Crawling uses a much
+# wider distance than motility's 50px default because crossing handoffs in
+# whole-plate crawling videos reappear hundreds of px away.
+CRAWLING_GROUP_DISTANCE_PX: float = 250.0
+CRAWLING_GROUP_TIME_GAP_S: float = 5.0
+
+# Gap-bridging tolerance for longest_continuous_run_s: a dropout of this many or
+# fewer consecutive missing good frames does NOT reset the run. ~1s at 30fps;
+# genuine multi-second dropouts (> this) still correctly break the run.
+RUN_GAP_BRIDGE_FRAMES: int = 30
+
 # ---------------------------------------------------------------------------
 # Quality-filter thresholds — tune freely; raw per-worm rows are always kept,
 # so changing these and re-aggregating needs no Tierpsy re-run.
@@ -126,6 +137,33 @@ def _longest_run_s(frame_numbers: np.ndarray, fps: float) -> float:
     return best / fps
 
 
+def _longest_run_bridged(frame_numbers: np.ndarray, fps: float,
+                         bridge_frames: int) -> float:
+    """
+    Longest continuous presence span (seconds), bridging short dropouts.
+
+    Given the frame numbers a worm was actually present (good/skeletonised),
+    walk them in order: a gap of <= bridge_frames missing frames does NOT break
+    the run; a longer gap does. The run length is the span (last - first + 1) of
+    the longest bridged segment, so a worm present 180s with 1% scattered
+    dropout reads ~180s rather than collapsing to its longest gap-free streak.
+    Genuine multi-second dropouts (gap > bridge_frames) still split the run.
+    """
+    fr = frame_numbers[np.isfinite(frame_numbers)]
+    if len(fr) == 0 or fps <= 0:
+        return float("nan")
+    frames = np.unique(fr.astype(np.int64))
+    best_span = 1
+    seg_start = frames[0]
+    for i in range(1, len(frames)):
+        gap = int(frames[i] - frames[i - 1]) - 1  # missing frames in between
+        if gap > bridge_frames:
+            best_span = max(best_span, int(frames[i - 1] - seg_start) + 1)
+            seg_start = frames[i]
+    best_span = max(best_span, int(frames[-1] - seg_start) + 1)
+    return best_span / fps
+
+
 def _read_skeleton_traj_raw(skeletons_path: Path) -> dict:
     """
     Read trajectories_data from a *_skeletons.hdf5 file and return, per
@@ -167,28 +205,36 @@ def _aggregate_skel_meta(skel_raw: dict, member_ids: list[int],
     member tracks (union of their frames).
 
     skeleton_coverage      — mean of has_skeleton across all member frames.
-    longest_continuous_run_s — longest gap-free frame run over the union, in s.
+    longest_continuous_run_s — longest continuous presence span over the union of
+                               GOOD (skeletonised) frames, bridging dropouts of
+                               <= RUN_GAP_BRIDGE_FRAMES (Fix 3).
     """
-    all_frames: list[np.ndarray] = []
     all_hs: list[np.ndarray] = []
+    good_frames: list[np.ndarray] = []
+    have_any = False
     for mid in member_ids:
         entry = skel_raw.get(int(mid))
         if entry is None:
             continue
+        have_any = True
         frames, hs = entry
-        all_frames.append(frames)
         if hs is not None:
             all_hs.append(hs)
-    if not all_frames:
+            mask = np.isfinite(hs) & (hs >= 0.5)  # skeletonised frames only
+            good_frames.append(frames[mask])
+        else:
+            # No has_skeleton column: treat every tracked frame as good.
+            good_frames.append(frames)
+    if not have_any:
         return float("nan"), float("nan")
-    frames_union = np.concatenate(all_frames)
     coverage = float("nan")
     if all_hs:
         hs_all = np.concatenate(all_hs)
         hs_all = hs_all[np.isfinite(hs_all)]
         if len(hs_all):
             coverage = float(np.mean(hs_all))
-    run_s = _longest_run_s(frames_union, fps)
+    gf = np.concatenate(good_frames) if good_frames else np.array([], dtype=float)
+    run_s = _longest_run_bridged(gf, fps, RUN_GAP_BRIDGE_FRAMES)
     return coverage, run_s
 
 
@@ -267,12 +313,14 @@ def compute_crawling_metrics(
 
     from analysis.analysis_csv import produce_grouped_worm_rows
 
-    # ---- Shared grouping + flicker + BPM engine (motility-identical) ----
+    # ---- Shared grouping + flicker + BPM engine (wider grouping distance) ----
     try:
         engine_rows, _engine_log = produce_grouped_worm_rows(
             hdf5_path, fps, condition, plate,
             long_threshold_s=long_threshold_s,
             head_angle_prominence=head_angle_prominence,
+            distance_threshold_px=CRAWLING_GROUP_DISTANCE_PX,
+            time_gap_threshold_s=CRAWLING_GROUP_TIME_GAP_S,
         )
     except Exception:
         log.error("crawling: grouping engine failed for %s", hdf5_path, exc_info=True)
@@ -401,8 +449,11 @@ def compute_crawling_metrics(
             skel_raw, member_ids, fps
         )
         if not np.isfinite(longest_continuous_run_s) and len(ft):
-            # Fallback to the combined timeseries frames if skeletons lacked them.
-            longest_continuous_run_s = _longest_run_s(ft, fps)
+            # Fallback to the combined timeseries frames if skeletons lacked them
+            # (same gap-bridging tolerance as the primary skeleton-based path).
+            longest_continuous_run_s = _longest_run_bridged(
+                ft, fps, RUN_GAP_BRIDGE_FRAMES
+            )
 
         rows.append({
             "condition": condition,
