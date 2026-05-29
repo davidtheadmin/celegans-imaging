@@ -73,20 +73,25 @@ def probe_duration(video: Path) -> float:
         return 0.0
 
 
-def convert_to_avi(mp4: Path, avi: Path) -> None:
+def convert_to_avi(mp4: Path, avi: Path, threads: int | None = None) -> None:
     """
     Convert mp4 to MJPEG AVI at quality 3. Skips if avi already exists.
     Raises RuntimeError on ffmpeg failure.
+
+    `threads` caps ffmpeg's thread count (decode+encode). Used when several
+    transcodes run concurrently to avoid oversubscribing the CPU. None (the
+    default) leaves ffmpeg's automatic threading unchanged. MJPEG (-q:v 3) is
+    intra-frame, so the thread count does not affect the encoded output.
     """
     if avi.exists():
         log.info("AVI already exists, skipping conversion: %s", avi.name)
         return
+    cmd = ["ffmpeg", "-y", "-i", str(mp4), "-vcodec", "mjpeg", "-q:v", "3"]
+    if threads is not None:
+        cmd += ["-threads", str(threads)]
+    cmd.append(str(avi))
     result = subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", str(mp4),
-            "-vcodec", "mjpeg", "-q:v", "3",
-            str(avi),
-        ],
+        cmd,
         capture_output=True, text=True, timeout=300,
         creationflags=_NO_WINDOW,
     )

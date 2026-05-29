@@ -148,6 +148,12 @@ def _displacement_px(track_dfs: List[pd.DataFrame]) -> float:
     """
     Max pairwise centroid distance across all provided track DataFrames.
     Uses a random subsample (≤ 300 points) for speed.
+
+    The subsample is drawn from a per-call local Generator rather than the
+    process-global np.random state. This preserves the original random-subsample
+    behaviour but is thread-safe under the parallel pipeline — the global RNG is
+    shared mutable state that concurrent worker threads would otherwise race,
+    adding cross-thread run-to-run variation on top of the inherent randomness.
     """
     xs, ys = [], []
     for df in track_dfs:
@@ -163,7 +169,7 @@ def _displacement_px(track_dfs: List[pd.DataFrame]) -> float:
     if len(all_x) < 2:
         return 0.0
     if len(all_x) > 300:
-        idx = np.random.choice(len(all_x), 300, replace=False)
+        idx = np.random.default_rng().choice(len(all_x), 300, replace=False)
         all_x, all_y = all_x[idx], all_y[idx]
     pts = np.stack([all_x, all_y], axis=1)
     diffs = pts[:, None, :] - pts[None, :, :]

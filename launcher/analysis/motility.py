@@ -78,6 +78,240 @@ def _safe_sheet_name(name: str, seen: dict[str, int]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Per-video worker (runs on a ThreadPoolExecutor worker thread)
+# ---------------------------------------------------------------------------
+
+def _process_one_video_motility(
+    video: Path,
+    folder: Path,
+    *,
+    image: str,
+    docker_cmd: str,
+    timeout_s: int,
+    params_template: dict,
+    head_angle_prominence: float,
+    threshold_s: float,
+    clear_cache: bool,
+    want_tracked: bool,
+    want_curvature: bool,
+    want_sidebyside: bool,
+    want_per_worm_traces: bool,
+    per_video_dir: Path,
+    ffmpeg_threads: Optional[int],
+    cancel_event: threading.Event,
+) -> dict:
+    """
+    Process a single video end-to-end (probe → transcode → Tierpsy → read →
+    plots → optional renders) and return a result dict.
+
+    Runs on a worker thread. Writes ONLY to per-video paths (its own cache dir
+    and per_video_dir files keyed by condition/plate). Never touches the shared
+    status object or any Tk widget. Log lines are buffered into the returned
+    "logbuf" list and flushed contiguously by the collecting thread.
+    """
+    from analysis.ffmpeg_utils import probe_fps, probe_duration, convert_to_avi
+    from analysis.docker_utils import run_tierpsy
+    from analysis.analysis_csv import read_fragments, build_summary_row
+    from analysis.plots import make_video_summary_png
+    import json as _json
+
+    t0 = time.monotonic()
+    logbuf: list[str] = []
+
+    def plog(msg: str) -> None:
+        logbuf.append(msg)
+
+    condition, plate = _resolve_video_path(video, folder)
+    thread_name = threading.current_thread().name
+    plog(f"\n--- {video.name} ({condition}) ---")
+
+    if cancel_event.is_set():
+        plog("Skipped (run cancelled before start)")
+        return {"video": video, "condition": condition, "plate": plate,
+                "fragment_rows": [], "summary_row": None, "status_str": "cancelled",
+                "logbuf": logbuf, "elapsed_s": 0.0, "cancelled": True}
+
+    plog(f"START on {thread_name}")
+
+    fps = 0.0
+    video_duration_s = 0.0
+    fragment_rows: list[dict] = []
+    status_str = "ok"
+    hdf5_path: Optional[Path] = None
+    cache_dir = _cache_dir_for(video)
+
+    try:
+        fps = probe_fps(video)
+        plog(f"fps: {fps:.3f}")
+
+        video_duration_s = probe_duration(video)
+
+        avi = cache_dir / (video.stem + ".avi")
+        candidate_hdf5 = cache_dir / "Results" / (video.stem + "_featuresN.hdf5")
+        cache_hit = not clear_cache and _hdf5_cache_valid(candidate_hdf5)
+
+        if cache_hit:
+            hdf5_path = candidate_hdf5
+            needs_avi = (want_tracked or want_curvature
+                         or want_sidebyside or want_per_worm_traces)
+            if avi.exists():
+                plog(f"[CACHE HIT] Skipping Tierpsy; AVI present: {video.name}")
+            elif needs_avi:
+                plog(f"[CACHE HIT] Skipping Tierpsy; converting AVI for rendering: {video.name}")
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                convert_to_avi(video, avi, threads=ffmpeg_threads)
+                plog(f"AVI ready: {avi}")
+            else:
+                plog(f"[CACHE HIT] Skipping Tierpsy + AVI: {video.name}")
+        else:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            convert_to_avi(video, avi, threads=ffmpeg_threads)
+            plog(f"AVI ready: {avi}")
+
+            params = copy.deepcopy(params_template)
+            if "expected_fps" in params:
+                params["expected_fps"] = fps
+            for _k in _WORMSCAN_ONLY_KEYS:
+                params.pop(_k, None)
+            json_file = cache_dir / (video.stem + ".json")
+            json_file.write_text(
+                json.dumps(params, indent=2), encoding="utf-8"
+            )
+
+            stdout, stderr = run_tierpsy(
+                avi, json_file,
+                image=image,
+                docker_cmd=docker_cmd,
+                timeout_s=timeout_s,
+            )
+            plog(f"Tierpsy stdout:\n{stdout}")
+            if stderr.strip():
+                plog(f"Tierpsy stderr:\n{stderr}")
+
+            results_dir = cache_dir / "Results"
+            candidates = list(results_dir.glob(f"{video.stem}_featuresN.hdf5"))
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No _featuresN.hdf5 in {results_dir}"
+                )
+            hdf5_path = candidates[0]
+
+        fragment_rows, analysis_log = read_fragments(
+            hdf5_path, fps, condition, plate,
+            long_threshold_s=threshold_s,
+            head_angle_prominence=head_angle_prominence,
+        )
+        n_long = sum(1 for r in fragment_rows if r["is_long"])
+        plog(
+            f"Worms: {len(fragment_rows)} total, {n_long} long"
+            f" (threshold {threshold_s}s) | "
+            f"groups formed: {analysis_log['groups_formed']['total']}"
+            f" (curl={analysis_log['groups_formed']['curl']},"
+            f" collision={analysis_log['groups_formed']['collision']})"
+            f" | dropped: {analysis_log['worms_dropped']['total']}"
+        )
+
+        log_sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
+        log_sidecar.write_text(
+            _json.dumps({"video": video.name, **analysis_log}, indent=2),
+            encoding="utf-8",
+        )
+
+        if fragment_rows and hdf5_path:
+            plot_path = per_video_dir / f"{condition}__{plate}.png"
+            make_video_summary_png(fragment_rows, hdf5_path, fps, plot_path,
+                                   head_angle_prominence)
+
+        if want_tracked or want_curvature or want_sidebyside or want_per_worm_traces:
+            from analysis.render_video import (
+                render_tracked, render_curvature, render_sidebyside,
+                render_per_worm_trace,
+            )
+            skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
+            masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
+            prefix = f"{condition}__{plate}"
+
+            # Map every worm_index_joined fragment of a kept worm to
+            # its stable worm_index so the renders label/colour by
+            # worm_index; fragments absent from the map were filtered
+            # out and the renders mark them faintly (Phase 3).
+            worm_index_map: dict[int, int] = {}
+            for r in fragment_rows:
+                wi = r.get("worm_index")
+                if wi is None:
+                    continue
+                members = r.get("member_tierpsy_ids") or [r.get("repr_tierpsy_id")]
+                for tid in members:
+                    if tid is not None:
+                        worm_index_map[int(tid)] = int(wi)
+
+            if want_tracked and skeletons_hdf5.exists() and avi.exists():
+                render_tracked(
+                    avi, skeletons_hdf5,
+                    per_video_dir / f"{prefix}_tracked.mp4", fps,
+                    worm_index_map=worm_index_map,
+                )
+            if want_curvature and skeletons_hdf5.exists() and hdf5_path and avi.exists():
+                render_curvature(
+                    avi, skeletons_hdf5, hdf5_path,
+                    per_video_dir / f"{prefix}_curvature.mp4", fps,
+                )
+            if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists() and avi.exists():
+                render_sidebyside(
+                    avi, masked_hdf5, skeletons_hdf5,
+                    per_video_dir / f"{prefix}_sidebyside.mp4", fps,
+                    worm_index_map=worm_index_map,
+                )
+            if (want_per_worm_traces and hdf5_path
+                    and skeletons_hdf5.exists() and masked_hdf5.exists()):
+                from analysis.plots import make_per_worm_trace_png
+                full_track_rows = [r for r in fragment_rows
+                                   if r.get("is_long")]
+                traces_dir = per_video_dir / f"{prefix}_traces"
+                traces_dir.mkdir(exist_ok=True)
+                for worm_row in full_track_rows:
+                    wi = worm_row.get("repr_tierpsy_id", worm_row["worm_index"])
+                    member_ids = worm_row.get("member_tierpsy_ids", [wi])
+                    make_per_worm_trace_png(
+                        wi, member_ids, hdf5_path, fps, prefix,
+                        traces_dir / f"worm_{wi}.png",
+                        worm_row["bpm"],
+                        worm_row.get("coverage_pct", 0.0),
+                        head_angle_prominence,
+                    )
+                    render_per_worm_trace(
+                        masked_hdf5, skeletons_hdf5, hdf5_path,
+                        member_ids, wi, fps,
+                        traces_dir / f"worm_{wi}.mp4",
+                        head_angle_prominence,
+                    )
+
+    except Exception as exc:
+        status_str = str(exc)[:200]
+        plog(f"ERROR: {exc}")
+        log.exception("Error processing %s", video.name)
+
+    elapsed = time.monotonic() - t0
+    plog(f"FINISH on {thread_name} in {elapsed:.1f}s "
+         f"({'ok' if status_str == 'ok' else 'FAILED'})")
+
+    summary_row = build_summary_row(
+        fragment_rows, condition, plate, fps, video_duration_s, status_str,
+    )
+    return {
+        "video": video,
+        "condition": condition,
+        "plate": plate,
+        "fragment_rows": fragment_rows,
+        "summary_row": summary_row,
+        "status_str": status_str,
+        "logbuf": logbuf,
+        "elapsed_s": elapsed,
+        "cancelled": False,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Shared status snapshot (read-only, passed to UI thread)
 # ---------------------------------------------------------------------------
 
@@ -291,10 +525,11 @@ class MotilityAgent(threading.Thread):
         want_sidebyside: bool = False,
         want_per_worm_traces: bool = False,
     ) -> None:
-        from analysis.ffmpeg_utils import find_videos, probe_fps, probe_duration, convert_to_avi
-        from analysis.docker_utils import run_tierpsy
-        from analysis.analysis_csv import read_fragments, build_summary_row
-        from analysis.plots import make_video_summary_png, make_overview_png
+        from analysis.ffmpeg_utils import find_videos
+        from analysis.analysis_csv import build_summary_row
+        from analysis.plots import make_overview_png
+        from analysis.concurrency import resolve_workers, ffmpeg_threads_per_worker
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         import pandas as pd
 
         s = self._get_settings()
@@ -342,217 +577,105 @@ class MotilityAgent(threading.Thread):
             all_fragment_rows: list[dict] = []
             summary_rows: list[dict] = []
 
-            for i, video in enumerate(videos):
-                if self._cancel.is_set() or self._stop.is_set():
-                    write_log("Run cancelled by user")
-                    break
+            workers, cpus, mem_gb = resolve_workers(
+                getattr(s, "concurrent_videos", "auto"), s.docker_command
+            )
+            ff_threads = ffmpeg_threads_per_worker(workers)
+            write_log(
+                f"Concurrency: {workers} worker(s) "
+                f"(docker sees {cpus} cpu, {mem_gb:.1f} GB; setting="
+                f"{getattr(s, 'concurrent_videos', 'auto')}); "
+                f"ffmpeg threads/worker={ff_threads}"
+            )
 
-                condition, plate = _resolve_video_path(video, folder)
-                short_label = f"{video.name} ({i + 1}/{total})"
+            def _publish_progress(done: int, last_name: str) -> None:
+                self.status.update(
+                    color="yellow",
+                    label=f"{last_name} ({done}/{total})" if last_name else "Analysing…",
+                    running=True,
+                    current_index=done,
+                    total=total,
+                    current_basename=last_name,
+                    current_stage=f"{done}/{total} done",
+                )
 
-                def _stage(stage: str) -> None:
-                    self.status.update(
-                        color="yellow",
-                        label=short_label,
-                        running=True,
-                        current_index=i,
-                        total=total,
-                        current_basename=video.name,
-                        current_stage=stage,
-                    )
+            _publish_progress(0, "")
 
-                write_log(f"\n--- {video.name} ({condition}) ---")
-
-                fps = 0.0
-                video_duration_s = 0.0
-                fragment_rows: list[dict] = []
-                status_str = "ok"
-                hdf5_path: Optional[Path] = None
-                cache_dir = _cache_dir_for(video)
-
-                try:
-                    _stage("Probing fps…")
-                    fps = probe_fps(video)
-                    write_log(f"fps: {fps:.3f}")
-
-                    video_duration_s = probe_duration(video)
-
-                    avi = cache_dir / (video.stem + ".avi")
-                    candidate_hdf5 = cache_dir / "Results" / (video.stem + "_featuresN.hdf5")
-                    cache_hit = not clear_cache and _hdf5_cache_valid(candidate_hdf5)
-
-                    if cache_hit:
-                        hdf5_path = candidate_hdf5
-                        needs_avi = (want_tracked or want_curvature
-                                     or want_sidebyside or want_per_worm_traces)
-                        if avi.exists():
-                            write_log(f"[CACHE HIT] Skipping Tierpsy; AVI present: {video.name}")
-                            _stage("Reading cached features…")
-                        elif needs_avi:
-                            write_log(f"[CACHE HIT] Skipping Tierpsy; converting AVI for rendering: {video.name}")
-                            _stage("Converting to AVI (for rendering)…")
-                            cache_dir.mkdir(parents=True, exist_ok=True)
-                            convert_to_avi(video, avi)
-                            write_log(f"AVI ready: {avi}")
-                        else:
-                            write_log(f"[CACHE HIT] Skipping Tierpsy + AVI: {video.name}")
-                            _stage("Reading cached features…")
-                    else:
-                        _stage("Converting to AVI…")
-                        cache_dir.mkdir(parents=True, exist_ok=True)
-                        convert_to_avi(video, avi)
-                        write_log(f"AVI ready: {avi}")
-
-                        params = copy.deepcopy(self._params_template)
-                        if "expected_fps" in params:
-                            params["expected_fps"] = fps
-                        for _k in _WORMSCAN_ONLY_KEYS:
-                            params.pop(_k, None)
-                        json_file = cache_dir / (video.stem + ".json")
-                        json_file.write_text(
-                            json.dumps(params, indent=2), encoding="utf-8"
-                        )
-
-                        _stage("Running Tierpsy…")
-                        stdout, stderr = run_tierpsy(
-                            avi, json_file,
+            done = 0
+            if videos:
+                with ThreadPoolExecutor(
+                    max_workers=workers, thread_name_prefix="motility"
+                ) as ex:
+                    futures = {}
+                    for video in videos:
+                        if self._cancel.is_set() or self._stop.is_set():
+                            write_log("Run cancelled before submitting remaining videos")
+                            break
+                        fut = ex.submit(
+                            _process_one_video_motility,
+                            video, folder,
                             image=image,
                             docker_cmd=s.docker_command,
                             timeout_s=s.analysis_video_timeout_s,
+                            params_template=self._params_template,
+                            head_angle_prominence=head_angle_prominence,
+                            threshold_s=threshold_s,
+                            clear_cache=clear_cache,
+                            want_tracked=want_tracked,
+                            want_curvature=want_curvature,
+                            want_sidebyside=want_sidebyside,
+                            want_per_worm_traces=want_per_worm_traces,
+                            per_video_dir=per_video_dir,
+                            ffmpeg_threads=ff_threads,
+                            cancel_event=self._cancel,
                         )
-                        write_log(f"Tierpsy stdout:\n{stdout}")
-                        if stderr.strip():
-                            write_log(f"Tierpsy stderr:\n{stderr}")
+                        futures[fut] = video
 
-                        _stage("Reading features…")
-                        results_dir = cache_dir / "Results"
-                        candidates = list(results_dir.glob(f"{video.stem}_featuresN.hdf5"))
-                        if not candidates:
-                            raise FileNotFoundError(
-                                f"No _featuresN.hdf5 in {results_dir}"
+                    # Collect on the agent thread: flush each video's buffered
+                    # log block contiguously (in completion order, for liveness)
+                    # and advance the bar as each finishes. Data rows are NOT
+                    # accumulated here — see the ordered pass below.
+                    results_by_video: dict[Path, dict] = {}
+                    for fut in as_completed(futures):
+                        video = futures[fut]
+                        try:
+                            result = fut.result()
+                        except Exception as exc:
+                            # One video's failure must not abort the batch.
+                            write_log(f"\n--- {video.name} ---")
+                            write_log(f"ERROR (worker crashed): {exc}")
+                            log.exception("Worker crashed for %s", video.name)
+                            results_by_video[video] = {"crashed": True,
+                                                       "exc": str(exc)[:200]}
+                            done += 1
+                            _publish_progress(done, video.name)
+                            continue
+
+                        for line in result["logbuf"]:
+                            write_log(line)
+                        results_by_video[video] = result
+                        done += 1
+                        _publish_progress(done, result["video"].name)
+
+                    # Accumulate in the original discovery order so the outputs
+                    # (incl. unsorted _summary sheet / CSV row order and tie
+                    # breaks in sorted sheets) are byte-identical to a serial run.
+                    for video in videos:
+                        result = results_by_video.get(video)
+                        if result is None:  # never submitted (cancel)
+                            continue
+                        if result.get("crashed"):
+                            cond, plate = _resolve_video_path(video, folder)
+                            summary_rows.append(
+                                build_summary_row([], cond, plate, 0.0, 0.0,
+                                                  result["exc"])
                             )
-                        hdf5_path = candidates[0]
-
-                    fragment_rows, analysis_log = read_fragments(
-                        hdf5_path, fps, condition, plate,
-                        long_threshold_s=threshold_s,
-                        head_angle_prominence=head_angle_prominence,
-                    )
-                    n_long = sum(1 for r in fragment_rows if r["is_long"])
-                    write_log(
-                        f"Worms: {len(fragment_rows)} total, {n_long} long"
-                        f" (threshold {threshold_s}s) | "
-                        f"groups formed: {analysis_log['groups_formed']['total']}"
-                        f" (curl={analysis_log['groups_formed']['curl']},"
-                        f" collision={analysis_log['groups_formed']['collision']})"
-                        f" | dropped: {analysis_log['worms_dropped']['total']}"
-                    )
-
-                    import json as _json
-                    log_sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
-                    log_sidecar.write_text(
-                        _json.dumps({"video": video.name, **analysis_log}, indent=2),
-                        encoding="utf-8",
-                    )
-
-                    _stage("Writing plots…")
-                    if fragment_rows and hdf5_path:
-                        plot_path = per_video_dir / f"{condition}__{plate}.png"
-                        make_video_summary_png(fragment_rows, hdf5_path, fps, plot_path,
-                                               head_angle_prominence)
-
-                    if want_tracked or want_curvature or want_sidebyside or want_per_worm_traces:
-                        from analysis.render_video import (
-                            render_tracked, render_curvature, render_sidebyside,
-                            render_per_worm_trace,
-                        )
-                        skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
-                        masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
-                        prefix = f"{condition}__{plate}"
-
-                        # Map every worm_index_joined fragment of a kept worm to
-                        # its stable worm_index so the renders label/colour by
-                        # worm_index; fragments absent from the map were filtered
-                        # out and the renders mark them faintly (Phase 3).
-                        worm_index_map: dict[int, int] = {}
-                        for r in fragment_rows:
-                            wi = r.get("worm_index")
-                            if wi is None:
-                                continue
-                            members = r.get("member_tierpsy_ids") or [r.get("repr_tierpsy_id")]
-                            for tid in members:
-                                if tid is not None:
-                                    worm_index_map[int(tid)] = int(wi)
-
-                        if want_tracked and skeletons_hdf5.exists() and avi.exists():
-                            _stage("Rendering tracked video…")
-                            render_tracked(
-                                avi, skeletons_hdf5,
-                                per_video_dir / f"{prefix}_tracked.mp4", fps,
-                                worm_index_map=worm_index_map,
-                            )
-                        if want_curvature and skeletons_hdf5.exists() and hdf5_path and avi.exists():
-                            _stage("Rendering curvature video…")
-                            render_curvature(
-                                avi, skeletons_hdf5, hdf5_path,
-                                per_video_dir / f"{prefix}_curvature.mp4", fps,
-                            )
-                        if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists() and avi.exists():
-                            _stage("Rendering side-by-side video…")
-                            render_sidebyside(
-                                avi, masked_hdf5, skeletons_hdf5,
-                                per_video_dir / f"{prefix}_sidebyside.mp4", fps,
-                                worm_index_map=worm_index_map,
-                            )
-                        if (want_per_worm_traces and hdf5_path
-                                and skeletons_hdf5.exists() and masked_hdf5.exists()):
-                            from analysis.plots import make_per_worm_trace_png
-                            full_track_rows = [r for r in fragment_rows
-                                               if r.get("is_long")]
-                            n_full = len(full_track_rows)
-                            traces_dir = per_video_dir / f"{prefix}_traces"
-                            traces_dir.mkdir(exist_ok=True)
-                            for j, worm_row in enumerate(full_track_rows):
-                                wi = worm_row.get("repr_tierpsy_id", worm_row["worm_index"])
-                                member_ids = worm_row.get("member_tierpsy_ids", [wi])
-                                _stage(f"Rendering per-worm traces ({j + 1}/{n_full})…")
-                                make_per_worm_trace_png(
-                                    wi, member_ids, hdf5_path, fps, prefix,
-                                    traces_dir / f"worm_{wi}.png",
-                                    worm_row["bpm"],
-                                    worm_row.get("coverage_pct", 0.0),
-                                    head_angle_prominence,
-                                )
-                                render_per_worm_trace(
-                                    masked_hdf5, skeletons_hdf5, hdf5_path,
-                                    member_ids, wi, fps,
-                                    traces_dir / f"worm_{wi}.mp4",
-                                    head_angle_prominence,
-                                )
-
-                except Exception as exc:
-                    status_str = str(exc)[:200]
-                    write_log(f"ERROR: {exc}")
-                    log.exception("Error processing %s", video.name)
-
-                # Advance the bar to show this video is done
-                self.status.update(
-                    color="yellow",
-                    label=short_label,
-                    running=True,
-                    current_index=i + 1,
-                    total=total,
-                    current_basename=video.name,
-                    current_stage="",
-                )
-
-                all_fragment_rows.extend(fragment_rows)
-                summary_rows.append(
-                    build_summary_row(
-                        fragment_rows, condition, plate, fps,
-                        video_duration_s, status_str,
-                    )
-                )
+                            continue
+                        if result.get("cancelled"):
+                            continue
+                        all_fragment_rows.extend(result["fragment_rows"])
+                        if result["summary_row"] is not None:
+                            summary_rows.append(result["summary_row"])
 
         # Write per-condition Excel workbook + summary CSV
         _sheet_cols = [
