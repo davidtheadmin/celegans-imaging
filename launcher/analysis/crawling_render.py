@@ -114,22 +114,52 @@ def _blend_line(
     cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, dst=roi)
 
 
+# Worm-number label sizing (matches the motility tracked-render style).
+_ID_FONT_SCALE: float = 1.0
+_ID_FONT_THICKNESS: int = 2
+
+# Reversal flash: a bright expanding ring drawn on a worm's trail for frames
+# within ±_FLASH_HALF_S of a frame where that worm reversed.
+_FLASH_HALF_S: float = 0.25
+_FLASH_COLOR: tuple[int, int, int] = (0, 255, 255)  # yellow (BGR)
+
+
+def _draw_label(img: "np.ndarray", text: str, pos: tuple[int, int],
+                color: tuple[int, int, int]) -> None:
+    """Draw a worm-index label with a thin black outline for legibility."""
+    import cv2
+
+    anchor = (pos[0] + 6, pos[1] - 6)
+    cv2.putText(img, text, anchor, cv2.FONT_HERSHEY_SIMPLEX, _ID_FONT_SCALE,
+                (0, 0, 0), _ID_FONT_THICKNESS + 2, cv2.LINE_AA)
+    cv2.putText(img, text, anchor, cv2.FONT_HERSHEY_SIMPLEX, _ID_FONT_SCALE,
+                color, _ID_FONT_THICKNESS, cv2.LINE_AA)
+
+
 def render_path_traces(
     avi_path: Path,
     skeletons_hdf5: Path,
     out_path: Path,
     fps: float,
     window_s: float = 10.0,
-    kept_ids: "set[int] | None" = None,
+    worm_index_map: "dict[int, int] | None" = None,
+    reversal_frames: "dict[int, list] | None" = None,
 ) -> None:
     """
     Render an MP4 (same fps + resolution as source) showing each worm's recent
     centroid trail. For frame N, segments from max(0, N - window) to N are drawn
-    per worm with a linear age-based alpha fade, and the current centroid is
-    marked with a small filled circle. window = window_s * fps frames.
+    per worm with a linear age-based alpha fade, the current centroid is marked
+    with a small filled circle, and a stable worm-index number labels the worm.
+    window = window_s * fps frames.
 
-    kept_ids, when given, restricts the trails to those worm_index_joined values
-    (crawling quality filter); None draws every track.
+    worm_index_map maps each member worm_index_joined to its stable grouped
+    worm_index (crawling quality filter): trails are grouped and coloured by that
+    worm_index, fragments absent from the map are filtered out and not drawn.
+    When None, every track is drawn keyed by its own worm_index_joined.
+
+    reversal_frames maps a grouped worm_index to the list of frame numbers where
+    that worm reversed; at those frames (±_FLASH_HALF_S) a bright ring pulses on
+    the worm's current centroid.
     """
     import cv2
     import pandas as pd
@@ -163,21 +193,43 @@ def render_path_traces(
                     skeletons_hdf5.name)
         return
 
-    # Pre-index per-worm sorted (frames, x, y) arrays for windowed slicing.
-    # kept_ids (when given) restricts the trails to filter-passing worms.
-    worm_tracks: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    # Remap member worm_index_joined → grouped worm_index, accumulating each
+    # grouped worm's member tracks. worm_index_map (when given) restricts the
+    # trails to filter-passing worms.
+    accum: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
     for w, g in df.groupby("wi"):
-        if kept_ids is not None and int(w) not in kept_ids:
-            continue
+        if worm_index_map is not None:
+            gi = worm_index_map.get(int(w))
+            if gi is None:
+                continue
+        else:
+            gi = int(w)
         g = g.sort_values("fn")
-        worm_tracks[int(w)] = (
+        accum.setdefault(gi, []).append((
             g["fn"].values.astype(np.int64),
             g["x"].values.astype(np.float64),
             g["y"].values.astype(np.float64),
-        )
-    worm_color = {w: _palette_color(w) for w in worm_tracks}
+        ))
+
+    # Merge each grouped worm's member tracks into one frame-sorted track.
+    worm_tracks: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for gi, parts in accum.items():
+        wf = np.concatenate([p[0] for p in parts])
+        wx = np.concatenate([p[1] for p in parts])
+        wy = np.concatenate([p[2] for p in parts])
+        order = np.argsort(wf, kind="stable")
+        worm_tracks[gi] = (wf[order], wx[order], wy[order])
+    worm_color = {gi: _palette_color(gi) for gi in worm_tracks}
+
+    # Per-worm sorted reversal-frame arrays for fast nearest-frame lookup.
+    rev_by_worm: dict[int, np.ndarray] = {}
+    if reversal_frames:
+        for gi, frames in reversal_frames.items():
+            if frames:
+                rev_by_worm[int(gi)] = np.sort(np.asarray(frames, dtype=np.int64))
 
     window = max(1, int(round(window_s * fps)))
+    flash_half = max(2, int(round(_FLASH_HALF_S * fps)))
 
     cap = cv2.VideoCapture(str(avi_path))
     if not cap.isOpened():
@@ -219,9 +271,26 @@ def render_path_traces(
                             color, alpha, thickness=2,
                         )
 
-                    # Current centroid marker (most recent point in the window).
-                    cv2.circle(base, (int(seg_x[-1]), int(seg_y[-1])),
-                               4, color, -1, cv2.LINE_AA)
+                    cur = (int(seg_x[-1]), int(seg_y[-1]))
+
+                    # Reversal flash: bright ring when near one of this worm's
+                    # reversal frames; radius grows toward the exact frame.
+                    rev = rev_by_worm.get(w)
+                    if rev is not None and len(rev):
+                        j = int(np.searchsorted(rev, frame_num))
+                        d = window  # large default
+                        if j < len(rev):
+                            d = min(d, int(rev[j] - frame_num))
+                        if j > 0:
+                            d = min(d, int(frame_num - rev[j - 1]))
+                        if d <= flash_half:
+                            intensity = 1.0 - d / flash_half
+                            radius = int(8 + 16 * intensity)
+                            cv2.circle(base, cur, radius, _FLASH_COLOR, 2, cv2.LINE_AA)
+
+                    # Current centroid marker + stable worm-index label.
+                    cv2.circle(base, cur, 4, color, -1, cv2.LINE_AA)
+                    _draw_label(base, str(w), cur, color)
 
                 pipe.write(base.tobytes())
                 frame_num += 1

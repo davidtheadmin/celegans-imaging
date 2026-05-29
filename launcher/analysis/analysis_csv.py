@@ -569,6 +569,17 @@ def read_fragments(
     return rows, analysis_log
 
 
+# ---------------------------------------------------------------------------
+# Shared engine boundary (Brief 1, Step 2)
+# ---------------------------------------------------------------------------
+# read_fragments IS the grouping + flicker + BPM engine: it returns grouped
+# worm rows (each with member_tierpsy_ids) and has no Excel / plot / render side
+# effects. The crawling pipeline imports it under this name to obtain the same
+# grouped identities motility uses, then layers its own kinematics on top.
+# Calling it from crawling does not change motility output in any way.
+produce_grouped_worm_rows = read_fragments
+
+
 def _empty_log() -> dict:
     return {
         "input_track_count": 0,

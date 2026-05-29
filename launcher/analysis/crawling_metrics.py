@@ -1,15 +1,18 @@
 """
 Crawling per-worm metrics + per-condition aggregation.
 
-Self-contained for the crawling pipeline. Computes one row per worm_index
-directly from Tierpsy's timeseries_data table (speed / motion_mode / length /
-width) and the trajectories_data table (centroid path geometry). The legacy
-custom bend-rate calculation is preserved as one extra column by importing
-the shared, read-only helpers from analysis_csv.
+Brief 1: crawling now shares motility's grouping + flicker + BPM engine
+(analysis_csv.produce_grouped_worm_rows / read_fragments). The engine returns
+one row per GROUPED worm — fragments stitched into a single identity, with a
+member_tierpsy_ids list — carrying bpm, bend_interval_cv and is_long. This
+module layers crawling's kinematic metrics (speed, reversals, path geometry,
+tortuosity, net displacement, continuous-run length, skeleton coverage) on top
+of each grouped worm's COMBINED track, then applies crawling's own quality gate
+(min track duration + skeleton coverage).
 
-Heavy third-party imports (numpy/pandas/h5py) live at runtime call sites so
-this module can be imported lazily by crawling.py, mirroring how the other
-analysis modules are imported only when an analysis run actually starts.
+Heavy third-party imports (numpy/pandas/h5py) live at runtime call sites so this
+module can be imported lazily by crawling.py, mirroring the other analysis
+modules.
 """
 import logging
 from pathlib import Path
@@ -18,7 +21,20 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-# Canonical metric columns, in output order. Used for per-condition aggregation.
+# Identity columns prepended to every per-worm row. worm_index is the grouped
+# (engine-assigned) identity; repr_tierpsy_id is the representative Tierpsy
+# track; member_tierpsy_ids lists every Tierpsy worm_index_joined stitched into
+# this grouped worm (";"-joined for the spreadsheet).
+ID_COLS: list[str] = [
+    "condition", "plate", "video_name",
+    "worm_index", "repr_tierpsy_id", "member_tierpsy_ids", "group_classification",
+]
+
+# Engine-derived columns (identical mechanism to motility).
+ENGINE_COLS: list[str] = ["bpm", "bend_interval_cv", "is_long"]
+
+# Canonical kinematic metric columns, in output order. Used for per-condition
+# aggregation alongside the engine BPM columns.
 METRIC_COLS: list[str] = [
     "mean_speed_pxs",
     "mean_forward_speed_pxs",
@@ -34,26 +50,20 @@ METRIC_COLS: list[str] = [
     "mean_length_px",
     "mean_width_midbody_px",
     "track_duration_s",
-    # Longest gap-free run of consecutive frame_numbers, in seconds. Tracks
-    # stitched across gaps by TRAJ_JOIN have this < track_duration_s.
+    # Longest gap-free run of consecutive frame_numbers, in seconds (union of
+    # the grouped worm's member frames).
     "longest_continuous_run_s",
     # Fraction of trajectory frames where Tierpsy extracted a skeleton.
     "skeleton_coverage",
-    # Legacy custom bend rate — kept as one additional column, no longer primary.
-    "bend_rate_bpm",
 ]
 
-# Identity columns prepended to every per-worm row.
-# worm_index is the post-join track id: featuresN timeseries_data.worm_index is
-# identical to the _skeletons.hdf5 trajectories_data.worm_index_joined set
-# (verified — no worm_index_blob divergence), so we name the column
-# worm_index_joined to match the renders, which key on worm_index_joined.
-ID_COLS: list[str] = ["condition", "plate", "video_name", "worm_index_joined"]
+# Columns aggregated per condition (engine BPM metrics + kinematics).
+AGG_COLS: list[str] = ["bpm", "bend_interval_cv"] + METRIC_COLS
 
 # Boolean quality flag appended to every per-worm row (see _passes_filter).
 QUALITY_COL: str = "passed_filter"
 
-PER_WORM_COLS: list[str] = ID_COLS + METRIC_COLS + [QUALITY_COL]
+PER_WORM_COLS: list[str] = ID_COLS + ENGINE_COLS + METRIC_COLS + [QUALITY_COL]
 
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10
@@ -116,45 +126,115 @@ def _longest_run_s(frame_numbers: np.ndarray, fps: float) -> float:
     return best / fps
 
 
-def _read_skeleton_traj_meta(skeletons_path: Path, fps: float) -> dict:
+def _read_skeleton_traj_raw(skeletons_path: Path) -> dict:
     """
     Read trajectories_data from a *_skeletons.hdf5 file and return, per
-    worm_index_joined, a (skeleton_coverage, longest_continuous_run_s) tuple.
+    worm_index_joined, a (frames, has_skeleton) tuple of aligned float arrays.
 
-    skeleton_coverage      — mean of the has_skeleton flag, a fraction in [0, 1].
-    longest_continuous_run_s — longest gap-free frame_number run, in seconds.
-
-    Returns an empty dict (and logs) if the file or its columns are unavailable.
-    The has_skeleton column lives here, not in the _featuresN.hdf5 trajectories.
+    has_skeleton is None when the column is absent. Returns an empty dict (and
+    logs) if the file or its columns are unavailable. The has_skeleton column
+    lives here, not in the _featuresN.hdf5 trajectories.
     """
     import pandas as pd
 
-    meta: dict[int, tuple[float, float]] = {}
+    raw: dict[int, tuple[np.ndarray, "np.ndarray | None"]] = {}
     try:
         st = pd.read_hdf(str(skeletons_path), key="trajectories_data")
     except Exception:
         log.warning("crawling: could not read trajectories_data from %s",
                     skeletons_path, exc_info=True)
-        return meta
+        return raw
     if "worm_index_joined" not in st.columns or "frame_number" not in st.columns:
         log.warning("crawling: %s trajectories_data missing worm_index_joined/frame_number",
                     getattr(skeletons_path, "name", skeletons_path))
-        return meta
+        return raw
 
     has_skel = "has_skeleton" in st.columns
     if not has_skel:
         log.warning("crawling: %s trajectories_data has no has_skeleton column",
                     getattr(skeletons_path, "name", skeletons_path))
     for wi, g in st.groupby("worm_index_joined"):
-        coverage = float("nan")
-        if has_skel:
-            hs = g["has_skeleton"].values.astype(float)
-            hs = hs[np.isfinite(hs)]
-            if len(hs):
-                coverage = float(np.mean(hs))
-        run_s = _longest_run_s(g["frame_number"].values.astype(float), fps)
-        meta[int(wi)] = (coverage, run_s)
-    return meta
+        frames = g["frame_number"].values.astype(float)
+        hs = (g["has_skeleton"].values.astype(float) if has_skel else None)
+        raw[int(wi)] = (frames, hs)
+    return raw
+
+
+def _aggregate_skel_meta(skel_raw: dict, member_ids: list[int],
+                         fps: float) -> tuple[float, float]:
+    """
+    Aggregate skeleton coverage + longest continuous run over a grouped worm's
+    member tracks (union of their frames).
+
+    skeleton_coverage      — mean of has_skeleton across all member frames.
+    longest_continuous_run_s — longest gap-free frame run over the union, in s.
+    """
+    all_frames: list[np.ndarray] = []
+    all_hs: list[np.ndarray] = []
+    for mid in member_ids:
+        entry = skel_raw.get(int(mid))
+        if entry is None:
+            continue
+        frames, hs = entry
+        all_frames.append(frames)
+        if hs is not None:
+            all_hs.append(hs)
+    if not all_frames:
+        return float("nan"), float("nan")
+    frames_union = np.concatenate(all_frames)
+    coverage = float("nan")
+    if all_hs:
+        hs_all = np.concatenate(all_hs)
+        hs_all = hs_all[np.isfinite(hs_all)]
+        if len(hs_all):
+            coverage = float(np.mean(hs_all))
+    run_s = _longest_run_s(frames_union, fps)
+    return coverage, run_s
+
+
+def _combined_path_geometry(member_ids: list[int],
+                            traj_by_worm: dict, fps: float) -> tuple[float, float, float]:
+    """
+    Path length, net displacement and tortuosity for a grouped worm's combined
+    centroid track.
+
+    The members are concatenated into one continuous track over sampled frames
+    and sorted by frame; path length sums only the steps between frame-adjacent
+    samples, so gaps (within or between fragments) contribute no path and there
+    is no jump-interpolation across them. Net displacement spans the first and
+    last sampled centroid overall.
+    """
+    fxy: list[tuple[float, float, float]] = []
+    for mid in member_ids:
+        tdf = traj_by_worm.get(int(mid))
+        if tdf is None or "coord_x" not in tdf.columns or "coord_y" not in tdf.columns:
+            continue
+        fcol = ("frame_number" if "frame_number" in tdf.columns
+                else "timestamp_raw" if "timestamp_raw" in tdf.columns else None)
+        if fcol is None:
+            continue
+        fr = tdf[fcol].values.astype(float)
+        cx = tdf["coord_x"].values.astype(float)
+        cy = tdf["coord_y"].values.astype(float)
+        m = np.isfinite(fr) & np.isfinite(cx) & np.isfinite(cy)
+        for f, x, y in zip(fr[m], cx[m], cy[m]):
+            fxy.append((float(f), float(x), float(y)))
+    if len(fxy) < 2:
+        if len(fxy) == 1:
+            return 0.0, 0.0, 0.0
+        return float("nan"), float("nan"), float("nan")
+
+    fxy.sort(key=lambda t: t[0])
+    f = np.array([t[0] for t in fxy])
+    x = np.array([t[1] for t in fxy])
+    y = np.array([t[2] for t in fxy])
+
+    adjacent = np.diff(f) == 1.0  # count only frame-adjacent sampled steps
+    seg = np.sqrt(np.diff(x) ** 2 + np.diff(y) ** 2)
+    path_length_px = float(np.sum(seg[adjacent]))
+    net_displacement_px = float(np.hypot(x[-1] - x[0], y[-1] - y[0]))
+    tortuosity = path_length_px / max(net_displacement_px, 1.0)
+    return path_length_px, net_displacement_px, tortuosity
 
 
 def compute_crawling_metrics(
@@ -164,20 +244,44 @@ def compute_crawling_metrics(
     plate: str,
     video_name: str,
     head_angle_prominence: float = 0.30,
+    long_threshold_s: float = 5.0,
     min_run_s: float | None = None,
 ) -> list[dict]:
     """
-    Compute crawling metrics for every worm_index in one _featuresN.hdf5.
+    Compute crawling metrics for every GROUPED worm in one _featuresN.hdf5.
 
-    Returns a list of per-worm dicts keyed by PER_WORM_COLS. An empty list is
-    returned (and logged) if timeseries_data cannot be read.
+    Each row pairs the shared engine's grouped identity (worm_index,
+    repr_tierpsy_id, member_tierpsy_ids), engine BPM (bpm, bend_interval_cv) and
+    is_long flag with crawling's kinematic metrics, computed on the grouped
+    worm's combined track. A "reversal_frames" key (list of frame numbers where a
+    forward->backward reversal fired) is added to every row for the renderer; it
+    is intentionally absent from PER_WORM_COLS (not a spreadsheet column).
 
-    min_run_s sets the minimum-duration threshold for the passed_filter flag;
-    when None the module-level LONGEST_RUN_MIN_S fallback is used.
+    Returns an empty list (and logs) if the engine produced no rows or
+    timeseries_data cannot be read. long_threshold_s drives is_long exactly as in
+    motility; min_run_s sets the passed_filter minimum-duration threshold (None
+    falls back to LONGEST_RUN_MIN_S).
     """
     import h5py
     import pandas as pd
 
+    from analysis.analysis_csv import produce_grouped_worm_rows
+
+    # ---- Shared grouping + flicker + BPM engine (motility-identical) ----
+    try:
+        engine_rows, _engine_log = produce_grouped_worm_rows(
+            hdf5_path, fps, condition, plate,
+            long_threshold_s=long_threshold_s,
+            head_angle_prominence=head_angle_prominence,
+        )
+    except Exception:
+        log.error("crawling: grouping engine failed for %s", hdf5_path, exc_info=True)
+        return []
+    if not engine_rows:
+        log.warning("crawling: engine produced no grouped worms for %s", hdf5_path)
+        return []
+
+    # ---- timeseries_data (speed / motion_mode / length / width) ----
     try:
         ts = pd.read_hdf(str(hdf5_path), key="timeseries_data")
     except Exception as exc:
@@ -187,17 +291,11 @@ def compute_crawling_metrics(
         log.warning("crawling: timeseries_data empty or missing worm_index in %s", hdf5_path)
         return []
 
-    # Trajectories (centroid path) + skeletons (legacy bend rate) — best effort.
+    # ---- trajectories_data (centroid path geometry) — best effort ----
     try:
         traj = pd.read_hdf(str(hdf5_path), key="trajectories_data")
     except Exception:
         traj = None
-    skel_all = None
-    try:
-        with h5py.File(str(hdf5_path), "r") as fh:
-            skel_all = fh["coordinates"]["skeletons"][:]
-    except Exception:
-        skel_all = None
 
     has_motion_mode = "motion_mode" in ts.columns
     ts_frame_col = "timestamp" if "timestamp" in ts.columns else "frame_number"
@@ -211,7 +309,11 @@ def compute_crawling_metrics(
         median_abs_speed = 0.0
     paused_threshold = _PAUSED_FRACTION_OF_MEDIAN * median_abs_speed
 
-    # Pre-index trajectory centroids by worm (worm_index == worm_index_joined).
+    # Pre-index timeseries + trajectory rows by Tierpsy worm_index
+    # (worm_index == trajectories worm_index_joined == engine member id).
+    ts_by_worm: dict[int, "pd.DataFrame"] = {
+        int(wi): g.sort_values(ts_frame_col) for wi, g in ts.groupby("worm_index")
+    }
     traj_by_worm: dict[int, "pd.DataFrame"] = {}
     if traj is not None and "worm_index_joined" in traj.columns:
         traj_frame_col = "timestamp_raw" if "timestamp_raw" in traj.columns else "frame_number"
@@ -219,22 +321,24 @@ def compute_crawling_metrics(
             traj_by_worm[int(wi)] = g.sort_values(traj_frame_col).reset_index(drop=True)
 
     # skeleton_coverage + longest_continuous_run come from the *_skeletons.hdf5
-    # trajectories_data (the has_skeleton flag is not present in *_featuresN.hdf5).
+    # trajectories_data (the has_skeleton flag is not in *_featuresN.hdf5).
     _feat_path = Path(hdf5_path)
     skeletons_path = _feat_path.with_name(_feat_path.name.replace("_featuresN", "_skeletons"))
-    skel_meta = _read_skeleton_traj_meta(skeletons_path, fps)
-
-    # Lazy import of shared, read-only bend-rate helpers.
-    try:
-        from analysis.analysis_csv import compute_head_angle_signal, bends_per_minute
-    except Exception:
-        compute_head_angle_signal = None
-        bends_per_minute = None
+    skel_raw = _read_skeleton_traj_raw(skeletons_path)
 
     rows: list[dict] = []
-    for wi, g in ts.groupby("worm_index"):
-        wi = int(wi)
-        g = g.sort_values(ts_frame_col)
+    for er in engine_rows:
+        member_ids = [int(t) for t in (er.get("member_tierpsy_ids") or [])]
+        if not member_ids:
+            rid = er.get("repr_tierpsy_id")
+            member_ids = [int(rid)] if rid is not None else []
+
+        # --- combined timeseries track over all members ---
+        member_ts = [ts_by_worm[m] for m in member_ids if m in ts_by_worm]
+        if member_ts:
+            g = pd.concat(member_ts).sort_values(ts_frame_col)
+        else:
+            g = ts.iloc[0:0]
 
         speed = (g["speed"].values.astype(float)
                  if "speed" in g.columns else np.array([], dtype=float))
@@ -244,81 +348,73 @@ def compute_crawling_metrics(
         fwd = speed[speed > 0]
         bwd = speed[speed < 0]
 
-        # --- reversal_count: forward→backward transitions ---
-        if has_motion_mode:
+        # --- reversal_count + reversal_frames: forward->backward transitions ---
+        # Keep frame numbers aligned through the paused-frame collapse so the
+        # frame at which each reversal fires can be recovered for the renderer.
+        reversal_count = 0
+        reversal_frames: list[int] = []
+        frames_ts = (g[ts_frame_col].values.astype(float)
+                     if ts_frame_col in g.columns else np.array([], dtype=float))
+        if has_motion_mode and "motion_mode" in g.columns:
             mm = g["motion_mode"].values.astype(float)
-            mm = mm[np.isfinite(mm)]
-            seq = mm[mm != 0]  # collapse paused frames; keep forward(1)/backward(-1)
-            reversal_count = (int(np.sum((seq[:-1] == 1) & (seq[1:] == -1)))
-                              if len(seq) > 1 else 0)
+            valid = np.isfinite(mm) & np.isfinite(frames_ts)
+            mm_v = mm[valid]
+            fr_v = frames_ts[valid]
+            nz = mm_v != 0  # collapse paused frames; keep forward(1)/backward(-1)
+            seq = mm_v[nz]
+            seq_fr = fr_v[nz]
         else:
-            # Fallback: positive→negative sign changes in speed.
-            signs = np.sign(speed)
-            signs = signs[signs != 0]
-            reversal_count = (int(np.sum((signs[:-1] == 1) & (signs[1:] == -1)))
-                              if len(signs) > 1 else 0)
+            # Fallback: positive->negative sign changes in speed.
+            sp = (g["speed"].values.astype(float)
+                  if "speed" in g.columns else np.array([], dtype=float))
+            valid = np.isfinite(sp) & np.isfinite(frames_ts)
+            signs = np.sign(sp[valid])
+            fr_v = frames_ts[valid]
+            nz = signs != 0
+            seq = signs[nz]
+            seq_fr = fr_v[nz]
+        if len(seq) > 1:
+            rev_mask = (seq[:-1] == 1) & (seq[1:] == -1)
+            reversal_count = int(np.sum(rev_mask))
+            # Frame at which backward motion begins = the reversal frame.
+            reversal_frames = sorted(
+                {int(f) for f in seq_fr[1:][rev_mask] if np.isfinite(f)}
+            )
 
-        # --- track duration ---
-        frames = g[ts_frame_col].values.astype(float)
-        frames = frames[np.isfinite(frames)]
-        if len(frames) >= 1 and fps > 0:
-            track_duration_s = (float(frames.max()) - float(frames.min()) + 1.0) / fps
+        # --- track duration (combined) ---
+        ft = frames_ts[np.isfinite(frames_ts)]
+        if len(ft) >= 1 and fps > 0:
+            track_duration_s = (float(ft.max()) - float(ft.min()) + 1.0) / fps
         else:
             track_duration_s = float("nan")
         dur_min = (track_duration_s / 60.0
                    if np.isfinite(track_duration_s) else 0.0)
         reversal_rate_per_min = (reversal_count / dur_min) if dur_min > 1e-9 else 0.0
 
-        # --- centroid path geometry ---
-        path_length_px = float("nan")
-        net_displacement_px = float("nan")
-        tortuosity = float("nan")
-        tdf = traj_by_worm.get(wi)
-        if tdf is not None and "coord_x" in tdf.columns and "coord_y" in tdf.columns:
-            cx = tdf["coord_x"].values.astype(float)
-            cy = tdf["coord_y"].values.astype(float)
-            m = np.isfinite(cx) & np.isfinite(cy)
-            cx, cy = cx[m], cy[m]
-            if len(cx) >= 2:
-                dx = np.diff(cx)
-                dy = np.diff(cy)
-                path_length_px = float(np.sum(np.sqrt(dx * dx + dy * dy)))
-                net_displacement_px = float(np.hypot(cx[-1] - cx[0], cy[-1] - cy[0]))
-                tortuosity = path_length_px / max(net_displacement_px, 1.0)
-            elif len(cx) == 1:
-                path_length_px = 0.0
-                net_displacement_px = 0.0
-                tortuosity = 0.0
-
-        # --- skeleton coverage + longest continuous run (from *_skeletons.hdf5) ---
-        skeleton_coverage, longest_continuous_run_s = skel_meta.get(
-            wi, (float("nan"), float("nan"))
+        # --- centroid path geometry (combined, gap-aware) ---
+        path_length_px, net_displacement_px, tortuosity = _combined_path_geometry(
+            member_ids, traj_by_worm, fps
         )
-        # Fallback for the run length only if the skeletons file lacked this worm.
-        if not np.isfinite(longest_continuous_run_s) and tdf is not None:
-            fcol = ("frame_number" if "frame_number" in tdf.columns
-                    else "timestamp_raw" if "timestamp_raw" in tdf.columns else None)
-            if fcol is not None:
-                longest_continuous_run_s = _longest_run_s(
-                    tdf[fcol].values.astype(float), fps
-                )
 
-        # --- legacy custom bend rate ---
-        bend_rate_bpm = float("nan")
-        if (tdf is not None and skel_all is not None
-                and compute_head_angle_signal is not None and bends_per_minute is not None):
-            try:
-                sig = compute_head_angle_signal(tdf, skel_all, fps, head_angle_prominence)
-                if sig is not None:
-                    bend_rate_bpm = float(bends_per_minute(sig, fps))
-            except Exception:
-                log.debug("crawling: bend-rate failed for worm %d", wi, exc_info=True)
+        # --- skeleton coverage + longest continuous run (union of members) ---
+        skeleton_coverage, longest_continuous_run_s = _aggregate_skel_meta(
+            skel_raw, member_ids, fps
+        )
+        if not np.isfinite(longest_continuous_run_s) and len(ft):
+            # Fallback to the combined timeseries frames if skeletons lacked them.
+            longest_continuous_run_s = _longest_run_s(ft, fps)
 
         rows.append({
             "condition": condition,
             "plate": plate,
             "video_name": video_name,
-            "worm_index_joined": wi,
+            "worm_index": er.get("worm_index"),
+            "repr_tierpsy_id": er.get("repr_tierpsy_id"),
+            "member_tierpsy_ids": ";".join(str(m) for m in member_ids),
+            "group_classification": er.get("group_classification"),
+            "bpm": er.get("bpm"),
+            "bend_interval_cv": er.get("bend_interval_cv"),
+            "is_long": er.get("is_long"),
             "mean_speed_pxs": _mean_finite(abs_speed),
             "mean_forward_speed_pxs": (float(np.mean(fwd)) if len(fwd) else 0.0),
             "mean_backward_speed_pxs": (float(np.mean(np.abs(bwd))) if len(bwd) else 0.0),
@@ -338,10 +434,11 @@ def compute_crawling_metrics(
             "track_duration_s": track_duration_s,
             "longest_continuous_run_s": longest_continuous_run_s,
             "skeleton_coverage": skeleton_coverage,
-            "bend_rate_bpm": bend_rate_bpm,
             "passed_filter": _passes_filter(
                 longest_continuous_run_s, skeleton_coverage, min_run_s
             ),
+            # Renderer-only (not a spreadsheet column).
+            "reversal_frames": reversal_frames,
         })
 
     return rows
@@ -386,7 +483,7 @@ def aggregate_per_condition(per_worm_rows: list[dict],
             "n_worms_total": int(len(cdf)),
             "n_worms_kept": int(len(kept)),
         }
-        for col in METRIC_COLS:
+        for col in AGG_COLS:
             if col in kept.columns:
                 vals = pd.to_numeric(kept[col], errors="coerce").values.astype(float)
                 vals = vals[np.isfinite(vals)]

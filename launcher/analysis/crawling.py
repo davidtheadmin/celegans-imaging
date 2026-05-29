@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -432,6 +433,7 @@ class CrawlingAgent(threading.Thread):
         import pandas as pd
 
         s = self._get_settings()
+        t_start = time.monotonic()
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         out_dir = folder / f"{_ANALYSIS_PREFIX}_{timestamp}"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -568,19 +570,30 @@ class CrawlingAgent(threading.Thread):
                     worm_rows = compute_crawling_metrics(
                         hdf5_path, fps, condition, plate, video.name,
                         head_angle_prominence=head_angle_prominence,
+                        long_threshold_s=threshold_s,
                         min_run_s=min_track_s,
                     )
-                    write_log(f"Worms tracked: {len(worm_rows)}")
+                    write_log(f"Grouped worms: {len(worm_rows)}")
 
-                    # Worms that survive the quality filter — the renders must
-                    # show exactly this set (same set for all three modes).
-                    kept_ids = {
-                        int(r["worm_index_joined"])
-                        for r in worm_rows if r.get("passed_filter")
-                    }
+                    # Map every member Tierpsy id of a filter-passing grouped worm
+                    # to its stable grouped worm_index, and collect that worm's
+                    # reversal frames. Members absent from the map were filtered
+                    # out and the renders mark them faintly (motility-style).
+                    worm_index_map: dict[int, int] = {}
+                    reversal_frames_by_worm: dict[int, list] = {}
+                    for r in worm_rows:
+                        if not r.get("passed_filter"):
+                            continue
+                        gi = int(r["worm_index"])
+                        for mid in str(r.get("member_tierpsy_ids", "")).split(";"):
+                            mid = mid.strip()
+                            if mid:
+                                worm_index_map[int(mid)] = gi
+                        reversal_frames_by_worm[gi] = r.get("reversal_frames") or []
+                    n_kept = sum(1 for r in worm_rows if r.get("passed_filter"))
                     write_log(
                         f"Worms passing filter (>= {min_track_s:.1f}s): "
-                        f"{len(kept_ids)}/{len(worm_rows)}"
+                        f"{n_kept}/{len(worm_rows)}"
                     )
 
                     if want_tracked or want_sidebyside or want_path_traces:
@@ -594,21 +607,22 @@ class CrawlingAgent(threading.Thread):
                             render_tracked(
                                 avi, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_tracked.mp4", fps,
-                                kept_ids=kept_ids,
+                                worm_index_map=worm_index_map,
                             )
                         if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists() and avi.exists():
                             _stage("Rendering side-by-side video…")
                             render_sidebyside(
                                 avi, masked_hdf5, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_sidebyside.mp4", fps,
-                                kept_ids=kept_ids,
+                                worm_index_map=worm_index_map,
                             )
                         if want_path_traces and skeletons_hdf5.exists() and avi.exists():
                             _stage("Rendering path traces…")
                             render_path_traces(
                                 avi, skeletons_hdf5,
                                 per_video_dir / f"{prefix}_path_traces.mp4", fps,
-                                kept_ids=kept_ids,
+                                worm_index_map=worm_index_map,
+                                reversal_frames=reversal_frames_by_worm,
                             )
 
                 except Exception as exc:
@@ -647,6 +661,17 @@ class CrawlingAgent(threading.Thread):
             per_condition_df.to_excel(xw, sheet_name="per_condition", index=False)
 
         per_condition_df.to_csv(out_dir / "crawling_summary.csv", index=False)
+
+        # One multi-panel overview figure (box/bar per metric by condition).
+        try:
+            from analysis.crawling_plots import make_crawling_overview_png
+            make_crawling_overview_png(
+                all_worm_rows, out_dir / "overview.png",
+                min_run_s=min_track_s,
+                elapsed_s=time.monotonic() - t_start,
+            )
+        except Exception:
+            log.warning("crawling: overview figure failed", exc_info=True)
 
         log.info(
             "Crawling analysis complete: %d ok, %d failed. Results: %s",
