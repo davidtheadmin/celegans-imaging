@@ -97,11 +97,14 @@ PER_WORM_COLS: list[str] = (
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10
 
-# Max frame separation between two consecutive non-paused frames for a
-# forward->backward transition to count as a reversal. A larger separation means
-# a tracking gap (or pause) sits between them, so the "reversal" spans a gap and
-# is discarded — we only count reversals observed across (near-)adjacent frames.
-REVERSAL_MAX_GAP_FRAMES: int = 2
+# A worm typically PAUSES briefly (measured motion_mode == 0) between forward and
+# backward motion during a real reversal — that pause is part of the reversal
+# event, not a data gap. A forward->backward transition still counts as a reversal
+# if the forward and backward runs are separated by <= this many consecutive
+# measured-paused frames. DATA GAPS (motion_mode NaN — no skeleton/measurement)
+# always disqualify the transition: we cannot know what happened there.
+# 60 frames = 2.0s at 30fps.
+REVERSAL_PAUSE_TOLERANCE_FRAMES: int = 60
 
 # Internal skeleton gaps of this many frames or fewer do NOT break a worm's
 # longest_continuous_run_s. Tierpsy's skeleton fitter hiccups for a frame or two
@@ -212,6 +215,58 @@ def _member_bridged_run_s(frames: np.ndarray, sk_mask: np.ndarray,
     arr = np.zeros(f1 - f0 + 1, dtype=bool)
     arr[fr[skm] - f0] = True  # mark skeletonised frames on the per-frame axis
     return _longest_skeletonized_run_frames(arr, bridge_frames) / fps
+
+
+def _count_reversals_with_pause_tolerance(
+    motion_mode: np.ndarray, pause_tolerance_frames: int,
+) -> tuple[int, list[int]]:
+    """
+    Count forward->backward transitions in a per-frame motion_mode array.
+
+    motion_mode is indexed by frame (1 = forward, -1 = backward, 0 = measured
+    paused, NaN = data gap / no measurement). A transition counts as a reversal
+    when, walking backward from a backward run, the most recent measured frame is
+    forward (1), separated only by <= pause_tolerance_frames measured-paused (0)
+    frames — a brief pause is part of the reversal, not a gap. A NaN frame in
+    between (we cannot know what happened) disqualifies the transition. Each
+    backward run is counted at most once.
+
+    Returns (n_reversals, reversal_frame_indices) where each index is the start
+    frame of a counted backward run (the frame at which the reversal fires).
+    """
+    mm = np.asarray(motion_mode, dtype=float)
+    n = len(mm)
+    n_rev = 0
+    rev_idx: list[int] = []
+    i = 0
+    while i < n:
+        if mm[i] == -1:
+            # Walk back to the most recent non-paused, non-NaN frame.
+            j = i - 1
+            paused_run = 0
+            saw_gap = False
+            while j >= 0:
+                if np.isnan(mm[j]):
+                    saw_gap = True
+                    break
+                elif mm[j] == 0:
+                    paused_run += 1
+                    if paused_run > pause_tolerance_frames:
+                        break
+                    j -= 1
+                elif mm[j] == 1:  # forward — a real reversal unless a gap intervened
+                    if not saw_gap and paused_run <= pause_tolerance_frames:
+                        n_rev += 1
+                        rev_idx.append(i)
+                    break
+                else:  # mm[j] == -1, previous backward run; not a new reversal
+                    break
+            # Skip to the end of this backward run so we do not double-count it.
+            while i < n and mm[i] == -1:
+                i += 1
+        else:
+            i += 1
+    return n_rev, rev_idx
 
 
 def _linker_log(n_fragments: int, n_groups: int, ambig_skips: int) -> dict:
@@ -508,43 +563,35 @@ def compute_crawling_metrics(
             length_cv = float("nan")
 
         # --- reversal_count + reversal_frames: forward->backward transitions ---
-        # Keep frame numbers aligned through the paused-frame collapse so the
-        # frame at which each reversal fires can be recovered for the renderer.
-        # A transition is only counted when the two consecutive non-paused frames
-        # are (near-)adjacent (<= REVERSAL_MAX_GAP_FRAMES apart); a wider
-        # separation means the forward->backward switch spans a tracking gap, so
-        # it is discarded rather than imputed across the gap.
+        # Build a per-FRAME motion_mode array over the worm's [f0, f1] span:
+        # measured frames carry their motion_mode (1 fwd / -1 bwd / 0 paused),
+        # frames with no timeseries row (or a NaN motion_mode) become NaN data
+        # gaps. A brief MEASURED pause between forward and backward is part of the
+        # reversal (tolerated up to REVERSAL_PAUSE_TOLERANCE_FRAMES); a data gap
+        # is not (we cannot know what happened across it).
         reversal_count = 0
         reversal_frames: list[int] = []
         frames_ts = (g[ts_frame_col].values.astype(float)
                      if ts_frame_col in g.columns else np.array([], dtype=float))
         if has_motion_mode and "motion_mode" in g.columns:
-            mm = g["motion_mode"].values.astype(float)
-            valid = np.isfinite(mm) & np.isfinite(frames_ts)
-            mm_v = mm[valid]
-            fr_v = frames_ts[valid]
-            nz = mm_v != 0  # collapse paused frames; keep forward(1)/backward(-1)
-            seq = mm_v[nz]
-            seq_fr = fr_v[nz]
+            mm_src = g["motion_mode"].values.astype(float)
         else:
-            # Fallback: positive->negative sign changes in speed.
+            # Fallback when motion_mode is absent: derive a motion_mode-like code
+            # from speed sign, using the same paused threshold as fraction_paused.
             sp = (g["speed"].values.astype(float)
-                  if "speed" in g.columns else np.array([], dtype=float))
-            valid = np.isfinite(sp) & np.isfinite(frames_ts)
-            signs = np.sign(sp[valid])
-            fr_v = frames_ts[valid]
-            nz = signs != 0
-            seq = signs[nz]
-            seq_fr = fr_v[nz]
-        if len(seq) > 1:
-            rev_mask = (seq[:-1] == 1) & (seq[1:] == -1)
-            adjacent = (seq_fr[1:] - seq_fr[:-1]) <= REVERSAL_MAX_GAP_FRAMES
-            rev_mask = rev_mask & adjacent
-            reversal_count = int(np.sum(rev_mask))
-            # Frame at which backward motion begins = the reversal frame.
-            reversal_frames = sorted(
-                {int(f) for f in seq_fr[1:][rev_mask] if np.isfinite(f)}
+                  if "speed" in g.columns else np.full(len(frames_ts), np.nan))
+            mm_src = np.where(np.abs(sp) < paused_threshold, 0.0, np.sign(sp))
+            mm_src[~np.isfinite(sp)] = np.nan
+        fin = np.isfinite(frames_ts)
+        if fin.any():
+            fr = frames_ts[fin].astype(np.int64)
+            f0, f1 = int(fr.min()), int(fr.max())
+            mm_frame = np.full(f1 - f0 + 1, np.nan)
+            mm_frame[fr - f0] = mm_src[fin]
+            reversal_count, rev_offsets = _count_reversals_with_pause_tolerance(
+                mm_frame, REVERSAL_PAUSE_TOLERANCE_FRAMES
             )
+            reversal_frames = sorted(f0 + off for off in rev_offsets)
 
         # --- track duration: group span over the skeletons member frames ---
         member_frames: list[np.ndarray] = []
