@@ -71,13 +71,28 @@ METRIC_COLS: list[str] = [
     "skeleton_coverage",
 ]
 
-# Columns aggregated per condition (engine BPM metrics + kinematics).
+# Activity / variability metrics derived from the same per-frame speed/length
+# arrays (no extra Tierpsy data). These get a per-condition _median column ONLY
+# (not mean/std), so they are kept separate from METRIC_COLS / AGG_COLS.
+ACTIVITY_COLS: list[str] = [
+    "mean_speed_when_moving",
+    "activity_fraction_above_1pxs",
+    "activity_fraction_above_3pxs",
+    "activity_fraction_above_5pxs",
+    "speed_cv",
+    "length_cv",
+]
+
+# Columns aggregated per condition (engine BPM metrics + kinematics) with
+# mean/median/std. ACTIVITY_COLS are aggregated separately (median only).
 AGG_COLS: list[str] = ["bpm", "bend_interval_cv"] + METRIC_COLS
 
 # Boolean quality flag appended to every per-worm row (see _passes_filter).
 QUALITY_COL: str = "passed_filter"
 
-PER_WORM_COLS: list[str] = ID_COLS + ENGINE_COLS + METRIC_COLS + [QUALITY_COL]
+PER_WORM_COLS: list[str] = (
+    ID_COLS + ENGINE_COLS + METRIC_COLS + ACTIVITY_COLS + [QUALITY_COL]
+)
 
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10
@@ -465,6 +480,33 @@ def compute_crawling_metrics(
         fwd = speed[speed > 0]
         bwd = speed[speed < 0]
 
+        # --- activity / variability metrics (from the same per-frame arrays) ---
+        # All over finite-speed (skeletonised) frames. moving_threshold reuses the
+        # video-level paused threshold so "moving" is exactly "not paused".
+        moving = abs_speed[abs_speed >= paused_threshold]
+        mean_speed_when_moving = float(np.mean(moving)) if len(moving) else float("nan")
+        if n:
+            activity_fraction_above_1pxs = float(np.mean(abs_speed >= 1.0))
+            activity_fraction_above_3pxs = float(np.mean(abs_speed >= 3.0))
+            activity_fraction_above_5pxs = float(np.mean(abs_speed >= 5.0))
+            mean_abs_speed = float(np.nanmean(abs_speed))
+            speed_cv = (float(np.nanstd(abs_speed) / mean_abs_speed)
+                        if mean_abs_speed > 0 else float("nan"))
+        else:
+            activity_fraction_above_1pxs = float("nan")
+            activity_fraction_above_3pxs = float("nan")
+            activity_fraction_above_5pxs = float("nan")
+            speed_cv = float("nan")
+        length_arr = (g["length"].values.astype(float)
+                      if "length" in g.columns else np.array([], dtype=float))
+        length_arr = length_arr[np.isfinite(length_arr)]
+        if len(length_arr):
+            mean_length = float(np.nanmean(length_arr))
+            length_cv = (float(np.nanstd(length_arr) / mean_length)
+                         if mean_length > 0 else float("nan"))
+        else:
+            length_cv = float("nan")
+
         # --- reversal_count + reversal_frames: forward->backward transitions ---
         # Keep frame numbers aligned through the paused-frame collapse so the
         # frame at which each reversal fires can be recovered for the renderer.
@@ -590,6 +632,12 @@ def compute_crawling_metrics(
             "track_duration_s": track_duration_s,
             "longest_continuous_run_s": longest_continuous_run_s,
             "skeleton_coverage": skeleton_coverage,
+            "mean_speed_when_moving": mean_speed_when_moving,
+            "activity_fraction_above_1pxs": activity_fraction_above_1pxs,
+            "activity_fraction_above_3pxs": activity_fraction_above_3pxs,
+            "activity_fraction_above_5pxs": activity_fraction_above_5pxs,
+            "speed_cv": speed_cv,
+            "length_cv": length_cv,
             "passed_filter": _passes_filter(
                 longest_continuous_run_s, skeleton_coverage, min_run_s
             ),
@@ -614,8 +662,9 @@ def aggregate_per_condition(per_worm_rows: list[dict],
     per_worm passed_filter column); None falls back to LONGEST_RUN_MIN_S.
 
     Each condition row reports n_worms_total (before filtering),
-    n_worms_kept (after filtering), and mean / median / std of every metric
-    computed only on the kept worms.
+    n_worms_kept (after filtering), and mean / median / std of every AGG_COLS
+    metric computed only on the kept worms, plus a median-only column for each
+    ACTIVITY_COLS metric.
     """
     import pandas as pd
 
@@ -653,5 +702,13 @@ def aggregate_per_condition(per_worm_rows: list[dict],
                 agg[f"{col}_mean"] = None
                 agg[f"{col}_median"] = None
                 agg[f"{col}_std"] = None
+        # Activity / variability metrics: median only.
+        for col in ACTIVITY_COLS:
+            if col in kept.columns:
+                vals = pd.to_numeric(kept[col], errors="coerce").values.astype(float)
+                vals = vals[np.isfinite(vals)]
+            else:
+                vals = np.array([], dtype=float)
+            agg[f"{col}_median"] = float(np.median(vals)) if len(vals) else None
         out.append(agg)
     return out
