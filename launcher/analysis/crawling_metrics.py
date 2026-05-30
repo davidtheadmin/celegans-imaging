@@ -18,7 +18,8 @@ gap exclusion happens naturally; is_long is derived from track_duration_s.
 
 Metrics never impute across gaps: speed fractions average observed frames only,
 path length sums frame-adjacent steps only, bpm divides by valid-skeleton-frame
-seconds, and longest_continuous_run_s is the longest single member fragment.
+seconds, and longest_continuous_run_s is the longest single member fragment
+(tolerating only sub-0.5s skeleton-fitter hiccups, see LONGEST_RUN_BRIDGE_FRAMES).
 
 Heavy third-party imports (numpy/pandas/h5py) live at runtime call sites so this
 module can be imported lazily by crawling.py, mirroring the other analysis
@@ -63,8 +64,8 @@ METRIC_COLS: list[str] = [
     "mean_length_px",
     "mean_width_midbody_px",
     "track_duration_s",
-    # Longest gap-free run of consecutive frame_numbers, in seconds (union of
-    # the grouped worm's member frames).
+    # Longest skeletonised run within a single member fragment, in seconds,
+    # bridging internal skeleton gaps of <= LONGEST_RUN_BRIDGE_FRAMES.
     "longest_continuous_run_s",
     # Fraction of trajectory frames where Tierpsy extracted a skeleton.
     "skeleton_coverage",
@@ -86,6 +87,15 @@ _PAUSED_FRACTION_OF_MEDIAN = 0.10
 # a tracking gap (or pause) sits between them, so the "reversal" spans a gap and
 # is discarded — we only count reversals observed across (near-)adjacent frames.
 REVERSAL_MAX_GAP_FRAMES: int = 2
+
+# Internal skeleton gaps of this many frames or fewer do NOT break a worm's
+# longest_continuous_run_s. Tierpsy's skeleton fitter hiccups for a frame or two
+# every 10-20s on a cleanly-tracked worm; without bridging, those single-frame
+# dropouts shatter the run counter and reject well-tracked worms (the 903
+# regression). 15 frames = 0.5s at 30fps: well above typical 1-frame flicker,
+# well below any biologically meaningful pause. Gaps at the very start/end of a
+# fragment are NOT bridged (those are fragment boundaries, not hiccups).
+LONGEST_RUN_BRIDGE_FRAMES: int = 15
 
 # ---------------------------------------------------------------------------
 # Quality-filter thresholds — tune freely; raw per-worm rows are always kept,
@@ -128,21 +138,65 @@ def _mean_finite(arr: np.ndarray) -> float:
     return float(np.mean(arr)) if len(arr) else float("nan")
 
 
-def _longest_run_s(frame_numbers: np.ndarray, fps: float) -> float:
-    """Longest run of consecutive integer frame numbers (no gaps), in seconds."""
-    fr = frame_numbers[np.isfinite(frame_numbers)]
+def _longest_skeletonized_run_frames(has_skeleton: np.ndarray,
+                                     bridge_frames: int) -> int:
+    """
+    Longest run of skeletonised frames, allowing internal gaps of <=bridge_frames.
+
+    has_skeleton is a per-FRAME boolean array (one entry per frame over a single
+    fragment's [f_start, f_end] span — missing frames and unskeletonised frames
+    are both False). Any False-run of length <= bridge_frames that is bounded by
+    True on BOTH sides is treated as continuous (a skeleton-fitter hiccup). A
+    False-run at the very start or end of the array is a fragment boundary, not a
+    hiccup, and is NOT bridged. Returns the longest True-run length (frames).
+    """
+    n = len(has_skeleton)
+    if n == 0:
+        return 0
+    sk = has_skeleton.astype(bool).copy()
+    i = 0
+    while i < n:
+        if not sk[i]:
+            j = i
+            while j < n and not sk[j]:
+                j += 1
+            gap_len = j - i
+            if i > 0 and j < n and gap_len <= bridge_frames:  # internal gap only
+                sk[i:j] = True
+            i = j
+        else:
+            i += 1
+    longest = current = 0
+    for v in sk:
+        if v:
+            current += 1
+            if current > longest:
+                longest = current
+        else:
+            current = 0
+    return longest
+
+
+def _member_bridged_run_s(frames: np.ndarray, sk_mask: np.ndarray,
+                          fps: float, bridge_frames: int) -> float:
+    """
+    Longest bridged skeletonised run for ONE member fragment, in seconds.
+
+    frames    — frame numbers for the member's rows (sorted ascending).
+    sk_mask   — per-row boolean: True where the frame was skeletonised.
+    Builds a per-frame boolean over the member's [min, max] frame span (so a
+    Tierpsy join-gap of missing frames > bridge_frames correctly breaks the run,
+    not just unskeletonised rows), then applies _longest_skeletonized_run_frames.
+    """
+    finite = np.isfinite(frames)
+    fr = frames[finite].astype(np.int64)
     if len(fr) == 0 or fps <= 0:
         return float("nan")
-    frames = np.unique(fr.astype(np.int64))
-    best = cur = 1
-    for i in range(1, len(frames)):
-        if frames[i] == frames[i - 1] + 1:
-            cur += 1
-            if cur > best:
-                best = cur
-        else:
-            cur = 1
-    return best / fps
+    skm = sk_mask[finite]
+    f0, f1 = int(fr.min()), int(fr.max())
+    arr = np.zeros(f1 - f0 + 1, dtype=bool)
+    arr[fr[skm] - f0] = True  # mark skeletonised frames on the per-frame axis
+    return _longest_skeletonized_run_frames(arr, bridge_frames) / fps
 
 
 def _linker_log(n_fragments: int, n_groups: int, ambig_skips: int) -> dict:
@@ -171,13 +225,15 @@ def _skel_coverage_and_run(
 
     skeleton_coverage        — mean of has_skeleton across all member frames
                                (NaN if no has_skeleton column / no members).
-    longest_continuous_run_s — longest gap-free run of consecutive frames within a
-                               SINGLE member fragment (NOT bridged across members),
-                               over skeletonised frames, in seconds. The linker may
+    longest_continuous_run_s — longest skeletonised run within a SINGLE member
+                               fragment (NOT bridged across members), in seconds,
+                               where internal skeleton gaps of
+                               <= LONGEST_RUN_BRIDGE_FRAMES are treated as
+                               continuous (skeleton-fitter hiccups). The linker may
                                chain many short fragments into one identity, so the
-                               run length is taken per-member to preserve the meaning
-                               of the >=Ns gate: the worm was tracked UNBROKEN for
-                               that long.
+                               run is taken per-member to preserve the meaning of
+                               the >=Ns gate: the worm was tracked UNBROKEN (modulo
+                               sub-0.5s hiccups) for that long.
     """
     all_hs: list[np.ndarray] = []
     longest_run_s = 0.0
@@ -191,10 +247,11 @@ def _skel_coverage_and_run(
         if has_skel_col:
             hs = sub["has_skeleton"].values.astype(float)
             all_hs.append(hs)
-            good = frames[np.isfinite(hs) & (hs >= 0.5)]  # skeletonised frames only
+            sk_mask = np.isfinite(hs) & (hs >= 0.5)  # skeletonised frames only
         else:
-            good = frames  # no has_skeleton column: treat every tracked frame as good
-        run_s = _longest_run_s(good, fps)
+            # No has_skeleton column: treat every tracked frame as skeletonised.
+            sk_mask = np.ones(len(frames), dtype=bool)
+        run_s = _member_bridged_run_s(frames, sk_mask, fps, LONGEST_RUN_BRIDGE_FRAMES)
         if np.isfinite(run_s):
             longest_run_s = max(longest_run_s, run_s)
     if not have_any:
