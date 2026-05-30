@@ -29,7 +29,7 @@
     "mask_bgnd_buff_size": -1,
     "mask_bgnd_frame_gap": -1,
     "is_full_bgnd_subtraction": false,
-    "worm_bw_thresh_factor": 1.0,
+    "worm_bw_thresh_factor": 0.92,
     "strel_size": 5,
     "traj_min_area": 500,
     "traj_min_box_width": 5,
