@@ -26,6 +26,9 @@ class Settings:
     analysis_video_timeout_s: int = 600
     motility_long_threshold_s: float = 5.0
     crawling_min_track_s: int = 30
+    # Review (grid viewer) — last-used content type and video loop length.
+    review_type: str = "auto"
+    review_loop_s: float = 3.0
     # Number of videos to analyse concurrently. "auto" derives it from
     # docker info (see analysis/concurrency.py); an int overrides.
     concurrent_videos: str = "auto"
