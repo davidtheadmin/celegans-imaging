@@ -19,7 +19,11 @@ gap exclusion happens naturally; is_long is derived from track_duration_s.
 Metrics never impute across gaps: speed fractions average observed frames only,
 path length sums frame-adjacent steps only, bpm divides by valid-skeleton-frame
 seconds, and longest_continuous_run_s is the longest single member fragment
-(tolerating only sub-0.5s skeleton-fitter hiccups, see LONGEST_RUN_BRIDGE_FRAMES).
+(tolerating only sub-1s skeleton-fitter hiccups, see LONGEST_RUN_BRIDGE_FRAMES).
+Body-length-normalized speed/path companions (BL_COLS) divide each pixel metric
+by a single per-video length scalar (plate_mean_length_px, the trimmed-mean worm
+length on that plate) so cross-plate / cross-day magnification drift cancels while
+real individual worm-size variation is retained.
 
 Heavy third-party imports (numpy/pandas/h5py) live at runtime call sites so this
 module can be imported lazily by crawling.py, mirroring the other analysis
@@ -84,15 +88,82 @@ ACTIVITY_COLS: list[str] = [
 ]
 
 # Columns aggregated per condition (engine BPM metrics + kinematics) with
-# mean/median/std. ACTIVITY_COLS are aggregated separately (median only).
+# mean/median/std. ACTIVITY_COLS and BL_COLS are aggregated separately (median
+# only).
 AGG_COLS: list[str] = ["bpm", "bend_interval_cv"] + METRIC_COLS
+
+# Body-length-normalized companions to the pixel-based speed / path metrics. Each
+# is pixel_metric / plate_mean_length_px — a SINGLE per-video length scalar (the
+# trimmed mean worm length on that plate, see _plate_mean_length), NOT each worm's
+# own mean_length_px. This calibrates out plate-to-plate / day-to-day optical
+# magnification (worm length per condition drifts 50-70% across days, 12-30%
+# plate-to-plate within a day from agar-height differences) while LEAVING real
+# individual worm-size variation in the signal. Units are body-lengths-per-second
+# (BL/s) and body-lengths (BL). The activity_fraction_above_*_bls columns recompute
+# the activity fractions against BL/s thresholds (0.05 / 0.10 / 0.20 BL/s — the
+# standard C. elegans activity-level breakpoints), i.e. |speed| >= threshold *
+# plate_mean_length_px per frame. All are NaN when plate_mean_length_px could not
+# be computed. Aggregated per condition with a _median column only (like
+# ACTIVITY_COLS).
+BL_COLS: list[str] = [
+    "mean_speed_bls",
+    "mean_forward_speed_bls",
+    "mean_backward_speed_bls",
+    "mean_speed_when_moving_bls",
+    "path_length_bl",
+    "net_displacement_bl",
+    "activity_fraction_above_0p05_bls",
+    "activity_fraction_above_0p10_bls",
+    "activity_fraction_above_0p20_bls",
+]
+
+# Velocity-arrow reversal / turn columns (see ARROW_* constants and
+# _velocity_arrow_events). These sit immediately after reversal_rate_per_min for
+# side-by-side comparison with the motion_mode-based reversal_count, and are
+# aggregated per condition with a _median column only (like ACTIVITY_COLS).
+ARROW_COLS: list[str] = [
+    "arrow_reversal_count",
+    "arrow_reversal_rate_per_min",
+    "turn_count",
+    "turn_rate_per_min",
+]
+
+# Per-worm columns inserted into the sheet immediately after an anchor column for
+# readability: each BL column follows its pixel-based counterpart, and the
+# per-video plate_mean_length_px (the BL denominator, repeated for every worm in a
+# video) follows the per-worm mean_length_px it is contrasted with.
+# (anchor_col, [cols_inserted_after_it]).
+_EXTRA_AFTER: list[tuple[str, list[str]]] = [
+    ("reversal_rate_per_min", ARROW_COLS),
+    ("mean_speed_pxs", ["mean_speed_bls"]),
+    ("mean_forward_speed_pxs", ["mean_forward_speed_bls"]),
+    ("mean_backward_speed_pxs", ["mean_backward_speed_bls"]),
+    ("path_length_px", ["path_length_bl"]),
+    ("net_displacement_px", ["net_displacement_bl"]),
+    ("mean_length_px", ["plate_mean_length_px"]),
+    ("mean_speed_when_moving", ["mean_speed_when_moving_bls"]),
+    ("activity_fraction_above_5pxs",
+     ["activity_fraction_above_0p05_bls",
+      "activity_fraction_above_0p10_bls",
+      "activity_fraction_above_0p20_bls"]),
+]
+
+
+def _interleave_extra_cols(base: list[str]) -> list[str]:
+    """Insert each extra column right after its anchor column in `base`."""
+    out = list(base)
+    for anchor, extras in _EXTRA_AFTER:
+        i = out.index(anchor)
+        out[i + 1:i + 1] = extras
+    return out
+
 
 # Boolean quality flag appended to every per-worm row (see _passes_filter).
 QUALITY_COL: str = "passed_filter"
 
-PER_WORM_COLS: list[str] = (
-    ID_COLS + ENGINE_COLS + METRIC_COLS + ACTIVITY_COLS + [QUALITY_COL]
-)
+PER_WORM_COLS: list[str] = _interleave_extra_cols(
+    ID_COLS + ENGINE_COLS + METRIC_COLS + ACTIVITY_COLS
+) + [QUALITY_COL]
 
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10
@@ -106,47 +177,97 @@ _PAUSED_FRACTION_OF_MEDIAN = 0.10
 # 60 frames = 2.0s at 30fps.
 REVERSAL_PAUSE_TOLERANCE_FRAMES: int = 60
 
+# ---------------------------------------------------------------------------
+# Velocity-arrow reversal / turn detection (see _velocity_arrow_events).
+#
+# A second, motion_mode-INDEPENDENT reversal detector built from the centroid
+# velocity vector. The existing motion_mode-based reversal_count misses two
+# cases: worms twitching in place (rapid fwd<->bwd oscillation never sustains a
+# directional segment) and near-stationary worms (every frame falls below
+# Tierpsy's speed threshold and is classed "paused", so reversals read as 0). The
+# arrow method computes a centered finite-difference velocity per frame, compares
+# the heading LOOKAHEAD frames before vs after each frame, and fires an event on
+# big direction changes (>= REVERSAL_THRESHOLD_DEG = reversal; TURN..REVERSAL =
+# turn) with non-maximum suppression. These columns live ALONGSIDE the existing
+# reversal_count for at least one analysis cycle of side-by-side comparison; the
+# old metric is unchanged. Frame counts derive from these seconds via fps inside
+# the function.
+# ---------------------------------------------------------------------------
+ARROW_SMOOTH_HALF_S: float = 0.3       # centered velocity smoothing half-window
+ARROW_LOOKAHEAD_S: float = 0.5         # before/after heading comparison offset
+ARROW_EVENT_SEPARATION_S: float = 0.5  # min gap between consecutive events
+ARROW_SUSTAIN_HALF_S: float = 0.25     # local-max (NMS) half-window
+ARROW_MIN_SPEED_BL_PER_FRAME: float = 0.001  # heading undefined (NaN) below this;
+#   body-lengths/frame, scaled by plate_mean_length_px so the physical cutoff is
+#   constant across plates/days despite magnification drift. 0.001 BL/frame =
+#   0.10 px/frame at day-0 (~100 px/worm); sweep optimum (0.07-0.10 px/frame best
+#   S/N for slow reversals; <0.05 explodes with stationary-worm noise).
+_ARROW_MIN_SPEED_PX_PER_FRAME_FALLBACK: float = 0.1  # used when plate length unknown
+ARROW_REVERSAL_THRESHOLD_DEG: float = 140.0
+ARROW_TURN_THRESHOLD_DEG: float = 60.0
+
 # Internal skeleton gaps of this many frames or fewer do NOT break a worm's
 # longest_continuous_run_s. Tierpsy's skeleton fitter hiccups for a frame or two
 # every 10-20s on a cleanly-tracked worm; without bridging, those single-frame
-# dropouts shatter the run counter and reject well-tracked worms (the 903
-# regression). 15 frames = 0.5s at 30fps: well above typical 1-frame flicker,
-# well below any biologically meaningful pause. Gaps at the very start/end of a
-# fragment are NOT bridged (those are fragment boundaries, not hiccups).
-LONGEST_RUN_BRIDGE_FRAMES: int = 15
+# dropouts shatter the run counter. longest_continuous_run_s is no longer the
+# quality gate (the gate is now track span + skeleton coverage, see
+# _passes_filter), but it remains an information column, so we bridge generously:
+# 30 frames = 1.0s at 30fps captures flickers of up to a second on a worm that
+# stays the same animal at the same location, while still breaking on any longer
+# (potentially biological) pause. Gaps at the very start/end of a fragment are NOT
+# bridged (those are fragment boundaries, not hiccups).
+LONGEST_RUN_BRIDGE_FRAMES: int = 30
 
 # ---------------------------------------------------------------------------
 # Quality-filter thresholds — tune freely; raw per-worm rows are always kept,
 # so changing these and re-aggregating needs no Tierpsy re-run.
-# LONGEST_RUN_MIN_S is the fallback minimum track duration; callers may override
-# it per run (e.g. from the UI "Min track duration (s)" input) by passing
-# min_run_s through compute_crawling_metrics / aggregate_per_condition.
+# The gate is span + coverage: a worm passes if it was on the plate for
+# >= min_span_s with >= SKELETON_COVERAGE_MIN of its frames skeletonised. This
+# replaces the old "unbroken longest run >= N" gate, which rejected clearly
+# tracked but flickery worms (180s span, 80% coverage, intermittent skeleton
+# hiccups). MIN_SPAN_S is the fallback minimum span; callers may override it per
+# run (e.g. from the UI "Min track span (s)" input) by passing min_span_s through
+# compute_crawling_metrics / aggregate_per_condition.
 # ---------------------------------------------------------------------------
-LONGEST_RUN_MIN_S: float = 30.0
-SKELETON_COVERAGE_MIN: float = 0.3
+MIN_SPAN_S: float = 30.0
+SKELETON_COVERAGE_MIN: float = 0.70
+
+# ---------------------------------------------------------------------------
+# Per-video body-length calibration (see _plate_mean_length). The BL-normalized
+# columns divide by ONE length scalar per video (the plate's optical
+# magnification), not each worm's own length, so individual size variation stays
+# in the signal. The scalar is the trimmed mean of worm lengths, restricted to
+# worms tracked long enough for a stable length estimate. These are calibration
+# parameters, NOT a track-quality gate (kept worms are not used — that would bias
+# the calibration toward slower worms).
+# ---------------------------------------------------------------------------
+BL_CALIB_MIN_SPAN_S: float = 10.0   # min track span for a worm to count toward the scalar
+BL_CALIB_MIN_WORMS: int = 5         # below this many, fall back to all worms' lengths
+BL_CALIB_TRIM_FRAC: float = 0.10    # drop bottom/top 10% before averaging
 
 
-def _passes_filter(longest_continuous_run_s, skeleton_coverage,
-                   min_run_s: float | None = None) -> bool:
+def _passes_filter(track_duration_s, skeleton_coverage,
+                   min_span_s: float | None = None) -> bool:
     """
     Return True if a worm track is high-quality enough to enter the aggregate.
 
-    min_run_s overrides the minimum-duration threshold; when None (or non-finite)
-    the module-level LONGEST_RUN_MIN_S fallback is used.
+    The gate is: track span >= min_span_s AND skeleton_coverage >=
+    SKELETON_COVERAGE_MIN. min_span_s overrides the minimum-span threshold; when
+    None (or non-finite) the module-level MIN_SPAN_S fallback is used.
     """
     try:
-        run = float(longest_continuous_run_s)
+        span = float(track_duration_s)
         sc = float(skeleton_coverage)
     except (TypeError, ValueError):
         return False
     try:
-        threshold = float(min_run_s)
+        threshold = float(min_span_s)
         if not np.isfinite(threshold):
-            threshold = LONGEST_RUN_MIN_S
+            threshold = MIN_SPAN_S
     except (TypeError, ValueError):
-        threshold = LONGEST_RUN_MIN_S
+        threshold = MIN_SPAN_S
     return bool(
-        np.isfinite(run) and run >= threshold
+        np.isfinite(span) and span >= threshold
         and np.isfinite(sc) and sc >= SKELETON_COVERAGE_MIN
     )
 
@@ -154,6 +275,63 @@ def _passes_filter(longest_continuous_run_s, skeleton_coverage,
 def _mean_finite(arr: np.ndarray) -> float:
     arr = arr[np.isfinite(arr)]
     return float(np.mean(arr)) if len(arr) else float("nan")
+
+
+def _per_bodylength(value, length_px) -> float:
+    """
+    value / length_px, with NaN guards.
+
+    length_px is the per-video plate_mean_length_px (the BL denominator). Returns
+    NaN if length_px is missing, non-finite, zero/negative, or value is
+    non-finite — so every BL-normalized column is NaN-safe.
+    """
+    try:
+        ml = float(length_px)
+        v = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not (np.isfinite(ml) and ml > 0 and np.isfinite(v)):
+        return float("nan")
+    return v / ml
+
+
+def _trimmed_mean(vals: np.ndarray, trim_frac: float) -> float:
+    """
+    Mean of `vals` after dropping the lowest and highest `trim_frac` fraction.
+
+    Drops floor(n * trim_frac) values from each end (matching scipy.trim_mean). If
+    trimming would remove everything (very small n), falls back to the plain mean.
+    Returns NaN for an empty / all-non-finite input.
+    """
+    v = np.sort(vals[np.isfinite(vals)])
+    n = len(v)
+    if n == 0:
+        return float("nan")
+    k = int(np.floor(n * trim_frac))
+    core = v[k:n - k] if (n - 2 * k) > 0 else v
+    return float(np.mean(core))
+
+
+def _plate_mean_length(lengths: np.ndarray, spans: np.ndarray) -> float:
+    """
+    One per-video length scalar for BL normalization (plate optical magnification).
+
+    lengths / spans are the per-worm mean_length_px and track_duration_s for every
+    GROUPED worm in the video (NOT just kept worms — that would bias the scalar
+    toward slower movers). Worms with span >= BL_CALIB_MIN_SPAN_S are preferred
+    (their length estimate is stable); if fewer than BL_CALIB_MIN_WORMS qualify,
+    all worms' lengths are used as a fallback. The scalar is the trimmed mean
+    (BL_CALIB_TRIM_FRAC off each end) to resist developmental outliers. Returns
+    NaN if no finite lengths exist.
+    """
+    lengths = np.asarray(lengths, dtype=float)
+    spans = np.asarray(spans, dtype=float)
+    finite = np.isfinite(lengths)
+    stable = finite & np.isfinite(spans) & (spans >= BL_CALIB_MIN_SPAN_S)
+    use = lengths[stable] if int(np.sum(stable)) >= BL_CALIB_MIN_WORMS else lengths[finite]
+    if len(use) == 0:
+        return float("nan")
+    return _trimmed_mean(use, BL_CALIB_TRIM_FRAC)
 
 
 def _longest_skeletonized_run_frames(has_skeleton: np.ndarray,
@@ -301,9 +479,10 @@ def _skel_coverage_and_run(
                                <= LONGEST_RUN_BRIDGE_FRAMES are treated as
                                continuous (skeleton-fitter hiccups). The linker may
                                chain many short fragments into one identity, so the
-                               run is taken per-member to preserve the meaning of
-                               the >=Ns gate: the worm was tracked UNBROKEN (modulo
-                               sub-0.5s hiccups) for that long.
+                               run is taken per-member: it reports how long the worm
+                               was tracked UNBROKEN (modulo sub-1s hiccups). This is
+                               now an information column only — the quality gate
+                               uses track span + coverage, not this run.
     """
     all_hs: list[np.ndarray] = []
     longest_run_s = 0.0
@@ -380,6 +559,164 @@ def _combined_path_geometry(member_ids: list[int],
     return path_length_px, net_displacement_px, tortuosity
 
 
+def _combined_centroid_track(
+    member_ids: list[int], skel_by_worm: dict,
+) -> tuple[int | None, np.ndarray, np.ndarray]:
+    """
+    Dense per-frame centroid (coord_x / coord_y) track for a grouped worm.
+
+    Sourced from the *_skeletons.hdf5 trajectories_data (skel_by_worm) — the SAME
+    table and coordinate space the renderer plots on — so the velocity arrow lines
+    up with the rendered video frames (indexed by frame_number). Concatenates the
+    member fragments' centroids and lays them onto a contiguous per-frame axis
+    spanning [f0, f1]; frames with no centroid (gaps within or between fragments)
+    stay NaN and are NEVER interpolated, so the velocity arrow and its derived
+    events propagate NaN across gaps. Returns (f0, x_dense, y_dense); f0 is None
+    (arrays empty) when no finite centroid exists or coord columns are absent.
+    """
+    fxy: list[tuple[int, float, float]] = []
+    for mid in member_ids:
+        sub = skel_by_worm.get(int(mid))
+        if sub is None or "coord_x" not in sub.columns or "coord_y" not in sub.columns:
+            continue
+        fr = sub["frame_number"].values.astype(float)
+        cx = sub["coord_x"].values.astype(float)
+        cy = sub["coord_y"].values.astype(float)
+        m = np.isfinite(fr) & np.isfinite(cx) & np.isfinite(cy)
+        for f, x, y in zip(fr[m], cx[m], cy[m]):
+            fxy.append((int(f), float(x), float(y)))
+    if not fxy:
+        return None, np.array([], dtype=float), np.array([], dtype=float)
+    f0 = min(t[0] for t in fxy)
+    f1 = max(t[0] for t in fxy)
+    x_dense = np.full(f1 - f0 + 1, np.nan)
+    y_dense = np.full(f1 - f0 + 1, np.nan)
+    for f, x, y in fxy:
+        x_dense[f - f0] = x  # last write wins on the (rare) duplicate frame
+        y_dense[f - f0] = y
+    return f0, x_dense, y_dense
+
+
+def _velocity_arrow_events(x: np.ndarray, y: np.ndarray, fps: float,
+                           plate_mean_length_px: float | None = None) -> dict:
+    """
+    Centered velocity arrow + reversal / turn event detection on a centroid track.
+
+    x / y are DENSE per-frame centroid arrays (NaN at gaps; index 0 == the track's
+    f0). Returns a dict with:
+      vx, vy                      — per-frame centered-difference velocity (px/frame),
+                                    NaN where either centered endpoint is NaN/off-array.
+      reversal_offsets/turn_offsets — event indices into the dense arrays (add f0
+                                    for absolute frame numbers).
+      reversal_count / turn_count — event counts.
+      reversal_rate_per_min / turn_rate_per_min — events per OBSERVED minute, where
+                                    observed_s = (# finite-velocity frames) / fps;
+                                    NaN if that is 0.
+
+    Method (all windows derive from fps):
+      1. velocity arrow: centered finite difference over ±SMOOTH_HALF frames, so
+         the arrow reflects motion AT frame i (not a past-only lag).
+      2. heading change: angle between the unit velocity LOOKAHEAD frames before
+         and after i; NaN when either side's speed < MIN_SPEED_PX_PER_FRAME.
+      3. events: walk the angle array, keep a local maximum >= TURN_THRESHOLD_DEG
+         separated from the last event by >= EVENT_SEPARATION frames (NMS), classed
+         reversal (>= REVERSAL_THRESHOLD_DEG) or turn otherwise.
+    """
+    n = len(x)
+    vx = np.full(n, np.nan)
+    vy = np.full(n, np.nan)
+    empty = {
+        "vx": vx, "vy": vy,
+        "reversal_offsets": [], "turn_offsets": [],
+        "reversal_count": 0, "turn_count": 0,
+        "reversal_rate_per_min": float("nan"), "turn_rate_per_min": float("nan"),
+    }
+    if n == 0 or not (fps > 0):
+        return empty
+
+    # Body-length-relative minimum speed: convert BL/frame -> px/frame using the
+    # per-video plate scalar so the physical cutoff is constant across plates/days
+    # (magnification drift no longer biases which motions count). Fall back to a
+    # fixed px/frame value when calibration is unavailable.
+    if (plate_mean_length_px is None or not np.isfinite(plate_mean_length_px)
+            or plate_mean_length_px <= 0):
+        min_speed_px_per_frame = _ARROW_MIN_SPEED_PX_PER_FRAME_FALLBACK
+    else:
+        min_speed_px_per_frame = ARROW_MIN_SPEED_BL_PER_FRAME * plate_mean_length_px
+
+    # --- Step 1: centered finite-difference velocity arrow ---
+    sh = max(3, int(round(ARROW_SMOOTH_HALF_S * fps)))
+    idx = np.arange(n)
+    a = idx - sh
+    b = idx + sh
+    inb = (a >= 0) & (b < n)
+    ia = a[inb]
+    ib = b[inb]
+    fin = (np.isfinite(x[ia]) & np.isfinite(x[ib])
+           & np.isfinite(y[ia]) & np.isfinite(y[ib]))
+    pos = idx[inb][fin]
+    vx[pos] = (x[ib][fin] - x[ia][fin]) / (2.0 * sh)
+    vy[pos] = (y[ib][fin] - y[ia][fin]) / (2.0 * sh)
+
+    # --- Step 2: lookahead-based heading change (degrees) ---
+    look = max(1, int(round(ARROW_LOOKAHEAD_S * fps)))
+    angle = np.full(n, np.nan)
+    if n - 2 * look > 0:
+        c = np.arange(look, n - look)
+        v0x = vx[c - look]; v0y = vy[c - look]
+        v1x = vx[c + look]; v1y = vy[c + look]
+        s0 = np.hypot(v0x, v0y)
+        s1 = np.hypot(v1x, v1y)
+        good = (np.isfinite(s0) & np.isfinite(s1)
+                & (s0 >= min_speed_px_per_frame)
+                & (s1 >= min_speed_px_per_frame))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            dot = (v0x * v1x + v0y * v1y) / (s0 * s1)
+        dot = np.clip(dot, -1.0, 1.0)
+        ang = np.degrees(np.arccos(dot))
+        angle[c[good]] = ang[good]
+
+    # --- Step 3: event detection with non-maximum suppression ---
+    sep = max(1, int(round(ARROW_EVENT_SEPARATION_S * fps)))
+    sustain = max(1, int(round(ARROW_SUSTAIN_HALF_S * fps)))
+    reversal_offsets: list[int] = []
+    turn_offsets: list[int] = []
+    last_event = -(10 ** 9)
+    for i in range(n):
+        ai = angle[i]
+        if not np.isfinite(ai) or ai < ARROW_TURN_THRESHOLD_DEG:
+            continue
+        if i - last_event < sep:
+            continue
+        lo = max(0, i - sustain)
+        hi = min(n, i + sustain)
+        win = angle[lo:hi]
+        if np.any(np.isfinite(win)) and ai < np.nanmax(win):
+            continue  # not a local maximum
+        if ai >= ARROW_REVERSAL_THRESHOLD_DEG:
+            reversal_offsets.append(i)
+        else:
+            turn_offsets.append(i)
+        last_event = i
+
+    # --- Step 4: per-minute rates over observed (finite-velocity) seconds ---
+    n_finite = int(np.sum(np.isfinite(vx)))
+    observed_s = n_finite / fps
+    if observed_s > 0:
+        rev_rate = len(reversal_offsets) / observed_s * 60.0
+        turn_rate = len(turn_offsets) / observed_s * 60.0
+    else:
+        rev_rate = float("nan")
+        turn_rate = float("nan")
+
+    return {
+        "vx": vx, "vy": vy,
+        "reversal_offsets": reversal_offsets, "turn_offsets": turn_offsets,
+        "reversal_count": len(reversal_offsets), "turn_count": len(turn_offsets),
+        "reversal_rate_per_min": rev_rate, "turn_rate_per_min": turn_rate,
+    }
+
+
 def compute_crawling_metrics(
     hdf5_path: Path,
     fps: float,
@@ -388,7 +725,7 @@ def compute_crawling_metrics(
     video_name: str,
     head_angle_prominence: float = 0.30,
     long_threshold_s: float = 5.0,
-    min_run_s: float | None = None,
+    min_span_s: float | None = None,
     engine_log_out: dict | None = None,
 ) -> list[dict]:
     """
@@ -406,9 +743,9 @@ def compute_crawling_metrics(
     renderer; it is intentionally absent from PER_WORM_COLS.
 
     Returns an empty list (and logs) if the linker produced no groups or
-    timeseries_data cannot be read. long_threshold_s drives is_long; min_run_s
-    sets the passed_filter minimum-duration threshold (None falls back to
-    LONGEST_RUN_MIN_S). When engine_log_out is provided, a linker analysis_log
+    timeseries_data cannot be read. long_threshold_s drives is_long; min_span_s
+    sets the passed_filter minimum-span threshold (None falls back to
+    MIN_SPAN_S). When engine_log_out is provided, a linker analysis_log
     (input_track_count, groups_formed, worms_dropped, ambiguity_skips) is copied
     into it so callers can surface grouping diagnostics.
     """
@@ -517,6 +854,7 @@ def compute_crawling_metrics(
     group_list.sort(key=lambda t: (t[0], t[1]))
 
     rows: list[dict] = []
+    abs_speed_by_row: list[np.ndarray] = []
     for _first_fstart, gid, member_ids in group_list:
         repr_id = member_ids[0]
 
@@ -556,11 +894,18 @@ def compute_crawling_metrics(
                       if "length" in g.columns else np.array([], dtype=float))
         length_arr = length_arr[np.isfinite(length_arr)]
         if len(length_arr):
-            mean_length = float(np.nanmean(length_arr))
-            length_cv = (float(np.nanstd(length_arr) / mean_length)
-                         if mean_length > 0 else float("nan"))
+            mean_length_px = float(np.nanmean(length_arr))
+            length_cv = (float(np.nanstd(length_arr) / mean_length_px)
+                         if mean_length_px > 0 else float("nan"))
         else:
+            mean_length_px = float("nan")
             length_cv = float("nan")
+
+        # --- pixel speed scalars (BL companions are filled in a second pass once
+        # the per-video plate_mean_length_px is known — see below the loop). ---
+        mean_speed_pxs = _mean_finite(abs_speed)
+        mean_forward_speed_pxs = float(np.mean(fwd)) if len(fwd) else 0.0
+        mean_backward_speed_pxs = float(np.mean(np.abs(bwd))) if len(bwd) else 0.0
 
         # --- reversal_count + reversal_frames: forward->backward transitions ---
         # Build a per-FRAME motion_mode array over the worm's [f0, f1] span:
@@ -621,6 +966,15 @@ def compute_crawling_metrics(
             skel_by_worm, member_ids, fps, has_skel_col
         )
 
+        # --- velocity-arrow reversal / turn detection (motion_mode-independent) ---
+        # Built on the dense centroid track from *_skeletons.hdf5 (same source the
+        # renderer plots). Event offsets are indices into the dense array; add
+        # arrow_f0 for absolute frame numbers (passed to the renderer below).
+        # Only the dense centroid track is built here; the velocity-arrow EVENTS
+        # need the per-video plate_mean_length_px (BL-relative speed cutoff), which
+        # is computed after this loop, so they are filled in the second pass below.
+        arrow_f0, arrow_x, arrow_y = _combined_centroid_track(member_ids, skel_by_worm)
+
         # --- head-angle bpm + bend_interval_cv over the concatenated members ---
         # Observed-frame-only: each member's signal contributes its valid
         # skeleton frames; bpm divides by valid-frame seconds so gaps (within or
@@ -660,9 +1014,9 @@ def compute_crawling_metrics(
             "bpm": bpm,
             "bend_interval_cv": bend_cv,
             "is_long": is_long,
-            "mean_speed_pxs": _mean_finite(abs_speed),
-            "mean_forward_speed_pxs": (float(np.mean(fwd)) if len(fwd) else 0.0),
-            "mean_backward_speed_pxs": (float(np.mean(np.abs(bwd))) if len(bwd) else 0.0),
+            "mean_speed_pxs": mean_speed_pxs,
+            "mean_forward_speed_pxs": mean_forward_speed_pxs,
+            "mean_backward_speed_pxs": mean_backward_speed_pxs,
             "fraction_forward": (float(np.mean(speed > 0)) if n else float("nan")),
             "fraction_backward": (float(np.mean(speed < 0)) if n else float("nan")),
             "fraction_paused": (float(np.mean(abs_speed < paused_threshold))
@@ -672,8 +1026,7 @@ def compute_crawling_metrics(
             "path_length_px": path_length_px,
             "net_displacement_px": net_displacement_px,
             "tortuosity": tortuosity,
-            "mean_length_px": (_mean_finite(g["length"].values.astype(float))
-                               if "length" in g.columns else float("nan")),
+            "mean_length_px": mean_length_px,
             "mean_width_midbody_px": (_mean_finite(g["width_midbody"].values.astype(float))
                                       if "width_midbody" in g.columns else float("nan")),
             "track_duration_s": track_duration_s,
@@ -686,32 +1039,86 @@ def compute_crawling_metrics(
             "speed_cv": speed_cv,
             "length_cv": length_cv,
             "passed_filter": _passes_filter(
-                longest_continuous_run_s, skeleton_coverage, min_run_s
+                track_duration_s, skeleton_coverage, min_span_s
             ),
-            # Renderer-only (not a spreadsheet column).
+            # Renderer-only (not spreadsheet columns; dropped by the PER_WORM_COLS
+            # DataFrame projection). reversal_frames drives the path-traces flash;
+            # arrow_* feed the velocity-arrow overlay + event markers. arrow_x/y/vx/vy
+            # are dense per-frame arrays starting at frame arrow_f0.
             "reversal_frames": reversal_frames,
+            "arrow_f0": arrow_f0,
+            "arrow_x": arrow_x,
+            "arrow_y": arrow_y,
+            # arrow_vx/vy + arrow_*_event_frames + the arrow_* metric columns are
+            # filled in the second pass (need plate_mean_length_px).
         })
+        # Retain each worm's per-frame |speed| (aligned with rows) so the BL
+        # activity fractions can be recomputed against the per-video scalar below.
+        abs_speed_by_row.append(abs_speed)
+
+    # --- Second pass: per-video body-length calibration ---------------------
+    # One length scalar for the whole video (plate optical magnification), used as
+    # the denominator for every BL column so individual worm-size variation is NOT
+    # divided out. Computed from ALL grouped worms (not just kept ones) — see
+    # _plate_mean_length. Repeated into every row as plate_mean_length_px.
+    lengths = np.array([r["mean_length_px"] for r in rows], dtype=float)
+    spans = np.array([r["track_duration_s"] for r in rows], dtype=float)
+    plate_mean_length_px = _plate_mean_length(lengths, spans)
+    for r, absx in zip(rows, abs_speed_by_row):
+        r["plate_mean_length_px"] = plate_mean_length_px
+        # Velocity-arrow reversal / turn events, now that the per-video plate scalar
+        # is known (BL-relative speed cutoff). vx/vy come from the same call and do
+        # not depend on the cutoff. Offsets are indices into the dense centroid
+        # track; add arrow_f0 for absolute frame numbers (consumed by the renderer).
+        av = _velocity_arrow_events(r["arrow_x"], r["arrow_y"], fps, plate_mean_length_px)
+        af0 = r["arrow_f0"]
+        r["arrow_reversal_count"] = av["reversal_count"]
+        r["arrow_reversal_rate_per_min"] = av["reversal_rate_per_min"]
+        r["turn_count"] = av["turn_count"]
+        r["turn_rate_per_min"] = av["turn_rate_per_min"]
+        r["arrow_vx"] = av["vx"]
+        r["arrow_vy"] = av["vy"]
+        if af0 is not None:
+            r["arrow_reversal_event_frames"] = [af0 + o for o in av["reversal_offsets"]]
+            r["arrow_turn_event_frames"] = [af0 + o for o in av["turn_offsets"]]
+        else:
+            r["arrow_reversal_event_frames"] = []
+            r["arrow_turn_event_frames"] = []
+        r["mean_speed_bls"] = _per_bodylength(r["mean_speed_pxs"], plate_mean_length_px)
+        r["mean_forward_speed_bls"] = _per_bodylength(r["mean_forward_speed_pxs"], plate_mean_length_px)
+        r["mean_backward_speed_bls"] = _per_bodylength(r["mean_backward_speed_pxs"], plate_mean_length_px)
+        r["mean_speed_when_moving_bls"] = _per_bodylength(r["mean_speed_when_moving"], plate_mean_length_px)
+        r["path_length_bl"] = _per_bodylength(r["path_length_px"], plate_mean_length_px)
+        r["net_displacement_bl"] = _per_bodylength(r["net_displacement_px"], plate_mean_length_px)
+        if len(absx) and np.isfinite(plate_mean_length_px) and plate_mean_length_px > 0:
+            r["activity_fraction_above_0p05_bls"] = float(np.mean(absx >= 0.05 * plate_mean_length_px))
+            r["activity_fraction_above_0p10_bls"] = float(np.mean(absx >= 0.10 * plate_mean_length_px))
+            r["activity_fraction_above_0p20_bls"] = float(np.mean(absx >= 0.20 * plate_mean_length_px))
+        else:
+            r["activity_fraction_above_0p05_bls"] = float("nan")
+            r["activity_fraction_above_0p10_bls"] = float("nan")
+            r["activity_fraction_above_0p20_bls"] = float("nan")
 
     return rows
 
 
 def aggregate_per_condition(per_worm_rows: list[dict],
-                            min_run_s: float | None = None) -> list[dict]:
+                            min_span_s: float | None = None) -> list[dict]:
     """
     Aggregate per-worm rows into one row per condition.
 
-    Low-quality tracks (see _passes_filter / LONGEST_RUN_MIN_S /
+    Low-quality tracks (see _passes_filter / MIN_SPAN_S /
     SKELETON_COVERAGE_MIN) are dropped before computing metric aggregates.
-    The filter is recomputed here from the raw longest_continuous_run_s /
+    The filter is recomputed here from the raw track_duration_s /
     skeleton_coverage columns, so thresholds can be re-tuned on a saved
-    per_worm table without re-running Tierpsy. min_run_s overrides the
-    minimum-duration threshold (must match the value used to build the
-    per_worm passed_filter column); None falls back to LONGEST_RUN_MIN_S.
+    per_worm table without re-running Tierpsy. min_span_s overrides the
+    minimum-span threshold (must match the value used to build the
+    per_worm passed_filter column); None falls back to MIN_SPAN_S.
 
     Each condition row reports n_worms_total (before filtering),
     n_worms_kept (after filtering), and mean / median / std of every AGG_COLS
     metric computed only on the kept worms, plus a median-only column for each
-    ACTIVITY_COLS metric.
+    ACTIVITY_COLS and BL_COLS metric.
     """
     import pandas as pd
 
@@ -724,8 +1131,8 @@ def aggregate_per_condition(per_worm_rows: list[dict],
         cdf = df[df["condition"].astype(str) == cond]
         passed_mask = cdf.apply(
             lambda r: _passes_filter(
-                r.get("longest_continuous_run_s"), r.get("skeleton_coverage"),
-                min_run_s,
+                r.get("track_duration_s"), r.get("skeleton_coverage"),
+                min_span_s,
             ),
             axis=1,
         )
@@ -749,8 +1156,9 @@ def aggregate_per_condition(per_worm_rows: list[dict],
                 agg[f"{col}_mean"] = None
                 agg[f"{col}_median"] = None
                 agg[f"{col}_std"] = None
-        # Activity / variability metrics: median only.
-        for col in ACTIVITY_COLS:
+        # Activity / variability + body-length-normalized + velocity-arrow
+        # metrics: median only.
+        for col in ACTIVITY_COLS + BL_COLS + ARROW_COLS:
             if col in kept.columns:
                 vals = pd.to_numeric(kept[col], errors="coerce").values.astype(float)
                 vals = vals[np.isfinite(vals)]

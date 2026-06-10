@@ -47,7 +47,7 @@ _LABELS: dict[str, str] = {
 def make_crawling_overview_png(
     per_worm_rows: list[dict],
     out_path: Path,
-    min_run_s: float,
+    min_span_s: float,
     elapsed_s: float | None = None,
 ) -> None:
     """
@@ -94,7 +94,7 @@ def make_crawling_overview_png(
     )
 
     n_worms_total = len(kept)
-    title = f"Crawling overview — {len(conditions)} condition(s), {n_worms_total} worms kept (≥{min_run_s:.0f}s)"
+    title = f"Crawling overview — {len(conditions)} condition(s), {n_worms_total} worms kept (span ≥{min_span_s:.0f}s)"
     if elapsed_s is not None:
         title += f", {elapsed_s / 60:.1f} min"
     fig.suptitle(title, fontsize=12)

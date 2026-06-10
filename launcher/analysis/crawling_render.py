@@ -144,6 +144,7 @@ def render_path_traces(
     window_s: float = 10.0,
     worm_index_map: "dict[int, int] | None" = None,
     reversal_frames: "dict[int, list] | None" = None,
+    arrow_data: "dict[int, dict] | None" = None,
 ) -> None:
     """
     Render an MP4 (same fps + resolution as source) showing each worm's recent
@@ -160,9 +161,16 @@ def render_path_traces(
     reversal_frames maps a grouped worm_index to the list of frame numbers where
     that worm reversed; at those frames (±_FLASH_HALF_S) a bright ring pulses on
     the worm's current centroid.
+
+    arrow_data (optional) draws a per-frame velocity arrow per kept worm — the
+    SAME overlay as the tracked render, but arrows ONLY (no reversal/turn event
+    markers: the path-traces video is already dense with trail content, so flashing
+    markers would clutter; the clean directional arrow stays).
     """
     import cv2
     import pandas as pd
+
+    from analysis.render_video import _prepare_arrow_worms, _draw_arrows_and_markers
 
     log.info("Starting render: %s", out_path)
 
@@ -228,6 +236,8 @@ def render_path_traces(
             if frames:
                 rev_by_worm[int(gi)] = np.sort(np.asarray(frames, dtype=np.int64))
 
+    arrow_worms = _prepare_arrow_worms(arrow_data)
+
     window = max(1, int(round(window_s * fps)))
     flash_half = max(2, int(round(_FLASH_HALF_S * fps)))
 
@@ -291,6 +301,11 @@ def render_path_traces(
                     # Current centroid marker + stable worm-index label.
                     cv2.circle(base, cur, 4, color, -1, cv2.LINE_AA)
                     _draw_label(base, str(w), cur, color)
+
+                # Velocity arrows only (no event markers — see docstring).
+                if arrow_worms:
+                    _draw_arrows_and_markers(base, arrow_worms, frame_num,
+                                             marker_duration=0, draw_markers=False)
 
                 pipe.write(base.tobytes())
                 frame_num += 1

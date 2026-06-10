@@ -11,7 +11,14 @@ _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 def find_videos(folder: Path, max_depth: int = _MAX_DEPTH) -> list[Path]:
-    """Recursively find .mp4 files up to max_depth levels deep, skipping _ prefixed dirs."""
+    """Recursively find .mp4 files up to max_depth levels deep, skipping dirs
+    whose name starts with '_' or '.'.
+
+    '_' marks pipeline-generated dirs (_wormscan_cache/, _crawling_analysis_*/);
+    '.' marks hidden caches that follow the Unix convention (.viewer_cache/,
+    .trash/, .thumbs/, .git/). Descending into either would process preview clips
+    / cached artifacts as if they were experiment videos.
+    """
     results: list[Path] = []
 
     def _recurse(path: Path, depth: int) -> None:
@@ -21,7 +28,9 @@ def find_videos(folder: Path, max_depth: int = _MAX_DEPTH) -> list[Path]:
             for child in sorted(path.iterdir()):
                 if child.is_file() and child.suffix.lower() == ".mp4":
                     results.append(child)
-                elif child.is_dir() and not child.name.startswith("_"):
+                elif child.is_dir() and not (
+                    child.name.startswith("_") or child.name.startswith(".")
+                ):
                     _recurse(child, depth + 1)
         except PermissionError:
             pass

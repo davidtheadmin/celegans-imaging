@@ -143,8 +143,32 @@ PHASE2_EXTRA_METRIC_COLS: list[str] = [
 # worm_bw_thresh_factor baseline = 1.05, strel_size baseline = 5 in motility_params.json;
 # Tierpsy defaults are ~1.0 and ~3 (covered by the sanity-check run).
 SWEEP_PARAMS_3: list[tuple[str, list]] = [
-    ("worm_bw_thresh_factor", [0.7, 0.85, 1.15, 1.3]),
+    # ("worm_bw_thresh_factor", [0.7, 0.85, 1.15, 1.3]),
     ("strel_size",            [1,   5,    7         ]),
+]
+
+# Phase 3c: CRAWLING segmentation sweep — target fragmentation root cause.
+# Diagnostic on a 0J day-0 video showed 36 of 40 mid-video trajectory breaks
+# happen with the worm's measured area in [500, 600] against mask_min_area=500.
+# The blob-area distribution is jammed against the floor (p1 = 504, median = 612).
+# This sweep widens segmentation to keep blobs alive through thinning turns.
+# Baselines (from crawling_params.json):
+#   mask_min_area=500, thresh_C=5, thresh_block_size=31, worm_bw_thresh_factor=1.0
+SWEEP_PARAMS_3C: list[tuple[str, list]] = [
+    ("mask_min_area",         [200, 300, 400, 500]),  # 500 = baseline (dedups out)
+    ("thresh_C",              [3,   5,   8,   10 ]),  # 5   = baseline
+    ("thresh_block_size",     [31,  51,  61      ]),  # 31  = baseline
+    ("worm_bw_thresh_factor", [0.95, 1.0, 1.05   ]),  # 1.0 = baseline
+]
+
+# Phase 3c1d: 1D plateau check on worm_bw_thresh_factor.
+# Phase 3c showed worm_bw_thresh_factor=0.95 is a massive win (total_seconds_in_10s_runs
+# 267 → 419, fragments 45 → 16). Phase 3c1d probes whether 0.95 is the optimum or just
+# the best of three samples — i.e. does the curve keep improving below 0.95, or plateau,
+# or fall off a cliff. Baseline here is crawling_params.json's current value (1.0)
+# unless you've already committed 0.95 as the new baseline, in which case dedup handles it.
+SWEEP_PARAMS_3C1D: list[tuple[str, list]] = [
+    ("worm_bw_thresh_factor", [0.80, 0.85, 0.90, 0.92, 0.95, 0.98]),
 ]
 
 METRIC_COLS: list[str] = [
@@ -155,7 +179,11 @@ METRIC_COLS: list[str] = [
     "fragments_with_5s_continuous",
     "fragments_with_10s_continuous",
     "fragments_with_15s_continuous",
+    "fragments_with_30s_continuous",
+    "fragments_with_60s_continuous",
     "total_seconds_in_10s_runs",
+    "total_seconds_in_30s_runs",
+    "total_seconds_in_60s_runs",
     "bpm_mean",
     "bpm_median",
     "bpm_std",
@@ -220,6 +248,34 @@ def build_run_plan(
 # ---------------------------------------------------------------------------
 # Tierpsy invocation — custom two-path layout for the sweep
 # ---------------------------------------------------------------------------
+
+def _trim_video(src: Path, dst: Path, start_frame: int, end_frame: int) -> None:
+    """
+    Frame-accurate trim of src MP4 to dst MP4, keeping frames [start_frame, end_frame] inclusive.
+    Uses an ffmpeg select filter — slower than -ss keyframe seek but exact, which we need
+    so the run is measured on a known frame range. Re-encodes to H.264 to keep MJPEG
+    conversion downstream simple.
+    """
+    if dst.exists():
+        log.info("Trimmed clip already exists, skipping trim: %s", dst)
+        return
+    cmd = [
+        "ffmpeg", "-y", "-i", str(src),
+        "-vf", f"select=between(n\\,{start_frame}\\,{end_frame}),setpts=PTS-STARTPTS",
+        "-an",                       # drop audio
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        str(dst),
+    ]
+    print(f"  trimming frames {start_frame}..{end_frame} → {dst.name}", flush=True)
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, creationflags=_NO_WINDOW,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg trim failed:\n{result.stderr.strip()[-1000:]}"
+        )
+
 
 def _run_tierpsy_sweep(
     sweep_root: Path,
@@ -341,8 +397,10 @@ def compute_metrics(featuresN_path: Path, fps: float, head_angle_prominence: flo
 
     frag_durations: list[float] = []
     frag_valid_fracs: list[float] = []
-    frags_5s = frags_10s = frags_15s = 0
+    frags_5s = frags_10s = frags_15s = frags_30s = frags_60s = 0
     total_seconds_10s = 0.0
+    total_seconds_30s = 0.0
+    total_seconds_60s = 0.0
     bpms: list[float] = []
 
     for _wi, grp in traj.groupby("worm_index_joined"):
@@ -368,7 +426,13 @@ def compute_metrics(featuresN_path: Path, fps: float, head_angle_prominence: flo
             frags_10s += 1
         if any(s >= 15.0 for s in run_secs):
             frags_15s += 1
+        if any(s >= 30.0 for s in run_secs):
+            frags_30s += 1
+        if any(s >= 60.0 for s in run_secs):
+            frags_60s += 1
         total_seconds_10s += sum(s for s in run_secs if s >= 10.0)
+        total_seconds_30s += sum(s for s in run_secs if s >= 30.0)
+        total_seconds_60s += sum(s for s in run_secs if s >= 60.0)
 
         # BPM for fragments with ≥5 s of valid-skeleton data.
         if valid.sum() / fps >= 5.0:
@@ -384,7 +448,11 @@ def compute_metrics(featuresN_path: Path, fps: float, head_angle_prominence: flo
         "fragments_with_5s_continuous": frags_5s,
         "fragments_with_10s_continuous": frags_10s,
         "fragments_with_15s_continuous": frags_15s,
+        "fragments_with_30s_continuous": frags_30s,
+        "fragments_with_60s_continuous": frags_60s,
         "total_seconds_in_10s_runs": round(total_seconds_10s, 2),
+        "total_seconds_in_30s_runs": round(total_seconds_30s, 2),
+        "total_seconds_in_60s_runs": round(total_seconds_60s, 2),
         "bpm_mean": float(np.mean(bpms)) if bpms else nan,
         "bpm_median": float(np.median(bpms)) if bpms else nan,
         "bpm_std": float(np.std(bpms)) if bpms else nan,
@@ -724,8 +792,15 @@ def main() -> None:
     parser.add_argument("--sweep-root", default=None,
                         help="Output directory "
                              "(default: <video_dir>/sweep_phase<N>_<UTC_timestamp>/)")
-    parser.add_argument("--phase", default="1", choices=["1", "1b", "1c", "1d", "2", "3"],
-                        help="Sweep phase: '1' (default), '1b', '1c', '1d', '2', or '3'")
+    parser.add_argument("--phase", default="1", choices=["1", "1b", "1c", "1d", "2", "3", "3c", "3c1d"],
+                        help="Sweep phase: '1' (default), '1b', '1c', '1d', '2', '3' (motility seg), "
+                             "'3c' (crawling seg), or '3c1d' (crawling worm_bw_thresh_factor plateau)")
+    parser.add_argument("--trim-start-frame", type=int, default=None,
+                        help="Optional: trim input video to start at this frame (inclusive, 0-indexed). "
+                             "Original video is not modified; trimmed clip is written into the sweep root.")
+    parser.add_argument("--trim-end-frame", type=int, default=None,
+                        help="Optional: trim input video to end at this frame (inclusive). "
+                             "Must be set together with --trim-start-frame.")
     args = parser.parse_args()
 
     phase = args.phase
@@ -736,6 +811,24 @@ def main() -> None:
             sys.exit(f"Video not found: {vp}")
     # For single-video phases use the first (and only expected) path.
     video_path = video_paths[0]
+
+    # Validate trim flags: both or neither.
+    trim_start = args.trim_start_frame
+    trim_end = args.trim_end_frame
+    if (trim_start is None) != (trim_end is None):
+        sys.exit("--trim-start-frame and --trim-end-frame must be set together")
+    if trim_start is not None and trim_end is not None:
+        if trim_start < 0 or trim_end < trim_start:
+            sys.exit(f"Invalid trim range: [{trim_start}, {trim_end}]")
+        if phase == "2":
+            sys.exit("--trim-* is not supported with --phase 2 (multi-video)")
+
+    # Phase 3c and 3c1d target crawling — auto-switch base-params unless user overrode it.
+    user_set_base_params = "--base-params" in sys.argv
+    if phase in ("3c", "3c1d") and not user_set_base_params:
+        crawling_default = Path(__file__).parent.parent / "crawling_params.json"
+        if crawling_default.exists():
+            args.base_params = str(crawling_default)
 
     base_params_path = Path(args.base_params).resolve()
     if not base_params_path.exists():
@@ -756,6 +849,12 @@ def main() -> None:
         base_overrides = None
     elif phase == "3":
         sweep_params = SWEEP_PARAMS_3
+        base_overrides = None
+    elif phase == "3c":
+        sweep_params = SWEEP_PARAMS_3C
+        base_overrides = None
+    elif phase == "3c1d":
+        sweep_params = SWEEP_PARAMS_3C1D
         base_overrides = None
     else:
         sweep_params = SWEEP_PARAMS_1
@@ -780,6 +879,16 @@ def main() -> None:
     if base_overrides:
         print(f"Overrides:   {base_overrides}")
 
+    # Trim (single-video phases only — guarded above for phase 2).
+    if trim_start is not None and trim_end is not None:
+        n_frames = trim_end - trim_start + 1
+        print(f"Trim:        frames {trim_start}..{trim_end} ({n_frames} frames)")
+        trimmed_path = sweep_root / f"_trimmed_{video_path.stem}_f{trim_start}-{trim_end}.mp4"
+        _trim_video(video_path, trimmed_path, trim_start, trim_end)
+        video_path = trimmed_path
+        video_paths = [trimmed_path]
+        print(f"             using trimmed clip: {trimmed_path.name}")
+
     base_params = json.loads(base_params_path.read_text(encoding="utf-8"))
     head_angle_prominence = float(base_params.get("head_angle_prominence", 0.30))
 
@@ -800,8 +909,8 @@ def main() -> None:
     # Build run plan (shared across all videos for phase 2).
     runs = build_run_plan(base_params, sweep_params, base_overrides)
 
-    # Phase 1d, 2, 3: append sanity-check run using Tierpsy bare defaults.
-    if phase in ("1d", "2", "3"):
+    # Phase 1d, 2, 3, 3c, 3c1d: append sanity-check run using Tierpsy bare defaults.
+    if phase in ("1d", "2", "3", "3c", "3c1d"):
         print("\nQuerying Tierpsy defaults for sanity-check run…", flush=True)
         tierpsy_defaults = _tierpsy_default_params(tierpsy_image, docker_cmd)
         runs.append({
@@ -868,7 +977,7 @@ def main() -> None:
         return
 
     # ---------------------------------------------------------------------------
-    # Single-video execution (phases 1, 1b, 1c, 1d)
+    # Single-video execution (phases 1, 1b, 1c, 1d, 3, 3c)
     # ---------------------------------------------------------------------------
 
     # Probe FPS.
@@ -886,7 +995,7 @@ def main() -> None:
                  phase=phase, base_overrides=base_overrides)
 
     # Execute all runs sequentially.
-    use_extra_metrics = phase in ("3",)
+    use_extra_metrics = phase in ("3", "3c", "3c1d")
     print(f"\nRunning {len(runs)} Tierpsy jobs…\n")
     single_rows: list[dict] = []
     for i, run in enumerate(runs):

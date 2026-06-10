@@ -53,6 +53,125 @@ def _worm_color(worm_index: int) -> tuple[int, int, int]:
     return _WORM_PALETTE[int(worm_index) % len(_WORM_PALETTE)]
 
 
+# ---------------------------------------------------------------------------
+# Velocity-arrow + reversal/turn-event overlay (crawling pipeline).
+#
+# arrow_data maps a grouped worm_index to a dict of dense per-frame centroid /
+# velocity arrays plus event-frame lists (see crawling_metrics._velocity_arrow_*):
+#   {f0, x, y, vx, vy, reversal_event_frames, turn_event_frames}
+# x/y/vx/vy are indexed by (frame_number - f0). The arrow starts at the centroid
+# and points along the velocity vector, scaled by ARROW_RENDER_SCALE — tune this
+# visually on day-0 output (45 px/frame-per-second ≈ 1.5x body-length for a
+# typical-speed worm; it is a renderer constant, NOT read from crawling_metrics.py).
+# Event markers pulse
+# at the worm's current centroid from the event frame for _EVENT_MARKER_DURATION_S
+# (min _EVENT_MARKER_MIN_FRAMES) so they survive across several rendered frames.
+# ---------------------------------------------------------------------------
+ARROW_RENDER_SCALE: float = 45.0
+_ARROW_COLOR: tuple[int, int, int] = (0, 255, 255)   # yellow (BGR)
+_ARROW_THICKNESS: int = 2
+_ARROW_TIP_LENGTH: float = 0.3
+
+_EVENT_MARKER_DURATION_S: float = 0.5
+_EVENT_MARKER_MIN_FRAMES: int = 15
+_REVERSAL_MARKER_COLOR: tuple[int, int, int] = (0, 0, 255)     # red (BGR)
+_REVERSAL_MARKER_RADIUS: int = 12
+_TURN_MARKER_COLOR: tuple[int, int, int] = (255, 255, 0)       # cyan (BGR)
+_TURN_MARKER_RADIUS: int = 8
+_MARKER_CIRCLE_OFFSET: tuple[int, int] = (15, -15)   # offset from centroid (px)
+_MARKER_TEXT_OFFSET: tuple[int, int] = (30, -15)
+_MARKER_FONT_SCALE: float = 0.9
+_MARKER_FONT_THICKNESS: int = 2
+
+
+def _prepare_arrow_worms(arrow_data: "dict[int, dict] | None") -> list[dict]:
+    """
+    Normalise arrow_data into a per-worm list with sorted event-frame arrays.
+
+    Drops worms with no centroid track (f0 None / missing arrays). Returns [] when
+    arrow_data is None/empty so callers can cheaply skip the overlay.
+    """
+    if not arrow_data:
+        return []
+    out: list[dict] = []
+    for gi, ad in arrow_data.items():
+        f0 = ad.get("f0")
+        x = ad.get("x")
+        if f0 is None or x is None or len(x) == 0:
+            continue
+        out.append({
+            "f0": int(f0),
+            "x": np.asarray(ad.get("x"), dtype=float),
+            "y": np.asarray(ad.get("y"), dtype=float),
+            "vx": np.asarray(ad.get("vx"), dtype=float),
+            "vy": np.asarray(ad.get("vy"), dtype=float),
+            "rev": np.sort(np.asarray(ad.get("reversal_event_frames") or [], dtype=np.int64)),
+            "turn": np.sort(np.asarray(ad.get("turn_event_frames") or [], dtype=np.int64)),
+        })
+    return out
+
+
+def _event_active(sorted_frames: np.ndarray, frame_num: int, duration: int) -> bool:
+    """True if frame_num is within [ef, ef+duration) for the nearest prior event ef."""
+    if len(sorted_frames) == 0:
+        return False
+    j = int(np.searchsorted(sorted_frames, frame_num, side="right")) - 1
+    if j < 0:
+        return False
+    return (frame_num - int(sorted_frames[j])) < duration
+
+
+def _draw_arrows_and_markers(
+    frame: np.ndarray, arrow_worms: list[dict], frame_num: int,
+    marker_duration: int, draw_markers: bool,
+) -> None:
+    """
+    Draw the velocity arrow (always) and reversal/turn markers (when draw_markers)
+    for every arrow_worm visible at frame_num, in-place on frame.
+    """
+    import cv2
+
+    for w in arrow_worms:
+        idx = frame_num - w["f0"]
+        if idx < 0 or idx >= len(w["x"]):
+            continue
+        cx = w["x"][idx]; cy = w["y"][idx]
+        vx = w["vx"][idx]; vy = w["vy"][idx]
+
+        # Velocity arrow from the centroid along the velocity vector.
+        if (np.isfinite(cx) and np.isfinite(cy)
+                and np.isfinite(vx) and np.isfinite(vy)):
+            p1 = (int(cx), int(cy))
+            p2 = (int(cx + vx * ARROW_RENDER_SCALE), int(cy + vy * ARROW_RENDER_SCALE))
+            cv2.arrowedLine(frame, p1, p2, _ARROW_COLOR, _ARROW_THICKNESS,
+                            cv2.LINE_AA, 0, _ARROW_TIP_LENGTH)
+
+        if not draw_markers or not (np.isfinite(cx) and np.isfinite(cy)):
+            continue
+        bx, by = int(cx), int(cy)
+        # Reversal marker (red) then turn marker (cyan), offset off the centroid so
+        # they don't obscure the skeleton.
+        if _event_active(w["rev"], frame_num, marker_duration):
+            cv2.circle(frame, (bx + _MARKER_CIRCLE_OFFSET[0], by + _MARKER_CIRCLE_OFFSET[1]),
+                       _REVERSAL_MARKER_RADIUS, _REVERSAL_MARKER_COLOR, -1, cv2.LINE_AA)
+            cv2.putText(frame, "REV",
+                        (bx + _MARKER_TEXT_OFFSET[0], by + _MARKER_TEXT_OFFSET[1]),
+                        cv2.FONT_HERSHEY_SIMPLEX, _MARKER_FONT_SCALE,
+                        _REVERSAL_MARKER_COLOR, _MARKER_FONT_THICKNESS, cv2.LINE_AA)
+        if _event_active(w["turn"], frame_num, marker_duration):
+            cv2.circle(frame, (bx + _MARKER_CIRCLE_OFFSET[0], by + _MARKER_CIRCLE_OFFSET[1]),
+                       _TURN_MARKER_RADIUS, _TURN_MARKER_COLOR, -1, cv2.LINE_AA)
+            cv2.putText(frame, "TURN",
+                        (bx + _MARKER_TEXT_OFFSET[0], by + _MARKER_TEXT_OFFSET[1]),
+                        cv2.FONT_HERSHEY_SIMPLEX, _MARKER_FONT_SCALE,
+                        _TURN_MARKER_COLOR, _MARKER_FONT_THICKNESS, cv2.LINE_AA)
+
+
+def _event_marker_duration(fps: float) -> int:
+    """Frames an event marker stays lit (see _EVENT_MARKER_* constants)."""
+    return max(_EVENT_MARKER_MIN_FRAMES, int(round(_EVENT_MARKER_DURATION_S * fps)))
+
+
 def _check_skel_col(skeletons_hdf5: Path, caller: str) -> bool:
     """Return True if _WORM_INDEX_COL is present in /trajectories_data; else log and return False."""
     try:
@@ -203,6 +322,7 @@ def render_tracked(
     fps: float,
     kept_ids: "set[int] | None" = None,
     worm_index_map: "dict[int, int] | None" = None,
+    arrow_data: "dict[int, dict] | None" = None,
 ) -> None:
     """
     Render the AVI with skeleton polylines and worm-index labels.
@@ -216,6 +336,12 @@ def render_tracked(
     persistent palette colour and labelled with the worm_index (matching the
     Excel); fragments absent from the map are filtered-out, so they get a faint
     grey centroid marker only (Phase 3). Takes precedence over kept_ids.
+
+    arrow_data (crawling), when given, draws a per-frame velocity arrow plus
+    reversal/turn event markers for each kept grouped worm — see
+    _draw_arrows_and_markers / _prepare_arrow_worms. Independent of the skeleton
+    frame_map (arrows use the centroid track, so they render even on frames where
+    the skeleton dropped out).
     """
     import cv2
 
@@ -229,6 +355,9 @@ def render_tracked(
     except Exception:
         log.warning("render_tracked: could not load skeleton data for %s", out_path, exc_info=True)
         return
+
+    arrow_worms = _prepare_arrow_worms(arrow_data)
+    marker_duration = _event_marker_duration(fps)
 
     cap = cv2.VideoCapture(str(avi_path))
     if not cap.isOpened():
@@ -267,6 +396,10 @@ def render_tracked(
                     except Exception:
                         log.debug("render_tracked: bad skeleton frame %d worm %d — skipping",
                                   frame_num, tid)
+                # Velocity arrows + reversal/turn markers on top of the skeletons.
+                if arrow_worms:
+                    _draw_arrows_and_markers(frame, arrow_worms, frame_num,
+                                             marker_duration, draw_markers=True)
                 pipe.write(frame.tobytes())
                 frame_num += 1
         log.info("Render complete: %s", out_path)

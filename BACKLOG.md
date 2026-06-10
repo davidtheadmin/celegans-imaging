@@ -86,3 +86,40 @@ per-plate delete so retention can clean up later.
   prints one line per condition as it transcodes (the slow step); piping the
   child's stdout into the dialog and showing "clip N of M" would give real
   feedback on long first-run builds. Deferred from the initial Review feature.
+
+## Crawling & analysis
+
+- **Crawling under-count — Tierpsy segmentation fragmentation.** Worms visible
+  all 180s are tracked by Tierpsy in only ~16–60s pieces, even at gap25/dist30.
+  Diagnosed (this session) as Tierpsy-level: detection sees ~8 blobs/frame but
+  the linker breaks IDs on brief dropouts; post-processing levers
+  (`traj_max_frames_gap`, grouping distance, run-gap-bridge) are exhausted. The
+  engine drops almost nothing (5 too_short, 0 debris/flicker). The 30s gate is
+  the current pragmatic baseline (7 kept on 601 0J day-0). Deferred work: sweep
+  segmentation params (`mask_min_area`, `thresh_C`, `thresh_block_size`,
+  `worm_bw_thresh_factor`) on one video to hold worms tracked continuously — the
+  only root-cause lever left. Note: raising `traj_max_allowed_dist` to 175
+  REGRESSED (119 fragments) — looser link distance worsens associations, don't
+  retry that. Smaller worms in newer crawling videos may be near the
+  `mask_min_area=500` floor — prime sweep candidate.
+
+- **Analysis cache doesn't invalidate on param change.** `_wormscan_cache` hits
+  on the existence of `Results/<stem>_featuresN.hdf5`, ignoring whether the
+  cached result was produced with the current params. Changing
+  `crawling_params`/`motility_params` and re-running silently serves the stale
+  result. Bit us this session (dist=175 output cached under dist=30 params).
+  Fix: include a hash of the effective Tierpsy params in the cache key (or write
+  a params fingerprint next to the cache and invalidate on mismatch).
+
+- **Validate the 30s crawling gate across UV doses.** The 30s min-track gate was
+  validated on ONE video (601 0J, day-0). Higher-dose worms (10J) move less /
+  may fragment differently. When running the full batch, confirm 30s stays
+  sensible per-dose; may warrant per-condition review. The gate re-applies at
+  aggregation (no re-run needed to re-tune).
+
+- **Docker Desktop CPU allocation limits parallel speedup.** The parallel
+  pipelines autosize workers from `docker info` NCPU/MemTotal. Docker Desktop's
+  Linux VM caps CPUs below the host (capped at 4 on the dev box → auto picks 2 →
+  1.76×). Before the full UV batch on the 8C/16GB analysis machine, raise Docker
+  Desktop → Settings → Resources CPU/RAM so auto scales to ~4 workers. Settings
+  change, not code.

@@ -227,7 +227,7 @@ def _process_one_video_crawling(
     params_template: dict,
     head_angle_prominence: float,
     threshold_s: float,
-    min_track_s: float,
+    min_span_s: float,
     clear_cache: bool,
     want_tracked: bool,
     want_sidebyside: bool,
@@ -334,7 +334,7 @@ def _process_one_video_crawling(
             hdf5_path, fps, condition, plate, video.name,
             head_angle_prominence=head_angle_prominence,
             long_threshold_s=threshold_s,
-            min_run_s=min_track_s,
+            min_span_s=min_span_s,
             engine_log_out=engine_log,
         )
         plog(f"Grouped worms: {len(worm_rows)}")
@@ -363,6 +363,7 @@ def _process_one_video_crawling(
         # out and the renders mark them faintly (motility-style).
         worm_index_map: dict[int, int] = {}
         reversal_frames_by_worm: dict[int, list] = {}
+        arrow_data_by_worm: dict[int, dict] = {}
         for r in worm_rows:
             if not r.get("passed_filter"):
                 continue
@@ -372,9 +373,20 @@ def _process_one_video_crawling(
                 if mid:
                     worm_index_map[int(mid)] = gi
             reversal_frames_by_worm[gi] = r.get("reversal_frames") or []
+            # Velocity-arrow overlay payload (dense per-frame centroid/velocity
+            # arrays + event frames) — see crawling_metrics renderer-only keys.
+            arrow_data_by_worm[gi] = {
+                "f0": r.get("arrow_f0"),
+                "x": r.get("arrow_x"),
+                "y": r.get("arrow_y"),
+                "vx": r.get("arrow_vx"),
+                "vy": r.get("arrow_vy"),
+                "reversal_event_frames": r.get("arrow_reversal_event_frames") or [],
+                "turn_event_frames": r.get("arrow_turn_event_frames") or [],
+            }
         n_kept = sum(1 for r in worm_rows if r.get("passed_filter"))
         plog(
-            f"Worms passing filter (>= {min_track_s:.1f}s): "
+            f"Worms passing filter (span >= {min_span_s:.1f}s, coverage >= 70%): "
             f"{n_kept}/{len(worm_rows)}"
         )
 
@@ -389,6 +401,7 @@ def _process_one_video_crawling(
                     avi, skeletons_hdf5,
                     per_video_dir / f"{prefix}_tracked.mp4", fps,
                     worm_index_map=worm_index_map,
+                    arrow_data=arrow_data_by_worm,
                 )
             if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists() and avi.exists():
                 render_sidebyside(
@@ -402,6 +415,7 @@ def _process_one_video_crawling(
                     per_video_dir / f"{prefix}_path_traces.mp4", fps,
                     worm_index_map=worm_index_map,
                     reversal_frames=reversal_frames_by_worm,
+                    arrow_data=arrow_data_by_worm,
                 )
 
     except Exception as exc:
@@ -536,7 +550,7 @@ class CrawlingAgent(threading.Thread):
         self._wake = threading.Event()
         self._folder: Optional[Path] = None
         self._threshold_s: float = 5.0
-        self._min_track_s: float = 30.0
+        self._min_span_s: float = 30.0
         self._clear_cache: bool = False
         self._want_tracked: bool = False
         self._want_sidebyside: bool = False
@@ -576,13 +590,13 @@ class CrawlingAgent(threading.Thread):
         want_tracked: bool = False,
         want_sidebyside: bool = False,
         want_path_traces: bool = False,
-        min_track_s: float = 30.0,
+        min_span_s: float = 30.0,
     ) -> None:
         """UI thread: trigger an analysis run on the given folder."""
         with self._lock:
             self._folder = folder
             self._threshold_s = threshold_s
-            self._min_track_s = min_track_s
+            self._min_span_s = min_span_s
             self._clear_cache = clear_cache
             self._want_tracked = want_tracked
             self._want_sidebyside = want_sidebyside
@@ -607,7 +621,7 @@ class CrawlingAgent(threading.Thread):
             with self._lock:
                 folder = self._folder
                 threshold_s = self._threshold_s
-                min_track_s = self._min_track_s
+                min_span_s = self._min_span_s
                 clear_cache = self._clear_cache
                 want_tracked = self._want_tracked
                 want_sidebyside = self._want_sidebyside
@@ -619,7 +633,7 @@ class CrawlingAgent(threading.Thread):
                     self._run_analysis(
                         folder, threshold_s, clear_cache,
                         want_tracked, want_sidebyside, want_path_traces,
-                        min_track_s,
+                        min_span_s,
                     )
                 except Exception:
                     log.exception("CrawlingAgent crashed")
@@ -637,7 +651,7 @@ class CrawlingAgent(threading.Thread):
         want_tracked: bool = False,
         want_sidebyside: bool = False,
         want_path_traces: bool = False,
-        min_track_s: float = 30.0,
+        min_span_s: float = 30.0,
     ) -> None:
         from analysis.ffmpeg_utils import find_videos
         from analysis.crawling_metrics import (
@@ -675,7 +689,7 @@ class CrawlingAgent(threading.Thread):
             write_log(f"Run: {timestamp}")
             write_log(f"Folder: {folder}")
             write_log(f"Videos found: {total}")
-            write_log(f"Min track duration: {min_track_s:.1f}s")
+            write_log(f"Min track span: {min_span_s:.1f}s")
 
             self.status.update(
                 color="yellow",
@@ -736,7 +750,7 @@ class CrawlingAgent(threading.Thread):
                             params_template=self._params_template,
                             head_angle_prominence=head_angle_prominence,
                             threshold_s=threshold_s,
-                            min_track_s=min_track_s,
+                            min_span_s=min_span_s,
                             clear_cache=clear_cache,
                             want_tracked=want_tracked,
                             want_sidebyside=want_sidebyside,
@@ -794,7 +808,7 @@ class CrawlingAgent(threading.Thread):
         per_worm_df = (pd.DataFrame(all_worm_rows, columns=PER_WORM_COLS).round(4)
                        if all_worm_rows
                        else pd.DataFrame(columns=PER_WORM_COLS))
-        per_condition_rows = aggregate_per_condition(all_worm_rows, min_run_s=min_track_s)
+        per_condition_rows = aggregate_per_condition(all_worm_rows, min_span_s=min_span_s)
         per_condition_df = (pd.DataFrame(per_condition_rows).round(4)
                             if per_condition_rows
                             else pd.DataFrame(columns=["condition", "n_worms"]))
@@ -810,7 +824,7 @@ class CrawlingAgent(threading.Thread):
             from analysis.crawling_plots import make_crawling_overview_png
             make_crawling_overview_png(
                 all_worm_rows, out_dir / "overview.png",
-                min_run_s=min_track_s,
+                min_span_s=min_span_s,
                 elapsed_s=time.monotonic() - t_start,
             )
         except Exception:

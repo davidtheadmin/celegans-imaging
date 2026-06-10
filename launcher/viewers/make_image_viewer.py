@@ -9,9 +9,10 @@ experiment/day folders:
                     to switch days, ordered by the YYMMDD date prefix in each
                     folder name (e.g. 260530_..._day1).
 
-Each folder contains '<strain> <dose>J' condition subfolders, each with a
-'plateNN' subfolder holding one image (or an image directly inside). Folders
-whose name starts with '_' are ignored.
+Each folder contains '<strain> <dose><unit>' condition subfolders, each with a
+'plateNN' subfolder holding one image (or an image directly inside). <unit> is
+'J' (rendered J/m²) or 'uM'/'µM' (rendered µM). Folders whose name starts with
+'_' are ignored.
 
 480px JPEG thumbnails are cached in .viewer_cache/ per folder so the grid stays
 responsive even with 12MP sources; loupe and pinned-compare use the full-res
@@ -41,7 +42,7 @@ CACHE_DIRNAME = ".viewer_cache"
 
 WT_NAMES = {"n2", "wt", "wildtype", "wild-type", "wild_type", "control", "ctrl"}
 
-COND_RE = re.compile(r"^(?P<strain>.+?)\s+(?P<dose>\d+)\s*[Jj]$")
+COND_RE = re.compile(r"^(?P<strain>.+?)\s+(?P<dose>\d+)\s*(?P<unit>[Jj]|[uUµ][Mm])$")
 DATE_RE = re.compile(r"^(?P<date>\d{6})")
 DAYLABEL_RE = re.compile(r"(day\s*\d+)", re.IGNORECASE)
 
@@ -55,11 +56,26 @@ def strain_sort_key(name: str):
     return (2, lower)
 
 
+def _canon_unit(token: str) -> str:
+    t = token.lower()
+    if t == "j":
+        return "J/m²"
+    return "µM"        # u/µ + M
+
+
+def _dominant_unit(units: list[str]) -> str:
+    """Most common matched unit across conditions; default J/m² (legacy)."""
+    if not units:
+        return "J/m²"
+    from collections import Counter
+    return Counter(units).most_common(1)[0][0]
+
+
 def parse_condition(folder_name: str):
     m = COND_RE.match(folder_name.strip())
     if not m:
         return None
-    return m.group("strain"), int(m.group("dose"))
+    return m.group("strain"), int(m.group("dose")), _canon_unit(m.group("unit"))
 
 
 def day_sort_key(folder: Path):
@@ -147,6 +163,7 @@ def build_day(day_dir: Path, out_dir: Path, Image):
     cells: dict[str, dict[int, dict]] = {}
     strain_order: list[str] = []
     dose_set: set[int] = set()
+    units: list[str] = []
     cache_root = day_dir / CACHE_DIRNAME
 
     subs = sorted(p for p in day_dir.iterdir()
@@ -156,7 +173,7 @@ def build_day(day_dir: Path, out_dir: Path, Image):
         parsed = parse_condition(sub.name)
         if parsed is None:
             continue
-        strain, dose = parsed
+        strain, dose, unit = parsed
         img = find_image(sub)
         if img is None:
             continue
@@ -167,8 +184,9 @@ def build_day(day_dir: Path, out_dir: Path, Image):
             strain_order.append(strain)
         cells[strain][dose] = {"src": src_rel, "thumb": thumb_rel, "ar": round(ar, 4)}
         dose_set.add(dose)
+        units.append(unit)
 
-    return cells, strain_order, dose_set
+    return cells, strain_order, dose_set, units
 
 
 def build_manifest(day_dirs: list[Path], out_dir: Path):
@@ -179,10 +197,11 @@ def build_manifest(day_dirs: list[Path], out_dir: Path):
     days_meta = []
     all_strains: list[str] = []
     all_doses: set[int] = set()
+    all_units: list[str] = []
 
     for day_dir in day_dirs:
         print(f"  folder: {day_dir.name}")
-        cells, strains, doses = build_day(day_dir, out_dir, Image)
+        cells, strains, doses, units = build_day(day_dir, out_dir, Image)
         if not cells:
             print("    (no matching conditions — skipped)")
             continue
@@ -190,6 +209,7 @@ def build_manifest(day_dirs: list[Path], out_dir: Path):
             if s not in all_strains:
                 all_strains.append(s)
         all_doses |= doses
+        all_units.extend(units)
         days_meta.append({
             "label": day_label(day_dir),
             "folder": day_dir.name,
@@ -201,6 +221,7 @@ def build_manifest(day_dirs: list[Path], out_dir: Path):
         "title": day_dirs[0].name if len(day_dirs) == 1 else f"{len(days_meta)} days",
         "strains": all_strains,
         "doses": sorted(all_doses),
+        "dose_unit": _dominant_unit(all_units),
         "days": days_meta,
     }
 
@@ -450,6 +471,7 @@ main {
 
 <script>
 const DATA = __MANIFEST__;
+const DOSE_UNIT = DATA.dose_unit || 'J/m²';
 const LOUPE_ZOOM = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--loupe-zoom')) || 3.5;
 const LOUPE_SIZE = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--loupe')) || 220;
 
@@ -513,7 +535,7 @@ function fitThumbSize(nCols, nRows) {
 
 function formatLabel(value, kind) {
   if (kind === 'strain') return escapeHtml(String(value));
-  return `${value}<span class="unit">J/m²</span>`;
+  return `${value}<span class="unit">${DOSE_UNIT}</span>`;
 }
 
 function buildGrid() {
@@ -708,7 +730,7 @@ function renderPinned() {
       slot.innerHTML = `
         <div class="slot-head">
           <span class="label">${letter}</span>
-          <span>${escapeHtml(p.strain)} · ${p.dose} J/m²</span>
+          <span>${escapeHtml(p.strain)} · ${p.dose} ${DOSE_UNIT}</span>
           <span class="x" title="unpin">✕</span>
         </div>
         <div class="slot-body"><img src="${escapeAttr(p.src)}" alt=""></div>

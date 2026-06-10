@@ -2,9 +2,9 @@
 
 The video analog of make_viewer.py. Instead of one experiment folder of still
 images, you pass one or more *day* folders. Each day folder contains
-'<strain> <dose>J' condition subfolders, each with a 'plateNN' subfolder
-holding one .mp4. Folders whose name starts with '_' (e.g.
-'_crawling_analysis_...') are ignored.
+'<strain> <dose><unit>' condition subfolders, each with a 'plateNN' subfolder
+holding one .mp4. <unit> is 'J' (rendered J/m²) or 'uM'/'µM' (rendered µM).
+Folders whose name starts with '_' (e.g. '_crawling_analysis_...') are ignored.
 
 For every condition the generator picks the highest-numbered plate, then
 pre-transcodes its 3-minute video into a short (~3 s) fast loop clip cached in
@@ -41,8 +41,9 @@ CLIP_MAX_EDGE = 480          # downscale long edge of the loop clip for grid use
 CRF = 26                     # loop clips are tiny + looping; 26 is plenty
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
-# Same condition grammar as the still viewer: "<strain> <dose>J"
-COND_RE = re.compile(r"^(?P<strain>.+?)\s+(?P<dose>\d+)\s*[Jj]$")
+# Same condition grammar as the still viewer: "<strain> <dose><unit>", where
+# <unit> is J (rendered J/m²) or uM/µM (rendered µM).
+COND_RE = re.compile(r"^(?P<strain>.+?)\s+(?P<dose>\d+)\s*(?P<unit>[Jj]|[uUµ][Mm])$")
 
 # Leading YYMMDD (6 digits) used to order day folders, e.g. 260530_Crawling_day1
 DATE_RE = re.compile(r"^(?P<date>\d{6})")
@@ -61,11 +62,26 @@ def strain_sort_key(name: str):
     return (2, lower)
 
 
+def _canon_unit(token: str) -> str:
+    t = token.lower()
+    if t == "j":
+        return "J/m²"
+    return "µM"        # u/µ + M
+
+
+def _dominant_unit(units: list[str]) -> str:
+    """Most common matched unit across conditions; default J/m² (legacy)."""
+    if not units:
+        return "J/m²"
+    from collections import Counter
+    return Counter(units).most_common(1)[0][0]
+
+
 def parse_condition(folder_name: str):
     m = COND_RE.match(folder_name.strip())
     if not m:
         return None
-    return m.group("strain"), int(m.group("dose"))
+    return m.group("strain"), int(m.group("dose")), _canon_unit(m.group("unit"))
 
 
 def day_sort_key(folder: Path):
@@ -164,10 +180,11 @@ def make_loop_clip(src: Path, cache_root: Path, target_seconds: float) -> Path |
 
 def build_day(day_dir: Path, cache_root: Path, out_dir: Path,
               target_seconds: float):
-    """Return (cells, strains, doses) for a single day folder."""
+    """Return (cells, strains, doses, units) for a single day folder."""
     cells: dict[str, dict[int, dict]] = {}
     strain_order: list[str] = []
     dose_set: set[int] = set()
+    units: list[str] = []
 
     subs = sorted(p for p in day_dir.iterdir()
                   if p.is_dir() and not p.name.startswith("_")
@@ -176,7 +193,7 @@ def build_day(day_dir: Path, cache_root: Path, out_dir: Path,
         parsed = parse_condition(sub.name)
         if parsed is None:
             continue
-        strain, dose = parsed
+        strain, dose, unit = parsed
         src = pick_plate_video(sub)
         if src is None:
             continue
@@ -190,20 +207,22 @@ def build_day(day_dir: Path, cache_root: Path, out_dir: Path,
             strain_order.append(strain)
         cells[strain][dose] = {"clip": clip_rel}
         dose_set.add(dose)
+        units.append(unit)
 
-    return cells, strain_order, dose_set
+    return cells, strain_order, dose_set, units
 
 
 def build_manifest(day_dirs: list[Path], out_dir: Path, target_seconds: float):
     days_meta = []
     all_strains: list[str] = []
     all_doses: set[int] = set()
+    all_units: list[str] = []
 
     for day_dir in day_dirs:
         cache_root = day_dir / CACHE_DIRNAME
         print(f"  day: {day_dir.name}")
-        cells, strains, doses = build_day(day_dir, cache_root, out_dir,
-                                          target_seconds)
+        cells, strains, doses, units = build_day(day_dir, cache_root, out_dir,
+                                                 target_seconds)
         if not cells:
             print(f"    (no matching conditions — skipped)")
             continue
@@ -211,6 +230,7 @@ def build_manifest(day_dirs: list[Path], out_dir: Path, target_seconds: float):
             if s not in all_strains:
                 all_strains.append(s)
         all_doses |= doses
+        all_units.extend(units)
         days_meta.append({
             "label": day_label(day_dir),
             "folder": day_dir.name,
@@ -222,6 +242,7 @@ def build_manifest(day_dirs: list[Path], out_dir: Path, target_seconds: float):
         "title": day_dirs[0].name if len(day_dirs) == 1 else f"{len(days_meta)} days",
         "strains": all_strains,
         "doses": sorted(all_doses),
+        "dose_unit": _dominant_unit(all_units),
         "days": days_meta,
     }
 
@@ -430,6 +451,7 @@ main {
 
 <script>
 const DATA = __MANIFEST__;
+const DOSE_UNIT = DATA.dose_unit || 'J/m²';
 const LOUPE_ZOOM = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--loupe-zoom')) || 3.0;
 const LOUPE_SIZE = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--loupe')) || 260;
 
@@ -490,7 +512,7 @@ function fitThumbSize(nCols, nRows) {
 
 function formatLabel(value, kind) {
   if (kind === 'strain') return escapeHtml(String(value));
-  return `${value}<span class="unit">J/m²</span>`;
+  return `${value}<span class="unit">${DOSE_UNIT}</span>`;
 }
 
 function buildGrid() {
