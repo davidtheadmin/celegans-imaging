@@ -33,6 +33,16 @@ const CALIB_MIN_W = 40;              // px
 const CALIB_FULL_W = 4056;           // full-res still width (µm/px reference)
 const CALIB_VIDEO_W = 2028;      // video width
 
+// ── Guided (Colony Survival) capture ───────────────────────────────────────────
+const GUIDED_CIRCLE_FRAC = 0.35;     // aim circle radius = this × shorter displayed dim
+const G = {
+  active: false,
+  sessionId: null,
+  queue: [],            // [{plateId, conditionLabel, plateNumber, folderName, capturedFilename}]
+  index: 0,             // next plate to capture; === queue.length means complete
+  inFlight: false,
+};
+
 // ── Utilities ──────────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s)
@@ -712,6 +722,12 @@ function condDisplay(cond) {
   };
 }
 
+// Colony Survival is a survival session flagged via assay_config; capture is
+// byte-identical to plain single-still survival.
+function isColony(sess) {
+  return sess?.assay_mode === 'survival' && !!sess.assay_config?.colony;
+}
+
 // ── Sessions ───────────────────────────────────────────────────────────────────
 async function loadSessions() {
   try { S.sessions = await apiJson('/sessions'); } catch {}
@@ -777,7 +793,7 @@ function renderSessionSidebar() {
       <svg class="s-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="3,2 7,5 3,8"/>
       </svg>
-      <span class="mode-badge ${esc(sess.assay_mode)}">${sess.assay_mode === 'motility' ? 'MOT' : 'SRV'}</span>
+      <span class="mode-badge ${isColony(sess) ? 'colony' : esc(sess.assay_mode)}">${sess.assay_mode === 'motility' ? 'MOT' : (isColony(sess) ? 'COL' : 'SRV')}</span>
       <span class="s-name" title="${esc(sess.name)}">${esc(sess.name)}</span>
       <span class="s-date">${esc(fmtDate(sess.created_at))}</span>
       <button class="sess-del-btn" aria-label="Delete experiment" title="Delete experiment">×</button>
@@ -1060,18 +1076,27 @@ function renderNewSessionForm() {
   const mode = document.querySelector('input[name="ns-mode"]:checked')?.value ?? 'motility';
   document.getElementById('ns-motility-cfg').hidden = mode !== 'motility';
   document.getElementById('ns-survival-cfg').hidden = mode !== 'survival';
+  document.getElementById('ns-colony-cfg').hidden = mode !== 'colony';
 }
 
 async function submitCreateSession() {
   const name = document.getElementById('ns-name').value.trim();
   if (!name) { document.getElementById('ns-name').focus(); return; }
-  const mode = document.querySelector('input[name="ns-mode"]:checked').value;
-  const assay_config = mode === 'motility'
-    ? { duration_s: parseInt(document.getElementById('ns-duration').value) || 30 }
-    : { quadrants: document.getElementById('ns-quadrants').checked };
+  const uiMode = document.querySelector('input[name="ns-mode"]:checked').value;
+  // Colony Survival is plain survival on the backend (byte-identical capture),
+  // distinguished only by the assay_config.colony flag the guided UI keys off.
+  const assay_mode = uiMode === 'colony' ? 'survival' : uiMode;
+  let assay_config;
+  if (uiMode === 'motility') {
+    assay_config = { duration_s: parseInt(document.getElementById('ns-duration').value) || 30 };
+  } else if (uiMode === 'colony') {
+    assay_config = { quadrants: false, colony: true };
+  } else {
+    assay_config = { quadrants: document.getElementById('ns-quadrants').checked };
+  }
   try {
     const sess = await apiJson('/sessions', {
-      method: 'POST', body: { name, assay_mode: mode, assay_config },
+      method: 'POST', body: { name, assay_mode, assay_config },
     });
     S.sessions.push(sess);
     S.expandedIds.add(sess.id);
@@ -1316,6 +1341,19 @@ function renderSessionCapture() {
     durEl.addEventListener('input', () => { motBtn.innerHTML = `Record ${parseInt(durEl.value)||30}s <span class="kbd-hint">[Space]</span>`; });
     motBtn.addEventListener('click', () => captureMotility(sess.id, plate.id));
 
+  } else if (isColony(sess)) {
+    body.innerHTML = `
+      <div class="plate-info">
+        <div class="plate-info-name">${esc(plate.folder_name)}</div>
+        <div class="plate-info-mode">Colony Survival · Single frame</div>
+      </div>
+      <button id="guided-start-btn" class="btn btn-primary btn-capture">Start Guided Mode</button>
+      <p class="panel-hint" style="margin:8px 0 0">Walks every plate in this experiment; press Enter to capture and advance.</p>
+      <button id="surv-btn" class="btn btn-capture" style="margin-top:10px">Capture this plate only <span class="kbd-hint">[Space]</span></button>`;
+
+    body.querySelector('#guided-start-btn').addEventListener('click', () => startGuidedMode(sess.id));
+    body.querySelector('#surv-btn').addEventListener('click', () => captureSurvival(sess.id, plate.id));
+
   } else if (sess.assay_config.quadrants) {
     body.innerHTML = `
       <div class="plate-info">
@@ -1412,6 +1450,165 @@ async function markCapturedQuadrants(sessionId, plateId) {
       btn.classList.toggle('captured', captured.has(btn.dataset.q));
     });
   } catch {}
+}
+
+// ── Guided (Colony Survival) capture ───────────────────────────────────────────
+// Condition-major queue: all plates of one condition before the next condition,
+// conditions in their defined (insertion) order, plates by ascending plate_number.
+// To change the ordering, reorder/flatten differently here — nothing else depends
+// on the traversal order.
+function buildGuidedQueue(sess) {
+  const queue = [];
+  for (const cond of groupByCondition(sess.plates)) {
+    const d = condDisplay(cond);
+    const sorted = [...cond.plates].sort((a, b) => a.plate_number - b.plate_number);
+    for (const plate of sorted) {
+      queue.push({
+        plateId: plate.id,
+        conditionLabel: `${d.strain} / ${d.treatment}`,
+        plateNumber: plate.plate_number,
+        folderName: plate.folder_name,
+        capturedFilename: null,
+      });
+    }
+  }
+  return queue;
+}
+
+function startGuidedMode(sessionId) {
+  const sess = S.sessions.find(s => s.id === sessionId);
+  if (!sess) return;
+  const queue = buildGuidedQueue(sess);
+  if (queue.length === 0) { announce('No plates to capture in this experiment'); return; }
+  G.active = true;
+  G.sessionId = sessionId;
+  G.queue = queue;
+  G.index = 0;
+  G.inFlight = false;
+
+  const ov = document.getElementById('guided-overlay');
+  ov.hidden = false;
+  document.getElementById('guided-preview').src =
+    `/preview.mjpg?token=${encodeURIComponent(S.token)}`;
+  updateGuidedBanner();
+  // Draw once the overlay has laid out (and again when the first frame arrives).
+  requestAnimationFrame(drawGuidedOverlay);
+  announce(`Guided mode: ${queue.length} plates`);
+}
+
+function exitGuidedMode() {
+  if (!G.active) return;
+  G.active = false;
+  const ov = document.getElementById('guided-overlay');
+  ov.hidden = true;
+  document.getElementById('guided-preview').src = '';  // drop the MJPEG connection
+  refreshThumbnails();
+  announce('Guided mode exited');
+}
+
+function updateGuidedBanner() {
+  const condEl = document.getElementById('guided-cond');
+  const plateEl = document.getElementById('guided-plate');
+  const progEl = document.getElementById('guided-progress');
+  const stateEl = document.getElementById('guided-state');
+  const captureBtn = document.getElementById('guided-capture-btn');
+  const redoBtn = document.getElementById('guided-redo-btn');
+  const N = G.queue.length;
+  const complete = G.index >= N;
+
+  // Redo re-does the plate just captured; unavailable when nothing is captured yet.
+  redoBtn.disabled = G.index === 0 || G.inFlight;
+
+  if (complete) {
+    condEl.textContent = 'Complete';
+    plateEl.textContent = `${N} captured`;
+    progEl.textContent = `${N} / ${N}`;
+    stateEl.textContent = '';
+    captureBtn.disabled = true;
+    return;
+  }
+
+  const item = G.queue[G.index];
+  condEl.textContent = item.conditionLabel;
+  plateEl.textContent = `Plate ${String(item.plateNumber).padStart(2, '0')}`;
+  progEl.textContent = `${G.index + 1} / ${N}`;
+  stateEl.textContent = G.inFlight ? 'Capturing…' : 'Aim, then press Enter';
+  captureBtn.disabled = G.inFlight;
+}
+
+function drawGuidedOverlay() {
+  const img = document.getElementById('guided-preview');
+  const canvas = document.getElementById('guided-canvas');
+  const w = img.clientWidth, h = img.clientHeight;
+  if (!w || !h) return;
+  // Track the image's rendered content box (object-fit: contain letterboxes it).
+  canvas.style.left = `${img.offsetLeft}px`;
+  canvas.style.top = `${img.offsetTop}px`;
+  canvas.width = w;
+  canvas.height = h;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2;
+
+  // Full-width + full-height crosshair through center.
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(255,90,90,0.85)';
+  ctx.beginPath();
+  ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+  ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+  ctx.stroke();
+
+  // Centered aim circle.
+  const r = GUIDED_CIRCLE_FRAC * Math.min(w, h);
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(107,156,245,0.95)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+async function guidedCapture() {
+  if (!G.active || G.inFlight) return;
+  if (G.index >= G.queue.length) return;          // complete → no-op
+  if (!S.cameraReady) { announce('Camera not ready'); return; }
+  const item = G.queue[G.index];
+  G.inFlight = true;
+  updateGuidedBanner();
+  try {
+    const d = await apiJson(`/sessions/${G.sessionId}/plates/${item.plateId}/capture`,
+      { method: 'POST', body: {} });
+    item.capturedFilename = d.filename;           // remembered so Redo can trash it
+    announce(`Captured ${item.conditionLabel} plate ${item.plateNumber}`);
+    G.index += 1;
+  } catch (err) {
+    announce(`Capture failed: ${err.message}`);
+  } finally {
+    G.inFlight = false;
+    updateGuidedBanner();
+  }
+}
+
+async function guidedRedo() {
+  if (!G.active || G.inFlight) return;
+  if (G.index === 0) return;                       // nothing captured yet → no-op
+  // Step back to the plate just captured and re-enter its aim state (works from
+  // the Complete state too). Enter will recapture and advance again.
+  G.index -= 1;
+  const item = G.queue[G.index];
+  updateGuidedBanner();
+  // Trash its recorded shot so the operator ends with one image per plate.
+  const fname = item.capturedFilename;
+  item.capturedFilename = null;
+  if (fname) {
+    try {
+      await api(`/sessions/${G.sessionId}/plates/${item.plateId}/files/${encodeURIComponent(fname)}`,
+        { method: 'DELETE' });
+    } catch (err) {
+      // A leftover duplicate is recoverable from .trash — don't strand the operator.
+      announce(`Couldn't remove previous shot (${err.message}); recapture to overwrite`);
+    }
+  }
 }
 
 // ── Thumbnail strip ────────────────────────────────────────────────────────────
@@ -1617,6 +1814,15 @@ function bindEvents() {
   window.addEventListener('resize', () => { if (isCalibrating()) renderCalibRect(); });
 
   document.addEventListener('keydown', e => {
+    // Guided mode owns the keyboard while active.
+    if (G.active) {
+      if (e.key === 'Escape') { exitGuidedMode(); return; }
+      if (isTyping()) return;
+      if (e.repeat) return;                                  // debounce a held key
+      if (e.key === 'Enter') { e.preventDefault(); guidedCapture(); return; }
+      if (e.key === 'r' || e.key === 'R') { e.preventDefault(); guidedRedo(); return; }
+      return;
+    }
     if (e.key === 'Escape') {
       if (!document.getElementById('modal-overlay').hidden) { closeModal(); return; }
       if (!document.getElementById('shortcuts-overlay').hidden) { toggleShortcutsOverlay(); return; }
@@ -1648,6 +1854,18 @@ function bindEvents() {
   document.getElementById('ns-cancel').addEventListener('click', () => {
     S.showNewSession = false; renderNewSessionForm();
   });
+
+  document.getElementById('guided-capture-btn').addEventListener('click', guidedCapture);
+  document.getElementById('guided-redo-btn').addEventListener('click', guidedRedo);
+  document.getElementById('guided-exit-btn').addEventListener('click', exitGuidedMode);
+  document.getElementById('guided-preview').addEventListener('load', () => {
+    if (G.active) drawGuidedOverlay();
+  });
+  if (window.ResizeObserver) {
+    new ResizeObserver(() => { if (G.active) drawGuidedOverlay(); })
+      .observe(document.getElementById('guided-preview'));
+  }
+  window.addEventListener('resize', () => { if (G.active) drawGuidedOverlay(); });
 
   document.getElementById('modal-close').addEventListener('click', closeModal);
   document.getElementById('modal-del-btn').addEventListener('click', () => deleteCapture(_modalFile));

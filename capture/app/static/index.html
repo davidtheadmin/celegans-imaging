@@ -48,6 +48,25 @@
   </div>
 </div>
 
+<!-- Guided (Colony Survival) capture overlay -->
+<div id="guided-overlay" hidden role="dialog" aria-modal="true" aria-label="Guided capture">
+  <div class="guided-stage">
+    <img id="guided-preview" alt="Live camera preview" draggable="false">
+    <canvas id="guided-canvas" aria-hidden="true"></canvas>
+  </div>
+  <div class="guided-banner">
+    <div class="guided-banner__cond" id="guided-cond"></div>
+    <div class="guided-banner__plate mono" id="guided-plate"></div>
+    <div class="guided-banner__progress mono" id="guided-progress"></div>
+    <div class="guided-banner__state" id="guided-state"></div>
+  </div>
+  <div class="guided-controls">
+    <button id="guided-capture-btn" class="btn btn-primary">Capture <span class="kbd-hint">[Enter]</span></button>
+    <button id="guided-redo-btn" class="btn">Redo last <span class="kbd-hint">[R]</span></button>
+    <button id="guided-exit-btn" class="btn">Exit <span class="kbd-hint">[Esc]</span></button>
+  </div>
+</div>
+
 <!-- Accessibility announcements -->
 <div id="live-region" role="status" aria-live="polite" class="sr-only"></div>
 
@@ -82,6 +101,7 @@
         <div class="field-row">
           <label class="radio-label"><input type="radio" name="ns-mode" value="motility" checked> Motility</label>
           <label class="radio-label"><input type="radio" name="ns-mode" value="survival"> Survival</label>
+          <label class="radio-label"><input type="radio" name="ns-mode" value="colony"> Colony Survival</label>
         </div>
         <div id="ns-motility-cfg">
           <label class="field-label">Duration (s)
@@ -92,6 +112,9 @@
           <label class="checkbox-label">
             <input id="ns-quadrants" type="checkbox"> Use four quadrants
           </label>
+        </div>
+        <div id="ns-colony-cfg" hidden>
+          <p class="panel-hint" style="margin:0">Single still per plate, captured through a guided aiming flow.</p>
         </div>
         <div class="form-actions">
           <button id="ns-submit" class="btn btn-sm btn-primary">Create</button>

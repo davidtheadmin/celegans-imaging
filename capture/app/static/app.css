@@ -237,6 +237,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 }
 .mode-badge.motility { background: var(--accent-dim); color: var(--accent); }
 .mode-badge.survival { background: var(--ok-dim); color: var(--ok); }
+.mode-badge.colony   { background: var(--warn-dim); color: var(--warn); }
 
 .s-name {
   flex: 1; font-size: 12px; overflow: hidden;
@@ -650,3 +651,43 @@ kbd {
   max-width: 90vw; max-height: 90vh; display: block;
   border: 1px solid var(--border); border-radius: var(--r);
 }
+
+/* ── Guided (Colony Survival) capture overlay ──────────────────────────────── */
+#guided-overlay {
+  position: fixed; inset: 0; z-index: 800;
+  background: #000;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+}
+#guided-overlay[hidden] { display: none; }
+.guided-stage {
+  position: relative;
+  flex: 1; min-height: 0; width: 100%;
+  display: flex; align-items: center; justify-content: center;
+}
+#guided-preview {
+  max-width: 100%; max-height: 100%;
+  display: block; object-fit: contain;
+}
+#guided-canvas {
+  position: absolute;            /* positioned to the image content box in JS */
+  pointer-events: none;
+}
+.guided-banner {
+  position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 1;
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 10px 18px;
+  background: rgba(0,0,0,.62); border: 1px solid rgba(255,255,255,.18);
+  border-radius: var(--r); text-align: center;
+  text-shadow: 0 1px 3px rgba(0,0,0,.9);
+}
+.guided-banner__cond { font-size: 16px; font-weight: 600; color: #fff; }
+.guided-banner__plate { font-size: 13px; color: #fff; }
+.guided-banner__progress { font-size: 12px; color: var(--accent-h); }
+.guided-banner__state { font-size: 12px; color: var(--warn); min-height: 16px; }
+.guided-controls {
+  flex-shrink: 0;
+  display: flex; gap: 10px; justify-content: center;
+  padding: 16px;
+}
+.guided-controls .btn { font-size: 13px; padding: 8px 16px; }
