@@ -48,6 +48,31 @@ def main() -> None:
     widgets.secondary_button(outer, "Secondary action", lambda: None).pack(fill="x", pady=3)
     widgets.destructive_button(outer, "Destructive action", lambda: None).pack(fill="x", pady=3)
 
+    # --- IconButtons (Windows icon-font glyphs) ---
+    heading(f"IconButton  (font: {widgets.ICON_FONT_PATH or 'NONE -> text only'})")
+    icon_specs = [
+        ("Imaging", widgets.GLYPH_CAMERA, "secondary"),
+        ("Analyze", widgets.GLYPH_CHART, "primary"),
+        ("Review", widgets.GLYPH_GRID, "secondary"),
+        ("Mirror Folder", widgets.GLYPH_FOLDER, "secondary"),
+        ("Sync Now", widgets.GLYPH_REFRESH, "primary"),
+        ("Shut Down Pi", widgets.GLYPH_POWER, "destructive"),
+        ("Settings", widgets.GLYPH_SETTINGS, "secondary"),
+    ]
+    for text, glyph, variant in icon_specs:
+        widgets.IconButton(outer, text, lambda: None, glyph, variant=variant).pack(
+            fill="x", pady=3
+        )
+    icon_only_row = ctk.CTkFrame(outer, fg_color="transparent")
+    icon_only_row.pack(fill="x", pady=3)
+    ctk.CTkLabel(
+        icon_only_row, text="icon_only:", font=theme.body(), text_color=theme.TEXT
+    ).pack(side="left", padx=(0, 8))
+    widgets.IconButton(
+        icon_only_row, "Settings", lambda: None, widgets.GLYPH_SETTINGS,
+        variant="secondary", icon_only=True,
+    ).pack(side="left")
+
     # --- Card ---
     heading("Card")
     card = widgets.Card(outer, title="A titled card")

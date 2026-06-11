@@ -18,7 +18,11 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
 
+import customtkinter as ctk
+
 import config as cfg
+import theme
+import widgets
 from analysis.docker_utils import run_preflight
 from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
@@ -1102,7 +1106,14 @@ class ReviewDialog(tk.Toplevel):
 # Main window
 # ---------------------------------------------------------------------------
 
-class MainWindow(tk.Tk):
+class MainWindow(ctk.CTk):
+    # Fixed window width — the window must NEVER resize to content (stretch-bug
+    # fix). Variable status/info strings pass through middle_truncate so a long
+    # line can't push the width; the full text lives in a hover Tooltip.
+    _WIDTH = 460
+    _STATUS_MAX = 28   # chars on the status line (BODY font); fits the card column
+    _INFO_MAX = 34     # chars on the info line (CAPTION font); fits the card column
+
     def __init__(
         self,
         settings: cfg.Settings,
@@ -1115,6 +1126,7 @@ class MainWindow(tk.Tk):
         counting_agent: CountingAgent,
         counting_status: CountingStatus,
     ) -> None:
+        theme.init()
         super().__init__()
         self._settings = settings
         self._agent = agent
@@ -1128,70 +1140,104 @@ class MainWindow(tk.Tk):
         self._button_waiting = False
 
         self.title("WormScan Launcher")
+        self.configure(fg_color=theme.BG)
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build()
+        # Pin the width; height fits content once, then never tracks it again.
+        self.update_idletasks()
+        self.geometry(f"{self._WIDTH}x{self.winfo_reqheight()}")
+
         self._poll()
 
     def _build(self) -> None:
-        outer = {"padx": 14, "pady": 6}
-
-        # --- Status row ---
-        status_row = ttk.Frame(self)
-        status_row.pack(fill="x", **outer)
-
-        self._canvas = tk.Canvas(
-            status_row, width=18, height=18, highlightthickness=0
+        # --- Header: title left, Settings button right ---
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(14, 6))
+        ctk.CTkLabel(
+            header, text="WormScan", font=theme.title(), text_color=theme.TEXT,
+        ).pack(side="left")
+        settings_btn = widgets.IconButton(
+            header, "Settings", self._open_settings, widgets.GLYPH_SETTINGS,
+            variant="secondary",
         )
-        self._canvas.pack(side="left")
-        self._dot = self._canvas.create_oval(2, 2, 16, 16, fill="#9e9e9e", outline="")
+        settings_btn.pack(side="right")
+        widgets.Tooltip(settings_btn, "Connection, mirror folder, and sync interval")
 
-        self._status_lbl = ttk.Label(status_row, text="Starting…")
-        self._status_lbl.pack(side="left", padx=(8, 0))
+        widgets.HairlineSeparator(self).pack(fill="x", padx=16, pady=(0, 8))
 
-        # --- Buttons ---
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill="x", padx=14, pady=2)
+        # --- Status card: dot + (status over info) + Sync Now ---
+        card = widgets.Card(self)
+        card.pack(fill="x", padx=16, pady=(0, 10))
+        row = card.content
+        row.grid_columnconfigure(1, weight=1)
 
-        ttk.Button(
-            btn_frame, text="Open Imaging UI", command=self._open_imaging
-        ).pack(fill="x", pady=3)
+        self._dot = widgets.StatusDot(row, size=14)
+        self._dot.grid(row=0, column=0, rowspan=2, padx=(0, 8))
 
-        self._analysis_btn = ttk.Button(
-            btn_frame, text="Open Analysis", command=self._open_analysis
+        self._status_lbl = ctk.CTkLabel(
+            row, text="Starting…", font=theme.body(), text_color=theme.TEXT,
+            anchor="w",
+        )
+        self._status_lbl.grid(row=0, column=1, sticky="w")
+        self._info_lbl = ctk.CTkLabel(
+            row, text="", font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+        )
+        self._info_lbl.grid(row=1, column=1, sticky="w")
+        self._status_tip = widgets.Tooltip(self._status_lbl, "")
+        self._info_tip = widgets.Tooltip(self._info_lbl, "")
+
+        self._sync_btn = widgets.IconButton(
+            row, "Sync Now", self._on_sync_now, widgets.GLYPH_REFRESH,
+            variant="primary",
+        )
+        self._sync_btn.grid(row=0, column=2, rowspan=2, padx=(8, 0))
+        widgets.Tooltip(self._sync_btn, "Pull new files from the Pi now")
+
+        # --- Action stack ---
+        actions = ctk.CTkFrame(self, fg_color="transparent")
+        actions.pack(fill="x", padx=16, pady=(0, 2))
+
+        imaging_btn = widgets.IconButton(
+            actions, "Imaging", self._open_imaging, widgets.GLYPH_CAMERA,
+            variant="secondary",
+        )
+        imaging_btn.pack(fill="x", pady=3)
+        widgets.Tooltip(imaging_btn, "Open the Pi camera interface in your browser")
+
+        self._analysis_btn = widgets.IconButton(
+            actions, "Analyze", self._open_analysis, widgets.GLYPH_CHART,
+            variant="primary",
         )
         self._analysis_btn.pack(fill="x", pady=3)
-
-        ttk.Button(
-            btn_frame, text="Review (Grid Viewer)", command=self._open_review
-        ).pack(fill="x", pady=3)
-
-        ttk.Button(
-            btn_frame, text="Open Mirror Folder", command=self._open_mirror
-        ).pack(fill="x", pady=3)
-
-        self._sync_btn = ttk.Button(
-            btn_frame, text="Sync now", command=self._on_sync_now
+        widgets.Tooltip(
+            self._analysis_btn,
+            "Run motility, crawling, or colony counting on recorded videos",
         )
-        self._sync_btn.pack(fill="x", pady=3)
 
-        ttk.Separator(btn_frame, orient="horizontal").pack(fill="x", pady=(6, 3))
+        review_btn = widgets.IconButton(
+            actions, "Review", self._open_review, widgets.GLYPH_GRID,
+            variant="secondary",
+        )
+        review_btn.pack(fill="x", pady=3)
+        widgets.Tooltip(review_btn, "Build a side-by-side grid viewer of your plates")
 
-        ttk.Button(
-            btn_frame, text="Shut down Pi", command=self._shutdown_pi
-        ).pack(fill="x", pady=3)
+        mirror_btn = widgets.IconButton(
+            actions, "Mirror Folder", self._open_mirror, widgets.GLYPH_FOLDER,
+            variant="secondary",
+        )
+        mirror_btn.pack(fill="x", pady=3)
+        widgets.Tooltip(mirror_btn, "Open the local folder where Pi data is synced")
 
-        # --- Info / settings row ---
-        bottom = ttk.Frame(self)
-        bottom.pack(fill="x", padx=14, pady=(4, 10))
+        widgets.HairlineSeparator(self).pack(fill="x", padx=16, pady=(8, 8))
 
-        self._info_lbl = ttk.Label(bottom, text="", font="TkSmallCaptionFont")
-        self._info_lbl.pack(side="left", fill="x", expand=True)
-
-        ttk.Button(
-            bottom, text="Settings", command=self._open_settings
-        ).pack(side="right")
+        shutdown_btn = widgets.IconButton(
+            self, "Shut Down Pi", self._shutdown_pi, widgets.GLYPH_POWER,
+            variant="destructive",
+        )
+        shutdown_btn.pack(fill="x", padx=16, pady=(0, 14))
+        widgets.Tooltip(shutdown_btn, "Safely power off the Raspberry Pi")
 
     # ------------------------------------------------------------------
     # UI poll — runs on the main thread via root.after()
@@ -1236,19 +1282,24 @@ class MainWindow(tk.Tk):
             display_color = s_color
             display_label = clock_msg if clock_msg else s_label
 
-        self._canvas.itemconfig(self._dot, fill=_DOT_COLORS.get(display_color, "#9e9e9e"))
-        self._status_lbl.config(text=display_label)
+        self._dot.set_color(theme.DOT_COLORS.get(display_color, theme.DOT_GRAY))
+        self._status_lbl.configure(
+            text=widgets.middle_truncate(display_label, self._STATUS_MAX)
+        )
+        self._status_tip.set_text(display_label)
 
         # Sync button lockout resolves on sync color, not display color
         if self._button_waiting and s_color == "green":
             self._button_waiting = False
-            self._sync_btn.config(state="normal")
+            self._sync_btn.configure(state="normal")
 
         parts = []
         if last_sync:
             parts.append(f"Last sync: {last_sync}")
         parts.append(f"{files} files mirrored · {_fmt_bytes(nbytes)}")
-        self._info_lbl.config(text="  ".join(parts))
+        info_full = "  ".join(parts)
+        self._info_lbl.configure(text=widgets.middle_truncate(info_full, self._INFO_MAX))
+        self._info_tip.set_text(info_full)
 
         self.after(_POLL_MS, self._poll)
 
@@ -1282,7 +1333,7 @@ class MainWindow(tk.Tk):
         os.startfile(mirror)
 
     def _on_sync_now(self) -> None:
-        self._sync_btn.config(state="disabled")
+        self._sync_btn.configure(state="disabled")
         self._button_waiting = True
         self._agent.wake()
 

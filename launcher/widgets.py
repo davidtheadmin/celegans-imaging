@@ -7,10 +7,12 @@ components but the thread/contract boundaries live elsewhere.
 
 Signatures here are pinned — later phases depend on them.
 """
+import os
 import tkinter as tk
 from typing import Callable, Optional
 
 import customtkinter as ctk
+from PIL import Image, ImageDraw, ImageFont
 
 import theme
 
@@ -372,3 +374,116 @@ class ProgressBar(ctk.CTkProgressBar):
         fraction = current / total
         fraction = max(0.0, min(1.0, fraction))
         self.set(fraction)
+
+
+# ---------------------------------------------------------------------------
+# IconButton — CTkButton with a Windows icon-font glyph rendered to an image
+# ---------------------------------------------------------------------------
+
+# Segoe Fluent Icons (Win11) preferred; Segoe MDL2 Assets (Win10) fallback.
+# Both share these code points, so the glyph constants work either way.
+_SEGOE_FLUENT = r"C:\Windows\Fonts\SegoeIcons.ttf"
+_SEGOE_MDL2 = r"C:\Windows\Fonts\segmdl2.ttf"
+
+
+def _resolve_icon_font() -> Optional[str]:
+    for path in (_SEGOE_FLUENT, _SEGOE_MDL2):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+ICON_FONT_PATH: Optional[str] = _resolve_icon_font()
+
+# Verified code points (rendered and eyeballed against Segoe Fluent Icons):
+GLYPH_CAMERA = 0xE722    # camera
+GLYPH_CHART = 0xE9D9     # activity / analytics
+GLYPH_GRID = 0xE8A9      # 2x2 grid view
+GLYPH_FOLDER = 0xE8B7    # folder
+GLYPH_REFRESH = 0xE72C   # refresh / sync
+GLYPH_POWER = 0xE7E8     # power button
+GLYPH_SETTINGS = 0xE713  # settings gear
+
+_ICON_PX = 18
+
+_VARIANTS = {
+    "primary": dict(
+        fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER, text_color="#FFFFFF",
+    ),
+    "secondary": dict(
+        fg_color=theme.CARD, hover_color=theme.HAIRLINE, text_color=theme.TEXT,
+        border_width=1, border_color=theme.HAIRLINE,
+    ),
+    "destructive": dict(
+        fg_color=theme.DESTRUCTIVE, hover_color="#D8302A", text_color="#FFFFFF",
+    ),
+}
+
+
+def _glyph_image(
+    codepoint: Optional[int], color_hex: str, px: int = _ICON_PX
+) -> tuple[Optional[Image.Image], Optional[tuple[int, int]]]:
+    """Render a single icon-font glyph to a transparent RGBA image in color_hex.
+
+    Returns (image, display_size) or (None, None) if the font is unavailable or
+    the glyph fails to render — callers then fall back to text-only.
+    """
+    if ICON_FONT_PATH is None or codepoint is None:
+        return None, None
+    try:
+        scale = 3  # render oversized, let CTkImage downsample crisply for HiDPI
+        font = ImageFont.truetype(ICON_FONT_PATH, px * scale)
+        ch = chr(codepoint)
+        bb = ImageDraw.Draw(Image.new("RGBA", (1, 1))).textbbox((0, 0), ch, font=font)
+        w = max(1, bb[2] - bb[0])
+        h = max(1, bb[3] - bb[1])
+        img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(img).text((-bb[0], -bb[1]), ch, font=font, fill=color_hex)
+        disp_w = max(1, round(w * px / h))
+        return img, (disp_w, px)
+    except Exception:
+        return None, None
+
+
+def IconButton(
+    parent: tk.Widget,
+    text: str,
+    command: Callable[[], None],
+    glyph: Optional[int],
+    variant: str = "secondary",
+    icon_only: bool = False,
+) -> ctk.CTkButton:
+    """A normal CTkButton with a Windows icon-font glyph rendered to its left.
+
+    variant ∈ {primary, secondary, destructive} maps to the theme button colors;
+    the glyph is drawn in the button's text color at ~18px. If the icon font is
+    missing or the glyph won't render, the button degrades to text-only without
+    crashing. Returns a plain CTkButton so callers can .pack()/.configure() and
+    attach a Tooltip exactly as with the factory buttons.
+    """
+    colors = dict(_VARIANTS.get(variant, _VARIANTS["secondary"]))
+    glyph_color = colors["text_color"]
+    img, size = _glyph_image(glyph, glyph_color)
+
+    btn_text = "" if icon_only else text
+    anchor = "center" if icon_only else "w"
+
+    common = dict(
+        text=btn_text, command=command, corner_radius=theme.BTN_RADIUS,
+        font=theme.body(), anchor=anchor, **colors,
+    )
+    if icon_only:
+        common["width"] = 40
+
+    if img is not None:
+        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=size)
+        btn = ctk.CTkButton(parent, image=ctk_img, compound="left", **common)
+        btn._icon_image = ctk_img  # keep a reference so it isn't GC'd
+    else:
+        # Font missing / glyph failed: text-only fallback. For icon_only with no
+        # glyph, fall back to showing the text so the control is still usable.
+        if icon_only:
+            common["text"] = text
+            common["anchor"] = "center"
+        btn = ctk.CTkButton(parent, **common)
+    return btn
