@@ -8,3 +8,7 @@ openpyxl>=3.1.0
 opencv-python>=4.8.0
 imageio-ffmpeg>=0.5.0
 scipy>=1.11.0
+scikit-image>=0.24.0
+tifffile>=2024.7.2
+imagecodecs>=2024.6.1
+customtkinter>=5.2.0

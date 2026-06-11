@@ -22,6 +22,9 @@ import config as cfg
 from analysis.docker_utils import run_preflight
 from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
+from analysis.counting_agent import (
+    CountingAgent, CountingStatus, counting_preflight,
+)
 from sync import SyncAgent, SyncStatus
 
 _log = logging.getLogger(__name__)
@@ -208,9 +211,10 @@ class AnalysisProgressDialog(tk.Toplevel):
     def __init__(
         self,
         parent: tk.Tk,
-        agent: "MotilityAgent | CrawlingAgent",
-        status: "MotilityStatus | CrawlingStatus",
+        agent: "MotilityAgent | CrawlingAgent | CountingAgent",
+        status: "MotilityStatus | CrawlingStatus | CountingStatus",
         title: str = "WormScan Analysis",
+        noun: str = "video",
     ) -> None:
         super().__init__(parent)
         self.title(title)
@@ -220,6 +224,7 @@ class AnalysisProgressDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
         self._agent = agent
         self._status = status
+        self._noun = noun
         self._flavour_idx = 0
         self._flavour_tick = 0
         self._build()
@@ -262,7 +267,7 @@ class AnalysisProgressDialog(tk.Toplevel):
         if total > 0:
             self._bar.config(maximum=total, value=snap.current_index)
             self._video_lbl.config(
-                text=f"Video {snap.current_index + 1} of {total}: {snap.current_basename}"
+                text=f"{self._noun.capitalize()} {snap.current_index + 1} of {total}: {snap.current_basename}"
                 if snap.current_index < total
                 else f"Finishing… ({total} of {total} done)"
             )
@@ -295,6 +300,8 @@ class AnalysisDialog(tk.Toplevel):
         motility_status: MotilityStatus,
         crawling_agent: CrawlingAgent,
         crawling_status: CrawlingStatus,
+        counting_agent: CountingAgent,
+        counting_status: CountingStatus,
         on_settings_update: Callable[[cfg.Settings], None],
     ) -> None:
         super().__init__(parent)
@@ -308,6 +315,8 @@ class AnalysisDialog(tk.Toplevel):
         self._status = motility_status
         self._crawling_agent = crawling_agent
         self._crawling_status = crawling_status
+        self._counting_agent = counting_agent
+        self._counting_status = counting_status
         self._on_settings_update = on_settings_update
         self._build()
 
@@ -325,12 +334,9 @@ class AnalysisDialog(tk.Toplevel):
         ttk.Radiobutton(
             rb_frame, text="Crawling", variable=self._mode, value="crawling"
         ).pack(side="left", padx=(12, 0))
-        counting_rb = ttk.Radiobutton(
-            rb_frame, text="Counting", variable=self._mode,
-            value="counting", state="disabled",
-        )
-        counting_rb.pack(side="left", padx=(12, 0))
-        _add_tooltip(counting_rb, "Not yet built")
+        ttk.Radiobutton(
+            rb_frame, text="Counting", variable=self._mode, value="counting",
+        ).pack(side="left", padx=(12, 0))
 
         # Row 1 — folder picker
         ttk.Label(self, text="Video folder").grid(row=1, column=0, sticky="w", **pad)
@@ -365,10 +371,13 @@ class AnalysisDialog(tk.Toplevel):
 
         # Row 4 — clear-cache checkbox
         self._clear_cache_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self._clear_cache_check = ttk.Checkbutton(
             self, text="Clear cache before run",
             variable=self._clear_cache_var,
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4))
+        )
+        self._clear_cache_check.grid(
+            row=4, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4)
+        )
 
         # Row 5 — render options (motility): unchanged motility binding
         self._motility_render_frame = ttk.LabelFrame(
@@ -447,6 +456,40 @@ class AnalysisDialog(tk.Toplevel):
             font="TkSmallCaptionFont", foreground="#888888",
         ).pack(anchor="w", pady=(2, 0))
 
+        # Row 5 — counting options: the two prominent tuning knobs. Everything
+        # else uses counting.py defaults.
+        self._counting_frame = ttk.LabelFrame(
+            self, text="Counting options", padding=(8, 4)
+        )
+        _split_row = ttk.Frame(self._counting_frame)
+        _split_row.pack(anchor="w", fill="x")
+        ttk.Label(_split_row, text="Split sensitivity").pack(side="left")
+        self._count_split = tk.StringVar(
+            value=f"{float(getattr(self._settings, 'counting_split_sensitivity', 3.0)):.1f}"
+        )
+        ttk.Spinbox(
+            _split_row, textvariable=self._count_split,
+            from_=0.5, to=20.0, increment=0.5, width=6, format="%.1f",
+        ).pack(side="left", padx=(6, 0))
+
+        _mincol_row = ttk.Frame(self._counting_frame)
+        _mincol_row.pack(anchor="w", fill="x", pady=(6, 0))
+        ttk.Label(_mincol_row, text="Min colony diameter (µm)").pack(side="left")
+        self._count_min_um = tk.StringVar(
+            value=f"{float(getattr(self._settings, 'counting_min_colony_um', 200.0)):.0f}"
+        )
+        ttk.Spinbox(
+            _mincol_row, textvariable=self._count_min_um,
+            from_=0.0, to=2000.0, increment=50.0, width=6, format="%.0f",
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            self._counting_frame,
+            text="Higher split sensitivity = fewer splits (big colonies stay whole). "
+                 "Min diameter rejects specks below this size.",
+            font="TkSmallCaptionFont", foreground="#888888", wraplength=360,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 0))
+
         # Show the render frame matching the selected analysis type.
         self._mode.trace_add("write", self._on_mode_change)
         self._on_mode_change()
@@ -471,13 +514,31 @@ class AnalysisDialog(tk.Toplevel):
         """Show the controls matching the selected analysis type.
 
         'Min fragment length (s)' (rows 2–3) is motility-only — threshold_s is
-        inert for crawling — so it is hidden when Crawling is selected.
+        inert for crawling/counting — so it is hidden for those. Counting has no
+        cache and no video render, so the clear-cache box and both render frames
+        are hidden and a small two-knob options frame is shown instead.
         """
-        if self._mode.get() == "crawling":
+        mode = self._mode.get()
+        # Reset the row-5 slot; the active branch re-grids what it needs.
+        self._motility_render_frame.grid_remove()
+        self._crawling_render_frame.grid_remove()
+        self._counting_frame.grid_remove()
+
+        if mode == "counting":
             self._threshold_label.grid_remove()
             self._threshold_spin.grid_remove()
             self._threshold_help.grid_remove()
-            self._motility_render_frame.grid_remove()
+            self._clear_cache_check.grid_remove()
+            self._counting_frame.grid(
+                row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
+            )
+            return
+
+        self._clear_cache_check.grid()
+        if mode == "crawling":
+            self._threshold_label.grid_remove()
+            self._threshold_spin.grid_remove()
+            self._threshold_help.grid_remove()
             self._crawling_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
@@ -485,7 +546,6 @@ class AnalysisDialog(tk.Toplevel):
             self._threshold_label.grid()
             self._threshold_spin.grid()
             self._threshold_help.grid()
-            self._crawling_render_frame.grid_remove()
             self._motility_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
@@ -501,7 +561,8 @@ class AnalysisDialog(tk.Toplevel):
             status = self._status
             progress_title = "WormScan Motility Analysis"
 
-        if self._status.is_running() or self._crawling_status.is_running():
+        if (self._status.is_running() or self._crawling_status.is_running()
+                or self._counting_status.is_running()):
             messagebox.showwarning(
                 "Already running",
                 "An analysis is already in progress.",
@@ -514,6 +575,59 @@ class AnalysisDialog(tk.Toplevel):
             messagebox.showerror(
                 "Invalid folder", f"Folder not found:\n{folder}", parent=self
             )
+            return
+
+        # Counting is pure-Python image analysis: no Docker/ffmpeg/threshold.
+        # It validates its own two knobs, runs its own pre-flight, and starts.
+        if self._mode.get() == "counting":
+            try:
+                split_sensitivity = float(self._count_split.get())
+                if not (0.5 <= split_sensitivity <= 20.0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid split sensitivity",
+                    "Split sensitivity must be a number between 0.5 and 20.0.",
+                    parent=self,
+                )
+                return
+            try:
+                min_colony_um = float(self._count_min_um.get())
+                if not (0.0 <= min_colony_um <= 2000.0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid colony size",
+                    "Min colony diameter must be a number between 0 and 2000 µm.",
+                    parent=self,
+                )
+                return
+
+            errors = counting_preflight(folder)
+            if errors:
+                messagebox.showerror(
+                    "Pre-flight checks failed",
+                    "\n\n".join(errors),
+                    parent=self,
+                )
+                return
+
+            self._on_settings_update(replace(
+                self._settings,
+                counting_split_sensitivity=split_sensitivity,
+                counting_min_colony_um=min_colony_um,
+            ))
+
+            AnalysisProgressDialog(
+                self._parent, self._counting_agent, self._counting_status,
+                title="WormScan Counting Analysis", noun="plate",
+            )
+            self._counting_agent.start_analysis(
+                folder,
+                split_sensitivity=split_sensitivity,
+                min_colony_um=min_colony_um,
+            )
+            self.destroy()
             return
 
         try:
@@ -998,6 +1112,8 @@ class MainWindow(tk.Tk):
         motility_status: MotilityStatus,
         crawling_agent: CrawlingAgent,
         crawling_status: CrawlingStatus,
+        counting_agent: CountingAgent,
+        counting_status: CountingStatus,
     ) -> None:
         super().__init__()
         self._settings = settings
@@ -1007,6 +1123,8 @@ class MainWindow(tk.Tk):
         self._motility_status = motility_status
         self._crawling_agent = crawling_agent
         self._crawling_status = crawling_status
+        self._counting_agent = counting_agent
+        self._counting_status = counting_status
         self._button_waiting = False
 
         self.title("WormScan Launcher")
@@ -1081,9 +1199,10 @@ class MainWindow(tk.Tk):
 
     def _poll(self) -> None:
         # --- Check analysis completion and surface result dialog ---
-        for kind, st in (
-            ("Motility", self._motility_status),
-            ("Crawling", self._crawling_status),
+        for kind, st, noun in (
+            ("Motility", self._motility_status, "video"),
+            ("Crawling", self._crawling_status, "video"),
+            ("Counting", self._counting_status, "plate"),
         ):
             result = st.pop_completed()
             if result:
@@ -1092,7 +1211,7 @@ class MainWindow(tk.Tk):
                 out_dir = result["out_dir"]
                 msg = (
                     f"{kind} analysis complete:\n"
-                    f"  {n_ok} videos processed, {n_fail} failed.\n\n"
+                    f"  {n_ok} {noun}s processed, {n_fail} failed.\n\n"
                     f"Open results folder?"
                 )
                 if messagebox.askyesno("Analysis Complete", msg):
@@ -1101,7 +1220,12 @@ class MainWindow(tk.Tk):
         # --- Status row: a running analysis takes priority ---
         motility_snap = self._motility_status.snapshot()
         crawling_snap = self._crawling_status.snapshot()
-        snap = motility_snap if motility_snap.running else crawling_snap
+        counting_snap = self._counting_status.snapshot()
+        snap = (
+            motility_snap if motility_snap.running
+            else crawling_snap if crawling_snap.running
+            else counting_snap
+        )
         s_color, s_label, last_sync, files, nbytes = self._status.snapshot()
 
         if snap.running:
@@ -1144,6 +1268,8 @@ class MainWindow(tk.Tk):
             self._motility_status,
             self._crawling_agent,
             self._crawling_status,
+            self._counting_agent,
+            self._counting_status,
             self._on_settings_saved,
         )
 
@@ -1190,7 +1316,8 @@ class MainWindow(tk.Tk):
         self._agent.update_settings(new)
         self._motility_agent.update_settings(new)
         self._crawling_agent.update_settings(new)
-        _log.info("Settings update propagated to: sync, motility, crawling")
+        self._counting_agent.update_settings(new)
+        _log.info("Settings update propagated to: sync, motility, crawling, counting")
 
     def _on_close(self) -> None:
         self._agent.stop()

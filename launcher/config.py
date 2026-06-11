@@ -26,6 +26,8 @@ class Settings:
     analysis_video_timeout_s: int = 600
     motility_long_threshold_s: float = 5.0
     crawling_min_track_s: int = 30
+    counting_split_sensitivity: float = 3.0
+    counting_min_colony_um: float = 200.0
     # Review (grid viewer) — last-used content type and video loop length.
     review_type: str = "auto"
     review_loop_s: float = 3.0
