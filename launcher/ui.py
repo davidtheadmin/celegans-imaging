@@ -77,6 +77,25 @@ _FLAVOUR_TEXTS: list[str] = [
     "Almost there (probably).",
     "Your patience is greatly appreciated.",
     "This worm has a lot of opinions.",
+    # Phase 3a additions ("Counting wiggles…" is dropped — exact dup of entry 0).
+    "Asking the worms to hold still…",
+    "Negotiating with Tierpsy…",
+    "Measuring bends per minute…",
+    "Politely herding nematodes…",
+    "Waiting for Docker to find itself…",
+    "Skeletonizing, 49 points at a time…",
+    "Bribing worm #47 to crawl straighter…",
+    "Untangling a collision…",
+    "Deciding if that's a worm or a scratch…",
+    "Detrending the head-swing…",
+    "Normalizing to body lengths…",
+    "Locating the head (harder than it sounds)…",
+    "Ignoring the flickering blobs…",
+    "Transcoding to something Tierpsy respects…",
+    "Re-running it just to be sure…",
+    "Telling the worms apart from the dust…",
+    "Spooling up the agar treadmill…",
+    "Consulting the petri oracle…",
 ]
 
 
@@ -121,7 +140,7 @@ def _add_tooltip(widget: tk.Widget, text: str) -> None:
 # Settings dialog
 # ---------------------------------------------------------------------------
 
-class SettingsDialog(tk.Toplevel):
+class SettingsDialog(ctk.CTkToplevel):
     def __init__(
         self,
         parent: tk.Tk,
@@ -130,6 +149,7 @@ class SettingsDialog(tk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self.title("WormScan Settings")
+        self.configure(fg_color=theme.BG)
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -137,42 +157,75 @@ class SettingsDialog(tk.Toplevel):
         self._on_save = on_save
         self._build(settings)
 
-    def _build(self, s: cfg.Settings) -> None:
-        pad = {"padx": 10, "pady": 5}
-
-        ttk.Label(self, text="Pi URL").grid(row=0, column=0, sticky="w", **pad)
-        self._pi_url = ttk.Entry(self, width=36)
-        self._pi_url.insert(0, s.pi_url)
-        self._pi_url.grid(row=0, column=1, columnspan=2, sticky="ew", **pad)
-
-        ttk.Label(self, text="Token").grid(row=1, column=0, sticky="w", **pad)
-        self._token = ttk.Entry(self, width=36, show="*")
-        self._token.insert(0, s.token)
-        self._token.grid(row=1, column=1, columnspan=2, sticky="ew", **pad)
-
-        ttk.Label(self, text="Mirror folder").grid(row=2, column=0, sticky="w", **pad)
-        self._mirror = ttk.Entry(self, width=30)
-        self._mirror.insert(0, s.mirror_root)
-        self._mirror.grid(row=2, column=1, sticky="ew", **pad)
-        ttk.Button(self, text="…", width=3, command=self._browse).grid(
-            row=2, column=2, **pad
+    def _entry(self, parent: tk.Widget, **kw) -> ctk.CTkEntry:
+        return ctk.CTkEntry(
+            parent, fg_color=theme.BG, text_color=theme.TEXT,
+            border_color=theme.HAIRLINE, border_width=1,
+            corner_radius=theme.BTN_RADIUS, font=theme.body(), **kw
         )
 
-        ttk.Label(self, text="Poll interval (s)").grid(row=3, column=0, sticky="w", **pad)
-        self._poll = ttk.Entry(self, width=8)
+    def _field_label(self, parent: tk.Widget, text: str) -> None:
+        ctk.CTkLabel(
+            parent, text=text, font=theme.body(), text_color=theme.TEXT, anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+
+    def _build(self, s: cfg.Settings) -> None:
+        card = widgets.Card(self)
+        card.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        body = card.content
+
+        # Pi URL
+        self._field_label(body, "Pi URL")
+        self._pi_url = self._entry(body)
+        self._pi_url.insert(0, s.pi_url)
+        self._pi_url.pack(fill="x", pady=(0, 10))
+        widgets.Tooltip(
+            self._pi_url,
+            "Base URL of the Pi capture service, e.g. http://192.168.50.2:8000",
+        )
+
+        # Token (masked)
+        self._field_label(body, "Token")
+        self._token = self._entry(body, show="*")
+        self._token.insert(0, s.token)
+        self._token.pack(fill="x", pady=(0, 10))
+        widgets.Tooltip(self._token, "Shared auth token, must match the Pi's .env")
+
+        # Mirror folder — entry + "…" picker
+        self._field_label(body, "Mirror folder")
+        mirror_row = ctk.CTkFrame(body, fg_color="transparent")
+        mirror_row.pack(fill="x", pady=(0, 10))
+        self._mirror = self._entry(mirror_row)
+        self._mirror.insert(0, s.mirror_root)
+        self._mirror.pack(side="left", fill="x", expand=True)
+        browse_btn = widgets.secondary_button(mirror_row, "…", self._browse)
+        browse_btn.configure(width=36)
+        browse_btn.pack(side="left", padx=(6, 0))
+        widgets.Tooltip(self._mirror, "Local folder where synced Pi data is mirrored")
+
+        # Poll interval
+        self._field_label(body, "Poll interval (s)")
+        self._poll = self._entry(body, width=90)
         self._poll.insert(0, str(s.poll_interval_s))
-        self._poll.grid(row=3, column=1, sticky="w", **pad)
+        self._poll.pack(anchor="w", pady=(0, 10))
+        widgets.Tooltip(
+            self._poll, "Seconds between automatic sync checks (minimum 10)"
+        )
 
+        # Read-only log-path caption
         log_path = cfg.APP_DATA / "launcher.log"
-        ttk.Label(
-            self, text=f"Log: {log_path}", font="TkSmallCaptionFont",
-            foreground="#666666",
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            body, text=f"Log: {log_path}", font=theme.caption(),
+            text_color=theme.TEXT_2, anchor="w", justify="left",
+        ).pack(fill="x")
 
-        btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=5, column=0, columnspan=3, pady=(4, 10))
-        ttk.Button(btn_frame, text="Save", command=self._save).pack(side="left", padx=6)
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+        # Footer — Save (primary) / Cancel (secondary)
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(0, 16))
+        widgets.primary_button(footer, "Save", self._save).pack(
+            side="right", padx=(8, 0)
+        )
+        widgets.secondary_button(footer, "Cancel", self.destroy).pack(side="right")
 
     def _browse(self) -> None:
         path = filedialog.askdirectory(initialdir=self._mirror.get() or "~")
@@ -205,7 +258,7 @@ class SettingsDialog(tk.Toplevel):
 # Analysis progress dialog (modeless)
 # ---------------------------------------------------------------------------
 
-class AnalysisProgressDialog(tk.Toplevel):
+class AnalysisProgressDialog(ctk.CTkToplevel):
     """
     Modeless progress window that tracks an analysis run in real time.
     Polls the status object at 200ms. Auto-closes when running becomes False.
@@ -235,30 +288,36 @@ class AnalysisProgressDialog(tk.Toplevel):
         self.after(_PROGRESS_POLL_MS, self._poll)
 
     def _build(self) -> None:
-        pad = {"padx": 16, "pady": 6}
+        self.configure(fg_color=theme.BG)
+        card = widgets.Card(self)
+        card.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        body = card.content
 
-        self._video_lbl = ttk.Label(self, text="Starting…", width=52)
-        self._video_lbl.pack(**pad)
-
-        self._bar = ttk.Progressbar(
-            self, mode="determinate", length=400, maximum=1, value=0
+        self._video_lbl = ctk.CTkLabel(
+            body, text="Starting…", font=theme.body(), text_color=theme.TEXT,
+            anchor="w", width=380, justify="left",
         )
-        self._bar.pack(padx=16, pady=4)
+        self._video_lbl.pack(fill="x", pady=(0, 8))
+        self._video_tip = widgets.Tooltip(self._video_lbl, "")
 
-        self._stage_lbl = ttk.Label(
-            self, text="", font="TkSmallCaptionFont", foreground="#555555", width=52
+        self._bar = widgets.ProgressBar(body, mode="determinate")
+        self._bar.pack(fill="x", pady=(0, 8))
+
+        self._stage_lbl = ctk.CTkLabel(
+            body, text="", font=theme.caption(), text_color=theme.TEXT_2,
+            anchor="w", justify="left",
         )
-        self._stage_lbl.pack(**pad)
+        self._stage_lbl.pack(fill="x")
 
-        self._flavour_lbl = ttk.Label(
-            self, text=_FLAVOUR_TEXTS[0], font="TkSmallCaptionFont",
-            foreground="#999999", width=52,
+        self._flavour_lbl = ctk.CTkLabel(
+            body, text=_FLAVOUR_TEXTS[0], font=theme.caption(),
+            text_color=theme.TEXT_2, anchor="w", justify="left",
         )
-        self._flavour_lbl.pack(padx=16, pady=(0, 4))
+        self._flavour_lbl.pack(fill="x", pady=(2, 0))
 
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill="x", padx=16, pady=(4, 12))
-        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side="right")
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(0, 16))
+        widgets.secondary_button(footer, "Cancel", self._on_cancel).pack(side="right")
 
     def _poll(self) -> None:
         snap = self._status.snapshot()
@@ -268,21 +327,27 @@ class AnalysisProgressDialog(tk.Toplevel):
             return
 
         total = snap.total
+        # ProgressBar.update handles the edge cases the old ttk code did:
+        # total==0 → empty, current==total → full.
+        self._bar.update(snap.current_index, total)
         if total > 0:
-            self._bar.config(maximum=total, value=snap.current_index)
-            self._video_lbl.config(
-                text=f"{self._noun.capitalize()} {snap.current_index + 1} of {total}: {snap.current_basename}"
-                if snap.current_index < total
-                else f"Finishing… ({total} of {total} done)"
-            )
+            if snap.current_index < total:
+                base = widgets.middle_truncate(snap.current_basename, 36)
+                self._video_lbl.configure(
+                    text=f"{self._noun.capitalize()} {snap.current_index + 1} of {total}: {base}"
+                )
+                self._video_tip.set_text(snap.current_basename)
+            else:
+                self._video_lbl.configure(text=f"Finishing… ({total} of {total} done)")
+                self._video_tip.set_text("")
 
-        self._stage_lbl.config(text=snap.current_stage)
+        self._stage_lbl.configure(text=snap.current_stage)
 
         self._flavour_tick += 1
         if self._flavour_tick >= 15:
             self._flavour_tick = 0
             self._flavour_idx = (self._flavour_idx + 1) % len(_FLAVOUR_TEXTS)
-            self._flavour_lbl.config(text=_FLAVOUR_TEXTS[self._flavour_idx])
+            self._flavour_lbl.configure(text=_FLAVOUR_TEXTS[self._flavour_idx])
 
         self.after(_PROGRESS_POLL_MS, self._poll)
 
@@ -748,7 +813,7 @@ class _ReviewStatus:
                 pass
 
 
-class _ReviewProgressDialog(tk.Toplevel):
+class _ReviewProgressDialog(ctk.CTkToplevel):
     """Modeless 'Building viewer…' window with an indeterminate bar.
 
     Polls the status object at 200ms (UI thread only). On completion it closes
@@ -769,18 +834,30 @@ class _ReviewProgressDialog(tk.Toplevel):
         self.after(_PROGRESS_POLL_MS, self._poll)
 
     def _build(self) -> None:
-        ttk.Label(self, text="Building viewer…", width=44).pack(padx=20, pady=(16, 8))
-        self._bar = ttk.Progressbar(self, mode="indeterminate", length=320)
-        self._bar.pack(padx=20, pady=4)
-        self._bar.start(12)
-        ttk.Label(
-            self,
+        self.configure(fg_color=theme.BG)
+        card = widgets.Card(self)
+        card.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        body = card.content
+
+        ctk.CTkLabel(
+            body, text="Building viewer…", font=theme.body(),
+            text_color=theme.TEXT, anchor="w", width=360,
+        ).pack(fill="x", pady=(0, 8))
+
+        self._bar = widgets.ProgressBar(body, mode="indeterminate")
+        self._bar.pack(fill="x", pady=(0, 8))
+        self._bar.start()
+
+        ctk.CTkLabel(
+            body,
             text="A video build transcodes every clip — this can take minutes the first time.",
-            font="TkSmallCaptionFont", foreground="#888888", width=52,
-        ).pack(padx=20, pady=(4, 8))
-        btn = ttk.Frame(self)
-        btn.pack(fill="x", padx=20, pady=(0, 12))
-        ttk.Button(btn, text="Cancel", command=self._on_cancel).pack(side="right")
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=340,
+        ).pack(fill="x")
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(0, 16))
+        widgets.secondary_button(footer, "Cancel", self._on_cancel).pack(side="right")
 
     def _poll(self) -> None:
         running, rc, html, stderr_tail = self._status.snapshot()
@@ -829,7 +906,7 @@ def _review_output_path(folders: list[str], video: bool) -> Optional[Path]:
 # Review (grid viewer) dialog
 # ---------------------------------------------------------------------------
 
-class ReviewDialog(tk.Toplevel):
+class ReviewDialog(ctk.CTkToplevel):
     """Build an interactive grid viewer (stills or crawling clips) from one or
     more day folders, via the standalone generators in launcher/viewers/.
 
@@ -856,7 +933,7 @@ class ReviewDialog(tk.Toplevel):
         self._build()
 
     def _build(self) -> None:
-        pad = {"padx": 12, "pady": 6}
+        self.configure(fg_color=theme.BG)
         self._folders: list[str] = []
         self._detect_cache: dict[str, tuple[Optional[str], int, int]] = {}
         self._resolved: Optional[str] = None
@@ -864,64 +941,72 @@ class ReviewDialog(tk.Toplevel):
         default_type = getattr(self._settings, "review_type", "auto")
         default_loop = float(getattr(self._settings, "review_loop_s", 3.0))
 
-        # Row 0 — folder add/remove list (askdirectory returns one at a time)
-        ttk.Label(self, text="Day folders").grid(row=0, column=0, sticky="nw", **pad)
-        list_frame = ttk.Frame(self)
-        list_frame.grid(row=0, column=1, columnspan=2, sticky="ew", **pad)
-        self._folder_list = tk.Listbox(list_frame, height=5, width=46)
-        self._folder_list.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(
-            list_frame, orient="vertical", command=self._folder_list.yview
-        )
-        sb.pack(side="left", fill="y")
-        self._folder_list.config(yscrollcommand=sb.set)
+        card = widgets.Card(self)
+        card.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        body = card.content
+        body.grid_columnconfigure(1, weight=1)
+        pad = {"padx": 6, "pady": 6}
 
-        fbtn = ttk.Frame(self)
-        fbtn.grid(row=1, column=1, columnspan=2, sticky="w", padx=12, pady=(0, 4))
-        ttk.Button(fbtn, text="Add folder…", command=self._add_folder).pack(side="left")
-        ttk.Button(
-            fbtn, text="Remove selected", command=self._remove_folder
+        # Row 0 — folder add/remove list (askdirectory returns one at a time)
+        ctk.CTkLabel(
+            body, text="Day folders", font=theme.body(), text_color=theme.TEXT,
+            anchor="nw",
+        ).grid(row=0, column=0, sticky="nw", **pad)
+        self._folder_list = widgets.FolderList(body, height=5)
+        self._folder_list.grid(row=0, column=1, columnspan=2, sticky="ew", **pad)
+
+        fbtn = ctk.CTkFrame(body, fg_color="transparent")
+        fbtn.grid(row=1, column=1, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+        widgets.secondary_button(fbtn, "Add folder…", self._add_folder).pack(side="left")
+        widgets.secondary_button(
+            fbtn, "Remove selected", self._remove_folder
         ).pack(side="left", padx=(8, 0))
 
         # Row 2 — content type radio (auto-detect default)
-        ttk.Label(self, text="Content").grid(row=2, column=0, sticky="w", **pad)
-        type_frame = ttk.Frame(self)
+        ctk.CTkLabel(
+            body, text="Content", font=theme.body(), text_color=theme.TEXT, anchor="w",
+        ).grid(row=2, column=0, sticky="w", **pad)
+        type_frame = ctk.CTkFrame(body, fg_color="transparent")
         type_frame.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
         self._type = tk.StringVar(value=default_type)
-        ttk.Radiobutton(
-            type_frame, text="Pictures", variable=self._type, value="pictures"
+        radio_kw = dict(
+            variable=self._type, font=theme.body(), text_color=theme.TEXT,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
+        ctk.CTkRadioButton(
+            type_frame, text="Pictures", value="pictures", **radio_kw
         ).pack(side="left")
-        ttk.Radiobutton(
-            type_frame, text="Videos", variable=self._type, value="videos"
+        ctk.CTkRadioButton(
+            type_frame, text="Videos", value="videos", **radio_kw
         ).pack(side="left", padx=(12, 0))
-        ttk.Radiobutton(
-            type_frame, text="Auto-detect", variable=self._type, value="auto"
+        ctk.CTkRadioButton(
+            type_frame, text="Auto-detect", value="auto", **radio_kw
         ).pack(side="left", padx=(12, 0))
 
         # Row 3 — resolved-type label (e.g. "auto → videos")
-        self._resolved_lbl = ttk.Label(
-            self, text="", font="TkSmallCaptionFont", foreground="#555555"
+        self._resolved_lbl = ctk.CTkLabel(
+            body, text="", font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
         )
         self._resolved_lbl.grid(
-            row=3, column=1, columnspan=2, sticky="w", padx=12, pady=(0, 4)
+            row=3, column=1, columnspan=2, sticky="w", padx=6, pady=(0, 4)
         )
 
         # Row 4 — loop length (videos only; hidden for pictures)
-        self._loop_label = ttk.Label(self, text="Loop length (s)")
+        self._loop_label = ctk.CTkLabel(
+            body, text="Loop length (s)", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        )
         self._loop_var = tk.StringVar(value=f"{default_loop:.1f}")
-        self._loop_spin = ttk.Spinbox(
-            self, textvariable=self._loop_var,
-            from_=1.0, to=10.0, increment=0.5, width=6, format="%.1f",
+        self._loop_spin = widgets.Spin(
+            body, self._loop_var, from_=1.0, to=10.0, increment=0.5, fmt="%.1f",
         )
 
-        # Row 5 — buttons
-        btn_frame = ttk.Frame(self)
-        btn_frame.grid(row=5, column=0, columnspan=3, pady=(8, 12))
-        self._start_btn = ttk.Button(btn_frame, text="Start", command=self._start)
-        self._start_btn.pack(side="left", padx=6)
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(
-            side="left", padx=6
-        )
+        # Footer — Start (primary) / Cancel (secondary)
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=16, pady=(0, 16))
+        self._start_btn = widgets.primary_button(footer, "Start", self._start)
+        self._start_btn.pack(side="right", padx=(8, 0))
+        widgets.secondary_button(footer, "Cancel", self.destroy).pack(side="right")
 
         self._type.trace_add("write", lambda *_: self._refresh())
         self._refresh()
@@ -936,16 +1021,15 @@ class ReviewDialog(tk.Toplevel):
         )
         if path:
             self._folders.append(path)
-            self._folder_list.insert(tk.END, path)
+            self._folder_list.set_folders(self._folders)
             self._refresh()
 
     def _remove_folder(self) -> None:
-        sel = self._folder_list.curselection()
-        if not sel:
+        idx = self._folder_list.selected_index()
+        if idx is None:
             return
-        idx = sel[0]
-        self._folder_list.delete(idx)
         del self._folders[idx]
+        self._folder_list.set_folders(self._folders)
         self._refresh()
 
     # ------------------------------------------------------------------
@@ -1004,18 +1088,21 @@ class ReviewDialog(tk.Toplevel):
                 label = "auto → no images or videos found in first folder"
             else:
                 label = f"auto → {resolved}  ({vids} videos, {imgs} images in first folder)"
-        self._resolved_lbl.config(text=label, foreground="#c96565" if err else "#555555")
+        self._resolved_lbl.configure(
+            text=widgets.middle_truncate(label, 46),
+            text_color=theme.DESTRUCTIVE if err else theme.TEXT_2,
+        )
 
         # Loop length only meaningful for videos
         if self._resolved == "videos":
-            self._loop_label.grid(row=4, column=0, sticky="w", padx=12, pady=6)
-            self._loop_spin.grid(row=4, column=1, sticky="w", padx=12, pady=6)
+            self._loop_label.grid(row=4, column=0, sticky="w", padx=6, pady=6)
+            self._loop_spin.grid(row=4, column=1, sticky="w", padx=6, pady=6)
         else:
             self._loop_label.grid_remove()
             self._loop_spin.grid_remove()
 
         ok = bool(self._folders) and self._resolved is not None
-        self._start_btn.config(state="normal" if ok else "disabled")
+        self._start_btn.configure(state="normal" if ok else "disabled")
 
     def _start(self) -> None:
         if not self._folders or self._resolved is None:
