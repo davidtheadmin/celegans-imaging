@@ -1,0 +1,68 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Accent variants + prototype affordances (Display switcher, clock chip).
+   Base system lives in app.css. data-accent on <body> swaps the accent.
+   ═══════════════════════════════════════════════════════════════════════════ */
+body[data-accent="blue"]   { --accent:#0a84ff; --accent-h:#3a9cff; --accent-dim:rgba(10,132,255,.16);  --accent-ring:rgba(10,132,255,.45); }
+body[data-accent="indigo"] { --accent:#5e5ce6; --accent-h:#7d7bf0; --accent-dim:rgba(94,92,230,.18);  --accent-ring:rgba(94,92,230,.45); }
+body[data-accent="teal"]   { --accent:#19c3b2; --accent-h:#36d8c7; --accent-dim:rgba(25,195,178,.16); --accent-ring:rgba(25,195,178,.4); }
+body[data-accent="violet"] { --accent:#bf5af0; --accent-h:#cd78f3; --accent-dim:rgba(191,90,240,.18); --accent-ring:rgba(191,90,240,.4); }
+
+/* Accent-aware calibration band (was hard-coded blue) */
+.calib-edge--right { background: var(--accent); }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   DISPLAY SWITCHER — small prototype control to taste-test the accent.
+   ──────────────────────────────────────────────────────────────────────────── */
+.disp { position: fixed; right: 16px; bottom: 16px; z-index: 900; font-family: var(--font); user-select: none; }
+.disp-toggle {
+  display: flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 15px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 99px;
+  color: var(--text-muted); font-size: 12px; font-weight: 500; letter-spacing: .02em;
+  cursor: pointer; box-shadow: var(--sh-2);
+  transition: color .14s, border-color .14s;
+}
+.disp-toggle:hover { color: var(--text); border-color: var(--border-2); }
+.disp-toggle .disp-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 9px var(--accent); }
+.disp-panel {
+  position: absolute; right: 0; bottom: calc(100% + 10px); width: 236px; padding: 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  box-shadow: var(--sh-pop);
+  display: flex; flex-direction: column; gap: 14px;
+}
+.disp-panel[hidden] { display: none; }
+.disp-row { display: flex; flex-direction: column; gap: 9px; }
+.disp-row__label { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--text-dim); font-weight: 600; }
+.disp-swatches { display: flex; gap: 11px; }
+.disp-swatches button {
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 2px solid transparent; cursor: pointer; padding: 0; position: relative;
+  transition: transform .12s;
+}
+.disp-swatches button:hover { transform: scale(1.08); }
+.disp-swatches button.on { border-color: var(--text); }
+.disp-swatches button.on::after {
+  content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 1px solid var(--border-2);
+}
+.disp-reset {
+  margin-top: 2px; height: 32px;
+  background: transparent; border: 1px solid var(--border); border-radius: var(--r-sm);
+  color: var(--text-muted); font-family: var(--font); font-size: 12px; font-weight: 500;
+  cursor: pointer; transition: color .14s, border-color .14s;
+}
+.disp-reset:hover { color: var(--danger); border-color: var(--danger); }
+.disp-note { font-size: 11px; color: var(--text-dim); line-height: 1.55; margin: 0; }
+
+/* Clock chip in the status cluster */
+#clock-chip { cursor: default; }
+
+/* Light / dark toggle in the header */
+#mode-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0; border-radius: 50%;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text-muted);
+  cursor: pointer; box-shadow: var(--sh-1);
+  transition: color .14s, border-color .14s, background .14s;
+}
+#mode-toggle:hover { color: var(--text); border-color: var(--border-2); }
+#mode-toggle svg { width: 16px; height: 16px; }
