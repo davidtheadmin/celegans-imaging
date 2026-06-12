@@ -219,7 +219,7 @@ class Spin(ctk.CTkFrame):
         to: float,
         increment: float,
         fmt: str = "%.1f",
-        width: int = 90,
+        width: int = 140,
     ) -> None:
         super().__init__(parent, fg_color="transparent")
         self._var = variable

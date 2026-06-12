@@ -360,7 +360,15 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
 # Analysis setup dialog
 # ---------------------------------------------------------------------------
 
-class AnalysisDialog(tk.Toplevel):
+class AnalysisDialog(ctk.CTkToplevel):
+    # Segment labels are capitalised for display; _on_segment maps each back to
+    # the canonical mode string the agents/_start expect.
+    _MODE_LABELS = {
+        "Motility": "motility",
+        "Crawling": "crawling",
+        "Colony Survival": "counting",
+    }
+
     def __init__(
         self,
         parent: tk.Tk,
@@ -375,6 +383,7 @@ class AnalysisDialog(tk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self.title("WormScan Analysis")
+        self.configure(fg_color=theme.BG)
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
@@ -391,172 +400,206 @@ class AnalysisDialog(tk.Toplevel):
 
     def _build(self) -> None:
         pad = {"padx": 12, "pady": 6}
+        self.grid_columnconfigure(1, weight=1)
+        chk_kw = dict(
+            font=theme.body(), text_color=theme.TEXT,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        )
 
-        # Row 0 — analysis type
-        ttk.Label(self, text="Analysis type").grid(row=0, column=0, sticky="w", **pad)
+        # Row 0 — analysis type (segmented control; _mode keeps canonical values)
+        ctk.CTkLabel(
+            self, text="Analysis type", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        ).grid(row=0, column=0, sticky="w", **pad)
         self._mode = tk.StringVar(value="motility")
-        rb_frame = ttk.Frame(self)
-        rb_frame.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
-        ttk.Radiobutton(
-            rb_frame, text="Motility", variable=self._mode, value="motility"
-        ).pack(side="left")
-        ttk.Radiobutton(
-            rb_frame, text="Crawling", variable=self._mode, value="crawling"
-        ).pack(side="left", padx=(12, 0))
-        ttk.Radiobutton(
-            rb_frame, text="Counting", variable=self._mode, value="counting",
-        ).pack(side="left", padx=(12, 0))
+        self._mode_seg = ctk.CTkSegmentedButton(
+            self, values=list(self._MODE_LABELS.keys()),
+            command=self._on_segment, font=theme.body(),
+            fg_color=theme.CARD, text_color=theme.TEXT,
+            selected_color=theme.ACCENT, selected_hover_color=theme.ACCENT_HOVER,
+            unselected_color=theme.CARD, unselected_hover_color=theme.HAIRLINE,
+            corner_radius=theme.BTN_RADIUS,
+        )
+        self._mode_seg.set("Motility")
+        self._mode_seg.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
 
         # Row 1 — folder picker
-        ttk.Label(self, text="Video folder").grid(row=1, column=0, sticky="w", **pad)
+        ctk.CTkLabel(
+            self, text="Video folder", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        ).grid(row=1, column=0, sticky="w", **pad)
         self._folder_var = tk.StringVar(value=self._settings.mirror_root)
-        ttk.Entry(self, textvariable=self._folder_var, width=36).grid(
-            row=1, column=1, sticky="ew", **pad
-        )
-        ttk.Button(self, text="…", width=3, command=self._browse).grid(
-            row=1, column=2, **pad
-        )
+        ctk.CTkEntry(
+            self, textvariable=self._folder_var, width=300,
+            fg_color=theme.CARD, text_color=theme.TEXT,
+            border_color=theme.HAIRLINE, border_width=1,
+            corner_radius=theme.BTN_RADIUS, font=theme.body(),
+        ).grid(row=1, column=1, sticky="ew", **pad)
+        _browse_btn = widgets.secondary_button(self, "…", self._browse)
+        _browse_btn.configure(width=36)
+        _browse_btn.grid(row=1, column=2, **pad)
 
-        # Row 2 — threshold spinbox (motility-only; hidden when Crawling selected)
-        self._threshold_label = ttk.Label(self, text="Min fragment length (s)")
-        self._threshold_label.grid(row=2, column=0, sticky="w", **pad)
+        # Min fragment length (s) is built inside the motility Card (see below)
+        # so it shows/hides with that card. _start still reads _threshold_var.
         self._threshold_var = tk.StringVar(
             value=str(self._settings.motility_long_threshold_s)
-        )
-        self._threshold_spin = ttk.Spinbox(
-            self, textvariable=self._threshold_var,
-            from_=1.0, to=30.0, increment=0.5, width=6, format="%.1f",
-        )
-        self._threshold_spin.grid(row=2, column=1, sticky="w", **pad)
-
-        self._threshold_help = ttk.Label(
-            self,
-            text="Recommended: 5–10 s.  Higher = stricter but biases toward slower worms.",
-            font="TkSmallCaptionFont", foreground="#555555",
-        )
-        self._threshold_help.grid(
-            row=3, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4)
         )
 
         # Row 4 — clear-cache checkbox
         self._clear_cache_var = tk.BooleanVar(value=False)
-        self._clear_cache_check = ttk.Checkbutton(
+        self._clear_cache_check = ctk.CTkCheckBox(
             self, text="Clear cache before run",
-            variable=self._clear_cache_var,
+            variable=self._clear_cache_var, **chk_kw,
         )
         self._clear_cache_check.grid(
             row=4, column=0, columnspan=3, sticky="w", padx=12, pady=(0, 4)
         )
 
         # Row 5 — render options (motility): unchanged motility binding
-        self._motility_render_frame = ttk.LabelFrame(
-            self, text="Video render options", padding=(8, 4)
-        )
-        self._motility_render_frame.grid(
-            row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
-        )
-        render_frame = self._motility_render_frame
+        self._motility_render_frame = widgets.Card(self, title="Video render options")
+        render_frame = self._motility_render_frame.content
         self._want_tracked = tk.BooleanVar(value=False)
         self._want_curvature = tk.BooleanVar(value=False)
         self._want_sidebyside = tk.BooleanVar(value=False)
         self._want_per_worm_traces = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        ctk.CTkCheckBox(
             render_frame, text="Tracked (skeleton + worm IDs)",
-            variable=self._want_tracked,
-        ).pack(anchor="w")
-        ttk.Checkbutton(
+            variable=self._want_tracked, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkCheckBox(
             render_frame, text="Curvature (red = positive, blue = negative)",
-            variable=self._want_curvature,
-        ).pack(anchor="w")
-        ttk.Checkbutton(
+            variable=self._want_curvature, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkCheckBox(
             render_frame, text="Side-by-side (original | masked + tracked)",
-            variable=self._want_sidebyside,
-        ).pack(anchor="w")
-        ttk.Checkbutton(
+            variable=self._want_sidebyside, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkCheckBox(
             render_frame,
             text="Per-worm curvature traces (PNG + MP4 per fully-tracked worm)",
-            variable=self._want_per_worm_traces,
-        ).pack(anchor="w")
-        ttk.Label(
+            variable=self._want_per_worm_traces, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkLabel(
             render_frame,
             text="Adds 30–90 s render time per video per option.",
-            font="TkSmallCaptionFont", foreground="#888888",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
-        # Row 5 — render options (crawling): tracking, side-by-side, path traces
-        self._crawling_render_frame = ttk.LabelFrame(
-            self, text="Video render options", padding=(8, 4)
+        # Min fragment length — motility quality filter; mirrors the Crawling
+        # card's 'Min track span'. Lives in the card so it shows/hides with it.
+        _min_frag_row = ctk.CTkFrame(render_frame, fg_color="transparent")
+        _min_frag_row.pack(anchor="w", fill="x", pady=(6, 0))
+        self._threshold_label = ctk.CTkLabel(
+            _min_frag_row, text="Min fragment length (s)", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
         )
+        self._threshold_label.pack(side="left")
+        widgets.Tooltip(
+            self._threshold_label,
+            "Worm tracks shorter than this don't count toward the summary statistics.",
+        )
+        self._threshold_spin = widgets.Spin(
+            _min_frag_row, self._threshold_var,
+            from_=1.0, to=30.0, increment=0.5, fmt="%.1f",
+        )
+        self._threshold_spin.pack(side="left", padx=(6, 0))
+        self._threshold_help = ctk.CTkLabel(
+            render_frame,
+            text="Recommended: 5–10 s.  Higher = stricter but biases toward slower worms.",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=360,
+        )
+        self._threshold_help.pack(anchor="w", pady=(2, 0))
+
+        # Row 5 — render options (crawling): tracking, side-by-side, path traces
+        self._crawling_render_frame = widgets.Card(self, title="Video render options")
+        crawl_frame = self._crawling_render_frame.content
         self._crawl_tracked = tk.BooleanVar(value=False)
         self._crawl_sidebyside = tk.BooleanVar(value=False)
         self._crawl_path_traces = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            self._crawling_render_frame, text="Tracked (skeleton + worm IDs)",
-            variable=self._crawl_tracked,
-        ).pack(anchor="w")
-        ttk.Checkbutton(
-            self._crawling_render_frame, text="Side-by-side (original | masked + tracked)",
-            variable=self._crawl_sidebyside,
-        ).pack(anchor="w")
-        ttk.Checkbutton(
-            self._crawling_render_frame, text="Path traces (fading centroid trails)",
-            variable=self._crawl_path_traces,
-        ).pack(anchor="w")
-        ttk.Label(
-            self._crawling_render_frame,
+        ctk.CTkCheckBox(
+            crawl_frame, text="Tracked (skeleton + worm IDs)",
+            variable=self._crawl_tracked, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkCheckBox(
+            crawl_frame, text="Side-by-side (original | masked + tracked)",
+            variable=self._crawl_sidebyside, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkCheckBox(
+            crawl_frame, text="Path traces (fading centroid trails)",
+            variable=self._crawl_path_traces, **chk_kw,
+        ).pack(anchor="w", pady=2)
+        ctk.CTkLabel(
+            crawl_frame,
             text="Adds 1–3 min render time per video per option.",
-            font="TkSmallCaptionFont", foreground="#888888",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left",
         ).pack(anchor="w", pady=(2, 0))
 
         # Min track span — quality filter; renders show only passing worms.
-        _min_track_row = ttk.Frame(self._crawling_render_frame)
+        _min_track_row = ctk.CTkFrame(crawl_frame, fg_color="transparent")
         _min_track_row.pack(anchor="w", fill="x", pady=(6, 0))
-        ttk.Label(_min_track_row, text="Min track span (s)").pack(side="left")
+        _min_track_lbl = ctk.CTkLabel(
+            _min_track_row, text="Min track span (s)", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        )
+        _min_track_lbl.pack(side="left")
+        widgets.Tooltip(
+            _min_track_lbl,
+            "Crawling worms tracked for less than this are dropped from aggregation.",
+        )
         self._crawl_min_track = tk.StringVar(
             value=str(int(getattr(self._settings, "crawling_min_track_s", 30)))
         )
-        ttk.Spinbox(
-            _min_track_row, textvariable=self._crawl_min_track,
-            from_=1, to=600, increment=5, width=6, format="%.0f",
+        widgets.Spin(
+            _min_track_row, self._crawl_min_track,
+            from_=1, to=600, increment=5, fmt="%.0f",
         ).pack(side="left", padx=(6, 0))
-        ttk.Label(
-            self._crawling_render_frame,
+        ctk.CTkLabel(
+            crawl_frame,
             text="Worms on the plate for less than this span are dropped from the aggregate and not drawn.",
-            font="TkSmallCaptionFont", foreground="#888888",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
 
         # Row 5 — counting options: the two prominent tuning knobs. Everything
         # else uses counting.py defaults.
-        self._counting_frame = ttk.LabelFrame(
-            self, text="Counting options", padding=(8, 4)
-        )
-        _split_row = ttk.Frame(self._counting_frame)
+        self._counting_frame = widgets.Card(self, title="Colony Survival options")
+        count_frame = self._counting_frame.content
+        _split_row = ctk.CTkFrame(count_frame, fg_color="transparent")
         _split_row.pack(anchor="w", fill="x")
-        ttk.Label(_split_row, text="Split sensitivity").pack(side="left")
+        ctk.CTkLabel(
+            _split_row, text="Split sensitivity", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        ).pack(side="left")
         self._count_split = tk.StringVar(
             value=f"{float(getattr(self._settings, 'counting_split_sensitivity', 3.0)):.1f}"
         )
-        ttk.Spinbox(
-            _split_row, textvariable=self._count_split,
-            from_=0.5, to=20.0, increment=0.5, width=6, format="%.1f",
+        widgets.Spin(
+            _split_row, self._count_split,
+            from_=0.5, to=20.0, increment=0.5, fmt="%.1f",
         ).pack(side="left", padx=(6, 0))
 
-        _mincol_row = ttk.Frame(self._counting_frame)
+        _mincol_row = ctk.CTkFrame(count_frame, fg_color="transparent")
         _mincol_row.pack(anchor="w", fill="x", pady=(6, 0))
-        ttk.Label(_mincol_row, text="Min colony diameter (µm)").pack(side="left")
+        ctk.CTkLabel(
+            _mincol_row, text="Min colony diameter (µm)", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        ).pack(side="left")
         self._count_min_um = tk.StringVar(
             value=f"{float(getattr(self._settings, 'counting_min_colony_um', 200.0)):.0f}"
         )
-        ttk.Spinbox(
-            _mincol_row, textvariable=self._count_min_um,
-            from_=0.0, to=2000.0, increment=50.0, width=6, format="%.0f",
+        widgets.Spin(
+            _mincol_row, self._count_min_um,
+            from_=0.0, to=2000.0, increment=50.0, fmt="%.0f",
         ).pack(side="left", padx=(6, 0))
-        ttk.Label(
-            self._counting_frame,
+        ctk.CTkLabel(
+            count_frame,
             text="Higher split sensitivity = fewer splits (big colonies stay whole). "
                  "Min diameter rejects specks below this size.",
-            font="TkSmallCaptionFont", foreground="#888888", wraplength=360,
-            justify="left",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
 
         # Show the render frame matching the selected analysis type.
@@ -564,14 +607,22 @@ class AnalysisDialog(tk.Toplevel):
         self._on_mode_change()
 
         # Buttons
-        btn_frame = ttk.Frame(self)
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.grid(row=6, column=0, columnspan=3, pady=(4, 12))
-        ttk.Button(btn_frame, text="Start", command=self._start).pack(
+        widgets.primary_button(btn_frame, "Start", self._start).pack(
             side="left", padx=6
         )
-        ttk.Button(btn_frame, text="Cancel", command=self.destroy).pack(
+        widgets.secondary_button(btn_frame, "Cancel", self.destroy).pack(
             side="left", padx=6
         )
+
+    def _on_segment(self, label: str) -> None:
+        """Map the capitalised segment label to its canonical mode string.
+
+        Writing self._mode fires the same trace the radios fired, so
+        _on_mode_change runs on every switch exactly as before.
+        """
+        self._mode.set(self._MODE_LABELS[label])
 
     def _browse(self) -> None:
         initial = self._folder_var.get() or self._settings.mirror_root
@@ -582,10 +633,11 @@ class AnalysisDialog(tk.Toplevel):
     def _on_mode_change(self, *_args) -> None:
         """Show the controls matching the selected analysis type.
 
-        'Min fragment length (s)' (rows 2–3) is motility-only — threshold_s is
-        inert for crawling/counting — so it is hidden for those. Counting has no
-        cache and no video render, so the clear-cache box and both render frames
-        are hidden and a small two-knob options frame is shown instead.
+        'Min fragment length (s)' now lives inside the motility Card (it is
+        inert for crawling/counting), so it shows/hides with that card and needs
+        no separate toggling here. Counting has no cache and no video render, so
+        the clear-cache box and both render frames are hidden and a small
+        two-knob options frame is shown instead.
         """
         mode = self._mode.get()
         # Reset the row-5 slot; the active branch re-grids what it needs.
@@ -594,9 +646,6 @@ class AnalysisDialog(tk.Toplevel):
         self._counting_frame.grid_remove()
 
         if mode == "counting":
-            self._threshold_label.grid_remove()
-            self._threshold_spin.grid_remove()
-            self._threshold_help.grid_remove()
             self._clear_cache_check.grid_remove()
             self._counting_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
@@ -605,16 +654,10 @@ class AnalysisDialog(tk.Toplevel):
 
         self._clear_cache_check.grid()
         if mode == "crawling":
-            self._threshold_label.grid_remove()
-            self._threshold_spin.grid_remove()
-            self._threshold_help.grid_remove()
             self._crawling_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
         else:
-            self._threshold_label.grid()
-            self._threshold_spin.grid()
-            self._threshold_help.grid()
             self._motility_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
@@ -1300,7 +1343,7 @@ class MainWindow(ctk.CTk):
         self._analysis_btn.pack(fill="x", pady=3)
         widgets.Tooltip(
             self._analysis_btn,
-            "Run motility, crawling, or colony counting on recorded videos",
+            "Run motility, crawling, or colony survival on recorded videos",
         )
 
         review_btn = widgets.IconButton(
