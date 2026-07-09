@@ -32,8 +32,8 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 
 
 # ---------------------------------------------------------------------------
-# Bend counter — UNCHANGED from v1. Black box: takes a clean angle time-series,
-# returns peak counts. Do not modify.
+# Bend counter (head_angle_peaks_v2). Black box: takes a clean angle
+# time-series, returns peak counts.
 # ---------------------------------------------------------------------------
 
 def _detrend(sig: np.ndarray, fps: float) -> np.ndarray:
@@ -49,7 +49,7 @@ def compute_head_angle_signal(
     worm_traj: pd.DataFrame,
     skel_all: np.ndarray,
     fps: float,
-    prominence: float = 0.30,
+    prominence: float,
 ) -> "dict | None":
     """
     Compute the head-angle signal for one worm track.
@@ -677,7 +677,6 @@ def _metrics_curl(
         "bend_interval_cv": cv,
         "is_long": total_obs_s >= long_threshold_s,
         "coverage_pct": coverage_pct,
-        "is_full_track": coverage_pct >= 90.0,
         "fps_used": fps,
         "bend_method": "head_angle_peaks_v2",
         "group_classification": "curl",
@@ -734,7 +733,6 @@ def _metrics_one_collision_subtrack(
         "bend_interval_cv": cv,
         "is_long": total_obs_s >= long_threshold_s,
         "coverage_pct": coverage_pct,
-        "is_full_track": coverage_pct >= 90.0,
         "fps_used": fps,
         "bend_method": "head_angle_peaks_v2",
         "group_classification": "collision",

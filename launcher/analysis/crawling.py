@@ -1,10 +1,13 @@
 """
 Crawling analysis agent. Parallel to the Motility pipeline (analysis/motility.py).
 
-Initially a near-exact copy of the motility pipeline — same Tierpsy parameters,
-same ffmpeg flags, same output format. It will diverge incrementally. The one
-intentional difference is the Tierpsy docker subprocess call, which is heavily
-instrumented here for diagnostics (see _run_tierpsy_instrumented).
+Started as a copy of the motility pipeline but has diverged substantially: it
+uses different Tierpsy parameters (crawling_params.json), its own position-based
+fragment linker (crawling_fragment_grouping, not the motility grouping engine),
+and a different output schema (per-worm / per-condition tables with body-length-
+normalized, activity, and velocity-arrow columns). The shared ffmpeg/AVI step
+remains. The Tierpsy docker subprocess call is heavily instrumented here for
+diagnostics (see _run_tierpsy_instrumented).
 
 Thread boundary mirrors SyncAgent/SyncStatus and MotilityAgent/MotilityStatus.
 

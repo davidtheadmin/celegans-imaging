@@ -265,11 +265,11 @@ def _process_one_video_motility(
             if (want_per_worm_traces and hdf5_path
                     and skeletons_hdf5.exists() and masked_hdf5.exists()):
                 from analysis.plots import make_per_worm_trace_png
-                full_track_rows = [r for r in fragment_rows
-                                   if r.get("is_long")]
+                long_rows = [r for r in fragment_rows
+                             if r.get("is_long")]
                 traces_dir = per_video_dir / f"{prefix}_traces"
                 traces_dir.mkdir(exist_ok=True)
-                for worm_row in full_track_rows:
+                for worm_row in long_rows:
                     wi = worm_row.get("repr_tierpsy_id", worm_row["worm_index"])
                     member_ids = worm_row.get("member_tierpsy_ids", [wi])
                     make_per_worm_trace_png(
