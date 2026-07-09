@@ -145,7 +145,7 @@ function initPreview() {
 // ── Keyboard helpers ──────────────────────────────────────────────────────────
 function isTyping() {
   const el = document.activeElement;
-  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
 }
 
 const _QUAD_ORDER = ['NW', 'NE', 'SW', 'SE'];
@@ -622,17 +622,20 @@ function switchMode(mode) {
 async function captureFreeStill() {
   const btn = document.getElementById('still-btn');
   const msg = document.getElementById('still-msg');
+  const origHtml = btn.innerHTML;
   btn.disabled = true;
-  msg.textContent = 'Capturing…'; msg.hidden = false;
+  btn.textContent = 'Capturing…';
+  msg.textContent = ''; msg.hidden = true;
   try {
     const d = await apiJson('/capture/free/still', { method: 'POST', body: {} });
     announce(`Captured: ${d.filename}`);
-    msg.textContent = d.filename;
+    msg.textContent = d.filename; msg.hidden = false;
     await refreshThumbnails();
   } catch (err) {
     announce(`Capture failed: ${err.message}`);
-    msg.textContent = `Error: ${err.message}`;
+    msg.textContent = `Error: ${err.message}`; msg.hidden = false;
   } finally {
+    btn.innerHTML = origHtml;
     btn.disabled = false;
   }
 }
@@ -1415,26 +1418,35 @@ async function captureMotility(sessionId, plateId) {
 
 async function captureSurvival(sessionId, plateId) {
   const btn = document.getElementById('surv-btn');
+  const origHtml = btn.innerHTML;
   btn.disabled = true;
+  btn.textContent = 'Capturing…';
   try {
     await apiJson(`/sessions/${sessionId}/plates/${plateId}/capture`,
       { method: 'POST', body: {} });
     announce('Still captured');
     await refreshThumbnails();
   } catch (err) { announce(`Capture failed: ${err.message}`); }
-  finally { btn.disabled = false; }
+  finally {
+    btn.innerHTML = origHtml;
+    btn.disabled = false;
+  }
 }
 
 async function captureQuadrant(sessionId, plateId, quadrant, btn) {
+  const origHtml = btn.innerHTML;
   btn.disabled = true;
+  btn.textContent = `${quadrant}…`;
   try {
     await apiJson(`/sessions/${sessionId}/plates/${plateId}/capture`,
       { method: 'POST', body: { quadrant } });
+    btn.innerHTML = origHtml;
     btn.classList.add('captured');
     announce(`${quadrant} captured`);
     await refreshThumbnails();
   } catch (err) {
     announce(`Capture failed: ${err.message}`);
+    btn.innerHTML = origHtml;
     btn.disabled = false;
   }
 }
