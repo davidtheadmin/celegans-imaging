@@ -4,7 +4,7 @@ Raspberry Pi 5–based automated imaging system for C. elegans assays (motility 
 
 ## Hardware
 
-- **Camera**: Raspberry Pi Camera Module 3 (IMX708), attached via CSI ribbon cable
+- **Camera**: Sony IMX477 HQ Camera (12.3 MP, 4056×3040 full array), attached via CSI ribbon cable
 - **Illumination**: Custom LED transilluminator (bottom light), controlled via GPIO
 - **Compute**: Raspberry Pi 5 (8 GB RAM)
 - **Optics**: Fixed magnification macro lens for whole-plate imaging
@@ -41,7 +41,7 @@ launcher/                 # Windows sync/launcher app (Phase 6)
 ├── config.py             # settings dataclass, APPDATA persistence
 ├── sync.py               # background sync thread
 ├── ui.py                 # Tkinter main window + settings dialog
-├── requirements.txt      # requests (only)
+├── requirements.txt      # requests + scientific stack (pandas, numpy, scipy, scikit-image, opencv, h5py, tables, matplotlib, openpyxl, imageio-ffmpeg, tifffile, imagecodecs, customtkinter)
 ├── setup.bat             # one-time installer for non-technical users
 ├── INSTALL.md            # end-user installation guide
 └── assets/
@@ -129,10 +129,15 @@ Logs:       sudo journalctl -u celegans-capture -f
 
 ## Phase roadmap
 
-| Phase | Scope |
-|-------|-------|
-| 1 | FastAPI skeleton: config, auth, session/plate CRUD, health/status, static file serving, systemd unit |
-| 2 | Camera integration: `capture.py` imported by the service, single-frame and timelapse endpoints |
-| 3 | Flat-field correction pipeline, exposure calibration endpoint |
-| 4 | Analysis service (`analysis/`): motility scoring, survival scoring |
-| 5 | Web UI for plate management, live preview, result visualisation |
+Status reflects live code. Note the analysis pipelines run in the Windows
+launcher (`launcher/analysis/`), not as a Pi-side `analysis/` service as
+originally sketched.
+
+| Phase | Status | Scope |
+|-------|--------|-------|
+| 1 | Done | FastAPI skeleton: config, auth, session/plate CRUD, health/status, static file serving, systemd unit |
+| 2 | Done | Camera integration: `capture.py` imported by the service, single-frame and timelapse endpoints |
+| 3 | Done | Flat-field correction pipeline, exposure calibration endpoint |
+| 4 | Done | Windows launcher + background sync agent (manifest polling, download, ack, local mirror); Pi-side SHA256 sidecars, manifest/ack endpoints, retention daemon + systemd timer |
+| 5 | Done | Web UIs: capture-service plate management / live preview; launcher desktop UI (CustomTkinter) |
+| Analysis | Done (in launcher) | Motility, crawling, and counting (colony-survival) pipelines in `launcher/analysis/` — motility & crawling headless via Tierpsy/Docker, counting via classical CV |

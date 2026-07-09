@@ -9,7 +9,7 @@ Automated imaging and motility analysis system for *C. elegans* assays, built on
 | Component | Details |
 |-----------|---------|
 | Compute | Raspberry Pi 5 (8 GB RAM) |
-| Camera | Raspberry Pi Camera Module 3 (IMX708) via CSI ribbon |
+| Camera | Sony IMX477 HQ Camera (12.3 MP, 4056×3040) via CSI ribbon |
 | Illumination | Custom LED transilluminator (bottom light), GPIO-controlled |
 | Optics | Fixed-magnification macro lens for whole-plate imaging |
 
@@ -52,7 +52,7 @@ launcher/                    # Windows desktop app (Tkinter)
 │   ├── tierpsy_param_sweep.py
 │   ├── inspect_skeleton_failures.py
 │   └── cut_clip.py
-├── requirements.txt         # requests, pandas, matplotlib, h5py, tables
+├── requirements.txt         # requests + scientific stack (pandas, numpy, scipy, scikit-image, opencv, h5py, tables, matplotlib, openpyxl, imageio-ffmpeg, tifffile, imagecodecs, customtkinter)
 ├── setup.bat                # One-time installer for non-technical users
 └── INSTALL.md               # End-user installation guide
 
@@ -88,7 +88,7 @@ docs/calibration/            # Archived bend-counting calibration receipts
 
 ```
 /home/pi/celegans-data/
-├── sessions/<session_id>/
+├── experiments/<session_id>/
 │   ├── session.json          # Manifest (atomic writes via .tmp → os.replace)
 │   └── plates/<condition_id>_<name>_plate<NN>/
 ├── pictures/<date>/          # Free still captures
@@ -135,7 +135,7 @@ The launcher's **Open Analysis → Motility** flow:
 1. Pick a folder of `.mp4` files (flat or condition-subfolders layout).
 2. Pre-flight checks: Docker running, Tierpsy image pulled, ffmpeg available.
 3. Per video: probe fps (ffprobe) → convert to MJPEG AVI (ffmpeg) → run Tierpsy headless in Docker → read `_featuresN.hdf5`.
-4. Compute bends-per-minute from midbody curvature zero-crossings (smoothed, validated algorithm).
+4. Compute bends-per-minute from head-swing-angle peaks: the signed angle between skeleton points 0/5 (head) and 20/30 (body), detrended, with peak prominence 0.50 rad (validated against manual counts).
 5. Write `motility_results.csv`, `motility_summary.csv`, per-video PNGs, and `overview.png` to `<folder>/_analysis/<timestamp>/`.
 
 Requires: Docker Desktop with `tierpsy/tierpsy-tracker` image pulled, and `ffmpeg`/`ffprobe` in PATH.
@@ -156,5 +156,5 @@ Shared bearer token. Pass as `X-Auth-Token` header or `?token=` query param. Onl
 | 2 | Done | Camera integration: still capture, timelapse, live MJPEG preview |
 | 3 | Done | Flat-field correction, video thumbnails, soft delete, retention daemon |
 | 5a | Done | SHA256 manifest, ack endpoints, clock sync, AE shutter cap |
-| 6 | Done | Windows launcher: sync agent, motility analysis, Tierpsy/Docker pipeline |
-| Next | — | `microns_per_pixel` calibration (unlock real-unit speed/length), counting analysis (YOLOv8) |
+| 6 | Done | Windows launcher (CustomTkinter): sync agent plus motility, crawling, and counting (colony-survival) analysis pipelines |
+| Next | — | `microns_per_pixel` calibration to unlock real-unit speed/length (analysis outputs are currently in pixels) |
