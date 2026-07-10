@@ -123,3 +123,29 @@ per-plate delete so retention can clean up later.
   1.76×). Before the full UV batch on the 8C/16GB analysis machine, raise Docker
   Desktop → Settings → Resources CPU/RAM so auto scales to ~4 workers. Settings
   change, not code.
+
+## YOLO staging — scale normalization (`launcher/analysis/normalize.py`)
+
+New module committed untracked (nothing imports it yet). VERIFY BEFORE THE FIRST
+REAL TRAINING-PREP BATCH RUN — these generate images we annotate, so a silent
+error here poisons the training set:
+
+- [x] **1(a) Channel conversion is clean.** `_read_rgb` uses
+  `cv2.cvtColor(img, cv2.COLOR_BGR2RGB)` (not axis slicing). Verified 2026-07-10.
+- [ ] **1(b) Inference must read through `_read_rgb`.** `crop_wells._read`
+  returns BGR; the RGB invariant only holds if inference also converts. A loud
+  banner comment was added above `_read_rgb`. **Re-confirm when wiring inference
+  in**: the inference path must call `_read_rgb` (or apply the same BGR→RGB),
+  never a bare `crop_wells._read`. Silent failure = channels swap, no error, mAP
+  degrades.
+- [x] **2. `warn` must not upscale.** Fixed 2026-07-10: `--on-below-floor warn`
+  now logs + skips + writes NO output (same as `refuse`; only log wording
+  differs). Below-floor files always raise `BelowFloorError` and are skipped.
+  `allow_upscale=True` on `resample_to_canonical` is a deliberate programmatic
+  escape hatch only — never reachable through the CLI/`warn`. Verified: warn run
+  on a synthetic below-floor TIFF wrote zero image files.
+- [ ] **3. Passthrough sanity on first run.** When the CLI is first run on the
+  `Lowestmag_survival` batch, ALL FIVE files must log EXACT passthrough,
+  `scale = 1.0000`, zero interpolation. If any file logs a non-exact scale (e.g.
+  `0.9998`), the batch is NOT all at one identical calibration as assumed —
+  STOP and report the spread rather than writing it as training data.
