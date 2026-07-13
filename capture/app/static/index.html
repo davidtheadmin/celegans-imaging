@@ -198,10 +198,32 @@
 
             <div id="new-session-form" class="inline-form" hidden>
               <input id="ns-name" type="text" placeholder="Session name" required>
-              <div class="field-row">
-                <label class="radio-label"><input type="radio" name="ns-mode" value="motility" checked> Motility</label>
-                <label class="radio-label"><input type="radio" name="ns-mode" value="survival"> Survival</label>
-                <label class="radio-label"><input type="radio" name="ns-mode" value="colony"> Colony Survival</label>
+              <div class="ns-mode-group" role="radiogroup" aria-label="Experiment type">
+                <label class="ns-mode-btn">
+                  <input type="radio" name="ns-mode" value="motility" checked>
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M1 8 q1.5 -3.5 3 0 t3 0 t3 0 t3 0"/>
+                  </svg>
+                  <span>Motility</span>
+                </label>
+                <label class="ns-mode-btn">
+                  <input type="radio" name="ns-mode" value="survival">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 10.5 C 2 8, 4.5 6.5, 6.5 7.8 S 10 10.5, 12.5 7"/>
+                    <circle cx="12.7" cy="6.9" r="1.15" fill="currentColor" stroke="none"/>
+                  </svg>
+                  <span>Survival</span>
+                </label>
+                <label class="ns-mode-btn">
+                  <input type="radio" name="ns-mode" value="colony">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <ellipse cx="8" cy="9" rx="6" ry="3.3"/>
+                    <circle cx="6.2" cy="8.6" r="1.05" fill="currentColor" stroke="none"/>
+                    <circle cx="9.8" cy="9.5" r="0.85" fill="currentColor" stroke="none"/>
+                    <circle cx="8.4" cy="7.6" r="0.7" fill="currentColor" stroke="none"/>
+                  </svg>
+                  <span>Colony Survival</span>
+                </label>
               </div>
               <div id="ns-motility-cfg">
                 <label class="field-label">Duration (s)

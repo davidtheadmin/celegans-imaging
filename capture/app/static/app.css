@@ -576,6 +576,39 @@ input[type="range"]::-moz-range-thumb {
 }
 .mode-body[hidden] { display: none; }
 .panel-hint { font-size: 13px; color: var(--text-muted); margin: 0; line-height: 1.6; }
+
+/* Session tab: relocated experiment controls.
+   Strip the horizontal insets these classes carried for the old 256px sidebar
+   so the header, new-session form, and list align to the mode-body content edge
+   (same left edge as the tabs above). Scoped to the session panel only. */
+.mode-body[data-panel="session"] .sidebar-hdr  { padding-left: 0; padding-right: 0; }
+.mode-body[data-panel="session"] .inline-form   { margin-left: 0; margin-right: 0; }
+.mode-body[data-panel="session"] .session-list  { padding-left: 0; padding-right: 0; }
+
+/* Experiment-type picker: three icon buttons wrapping real radio inputs.
+   The radios stay in the DOM (hidden) so app.js's change/value logic is untouched. */
+.ns-mode-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.ns-mode-btn {
+  flex: 1 1 74px; min-width: 74px;
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  gap: 5px; padding: 9px 6px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+  color: var(--text-muted); text-align: center;
+  font-size: 11px; font-weight: 500; line-height: 1.2;
+  cursor: pointer; user-select: none;
+  transition: background .14s, border-color .14s, color .14s, box-shadow .14s;
+}
+.ns-mode-btn:hover { background: var(--surface-3); color: var(--text); border-color: var(--border-2); }
+.ns-mode-btn svg { width: 22px; height: 22px; }
+.ns-mode-btn input {
+  position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; margin: 0;
+}
+.ns-mode-btn:has(input:checked) {
+  background: var(--accent-dim); border-color: transparent; color: var(--accent-h);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.ns-mode-btn:has(input:focus-visible) { box-shadow: 0 0 0 3px var(--accent-ring); }
+body[data-mode="light"] .ns-mode-btn:has(input:checked) { color: var(--accent); }
 .capture-msg { font-size: 12px; color: var(--text-muted); margin: 0; font-family: var(--mono); word-break: break-all; }
 
 /* Progress */
