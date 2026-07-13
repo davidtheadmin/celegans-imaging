@@ -744,7 +744,11 @@ function getActivePlate() {
 }
 
 function toggleSession(id) {
-  if (S.expandedIds.has(id)) { S.expandedIds.delete(id); } else { S.expandedIds.add(id); }
+  const wasOpen = S.expandedIds.has(id);
+  if (wasOpen) { S.expandedIds.delete(id); } else { S.expandedIds.add(id); }
+  // Selecting (opening) an experiment makes it the active one, so the other
+  // experiments dim immediately — before any plate inside it is picked.
+  if (!wasOpen) S.activeSessionId = id;
   saveExpandedIds();
   S.addingPlateFor = null;
   renderSessionSidebar();
