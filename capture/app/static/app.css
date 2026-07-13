@@ -439,7 +439,10 @@ input[type="range"]::-moz-range-thumb {
 .add-plates-form input { font-size: 12px; }
 
 /* ── Main content ──────────────────────────────────────────────────────────── */
-.main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.main-content { flex: 1; display: flex; flex-direction: row; overflow: hidden; min-width: 0; }
+/* Right column: preview on top, thumbnail strip below it. The ctrl-panel
+   (order:-1) is the full-height left column, sibling to this stack. */
+.content-col { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
 .top-row { flex: 1; display: flex; overflow: hidden; min-height: 0; }
 
 /* ── Preview ───────────────────────────────────────────────────────────────── */
