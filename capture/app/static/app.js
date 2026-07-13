@@ -1363,6 +1363,8 @@ function renderSessionCapture() {
         <div class="plate-info-name">${esc(plate.folder_name)}</div>
         <div class="plate-info-mode">Survival · Quadrant</div>
       </div>
+      <button id="guided-start-btn" class="btn btn-primary btn-capture">Start Guided Mode</button>
+      <p class="panel-hint" style="margin:8px 0 0">Walks every quadrant of every plate; press Enter to capture and advance.</p>
       <div class="quadrant-grid">
         <button class="btn btn-quadrant" data-q="NW">NW <span class="kbd-hint">[1]</span></button>
         <button class="btn btn-quadrant" data-q="NE">NE <span class="kbd-hint">[2]</span></button>
@@ -1370,6 +1372,7 @@ function renderSessionCapture() {
         <button class="btn btn-quadrant" data-q="SE">SE <span class="kbd-hint">[4]</span></button>
       </div>`;
 
+    body.querySelector('#guided-start-btn').addEventListener('click', () => startGuidedMode(sess.id));
     body.querySelectorAll('.btn-quadrant').forEach(btn => {
       btn.addEventListener('click', () => captureQuadrant(sess.id, plate.id, btn.dataset.q, btn));
     });
@@ -1469,19 +1472,26 @@ async function markCapturedQuadrants(sessionId, plateId) {
 // conditions in their defined (insertion) order, plates by ascending plate_number.
 // To change the ordering, reorder/flatten differently here — nothing else depends
 // on the traversal order.
+// Worm survival with quadrants walks four quadrants per plate; colony and
+// plain-still survival walk one shot per plate (quadrant: null).
 function buildGuidedQueue(sess) {
+  const quadMode = sess.assay_mode === 'survival' && !isColony(sess) && !!sess.assay_config?.quadrants;
   const queue = [];
   for (const cond of groupByCondition(sess.plates)) {
     const d = condDisplay(cond);
     const sorted = [...cond.plates].sort((a, b) => a.plate_number - b.plate_number);
     for (const plate of sorted) {
-      queue.push({
+      const base = {
         plateId: plate.id,
         conditionLabel: `${d.strain} / ${d.treatment}`,
         plateNumber: plate.plate_number,
         folderName: plate.folder_name,
-        capturedFilename: null,
-      });
+      };
+      if (quadMode) {
+        for (let q = 0; q < 4; q++) queue.push({ ...base, quadrant: q, capturedFilename: null });
+      } else {
+        queue.push({ ...base, quadrant: null, capturedFilename: null });
+      }
     }
   }
   return queue;
@@ -1505,7 +1515,8 @@ function startGuidedMode(sessionId) {
   updateGuidedBanner();
   // Draw once the overlay has laid out (and again when the first frame arrives).
   requestAnimationFrame(drawGuidedOverlay);
-  announce(`Guided mode: ${queue.length} plates`);
+  const unit = queue.some(i => i.quadrant != null) ? 'quadrants' : 'plates';
+  announce(`Guided mode: ${queue.length} ${unit}`);
 }
 
 function exitGuidedMode() {
@@ -1542,7 +1553,10 @@ function updateGuidedBanner() {
 
   const item = G.queue[G.index];
   condEl.textContent = item.conditionLabel;
-  plateEl.textContent = `Plate ${String(item.plateNumber).padStart(2, '0')}`;
+  const plateText = `Plate ${String(item.plateNumber).padStart(2, '0')}`;
+  plateEl.textContent = item.quadrant != null
+    ? `${plateText} · quadrant ${item.quadrant + 1} of 4 (${_QUAD_ORDER[item.quadrant]})`
+    : plateText;
   progEl.textContent = `${G.index + 1} / ${N}`;
   stateEl.textContent = G.inFlight ? 'Capturing…' : 'Aim, then press Enter';
   captureBtn.disabled = G.inFlight;
@@ -1561,18 +1575,26 @@ function drawGuidedOverlay() {
 
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
-  const cx = w / 2, cy = h / 2;
 
-  // Full-width + full-height crosshair through center.
+  // Full-width + full-height crosshair through center — also delineates the
+  // four quadrants for worm-survival guided capture.
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = 'rgba(255,90,90,0.85)';
   ctx.beginPath();
-  ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
-  ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+  ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h);
+  ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
   ctx.stroke();
 
-  // Centered aim circle.
-  const r = GUIDED_CIRCLE_FRAC * Math.min(w, h);
+  // Aim circle: centered for plate/colony items; offset into the active
+  // quadrant (and shrunk to fit it) for worm-survival quadrant items.
+  const item = G.index < G.queue.length ? G.queue[G.index] : null;
+  const quad = item && item.quadrant != null ? item.quadrant : null;
+  let cx = w / 2, cy = h / 2, r = GUIDED_CIRCLE_FRAC * Math.min(w, h);
+  if (quad != null) {
+    cx = (quad === 1 || quad === 3) ? w * 0.75 : w * 0.25;   // NE/SE right, else left
+    cy = (quad >= 2) ? h * 0.75 : h * 0.25;                  // SW/SE bottom, else top
+    r = GUIDED_CIRCLE_FRAC * Math.min(w, h) / 2;
+  }
   ctx.lineWidth = 2;
   ctx.strokeStyle = 'rgba(107,156,245,0.95)';
   ctx.beginPath();
@@ -1588,16 +1610,19 @@ async function guidedCapture() {
   G.inFlight = true;
   updateGuidedBanner();
   try {
+    const body = item.quadrant != null ? { quadrant: _QUAD_ORDER[item.quadrant] } : {};
     const d = await apiJson(`/sessions/${G.sessionId}/plates/${item.plateId}/capture`,
-      { method: 'POST', body: {} });
+      { method: 'POST', body });
     item.capturedFilename = d.filename;           // remembered so Redo can trash it
-    announce(`Captured ${item.conditionLabel} plate ${item.plateNumber}`);
+    const where = item.quadrant != null ? ` ${_QUAD_ORDER[item.quadrant]}` : '';
+    announce(`Captured ${item.conditionLabel} plate ${item.plateNumber}${where}`);
     G.index += 1;
   } catch (err) {
     announce(`Capture failed: ${err.message}`);
   } finally {
     G.inFlight = false;
     updateGuidedBanner();
+    drawGuidedOverlay();                           // move the aim circle to the next quadrant
   }
 }
 
@@ -1609,6 +1634,7 @@ async function guidedRedo() {
   G.index -= 1;
   const item = G.queue[G.index];
   updateGuidedBanner();
+  drawGuidedOverlay();                             // aim circle back to the redone quadrant
   // Trash its recorded shot so the operator ends with one image per plate.
   const fname = item.capturedFilename;
   item.capturedFilename = null;
