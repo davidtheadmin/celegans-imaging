@@ -1579,8 +1579,15 @@ function drawGuidedOverlay() {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, w, h);
 
-  // Full-width + full-height crosshair through center — also delineates the
-  // four quadrants for worm-survival guided capture.
+  // Crosshair + aim circle are a colony-only affordance. Worm-based guided
+  // capture (quadrant and non-quadrant survival alike) draws no overlay —
+  // canvas is already sized and cleared above, so just bail. Gate on isColony
+  // of the guided session; quadrant===null alone can't tell colony from
+  // non-quadrant worm survival.
+  const guidedSess = S.sessions.find(s => s.id === G.sessionId);
+  if (!isColony(guidedSess)) return;
+
+  // Full-width + full-height crosshair through center.
   ctx.lineWidth = 1.5;
   ctx.strokeStyle = 'rgba(255,90,90,0.85)';
   ctx.beginPath();
