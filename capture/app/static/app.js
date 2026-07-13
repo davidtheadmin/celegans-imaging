@@ -1384,8 +1384,11 @@ function renderSessionCapture() {
         <div class="plate-info-name">${esc(plate.folder_name)}</div>
         <div class="plate-info-mode">Survival · Single frame</div>
       </div>
-      <button id="surv-btn" class="btn btn-primary btn-capture">Capture Still <span class="kbd-hint">[Space]</span></button>`;
+      <button id="guided-start-btn" class="btn btn-primary btn-capture">Start Guided Mode</button>
+      <p class="panel-hint" style="margin:8px 0 0">Walks every plate in this experiment; press Enter to capture and advance.</p>
+      <button id="surv-btn" class="btn btn-capture" style="margin-top:10px">Capture this plate only <span class="kbd-hint">[Space]</span></button>`;
 
+    body.querySelector('#guided-start-btn').addEventListener('click', () => startGuidedMode(sess.id));
     body.querySelector('#surv-btn').addEventListener('click', () => captureSurvival(sess.id, plate.id));
   }
 }
