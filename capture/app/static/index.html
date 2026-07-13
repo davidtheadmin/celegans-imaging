@@ -93,42 +93,6 @@
 
   <div class="app-body">
 
-    <!-- Session sidebar -->
-    <aside class="sidebar" aria-label="Experiments">
-      <div class="sidebar-hdr">
-        <span class="sidebar-title">Experiments</span>
-        <button id="new-session-btn" class="btn btn-sm btn-accent">New</button>
-      </div>
-
-      <div id="new-session-form" class="inline-form" hidden>
-        <input id="ns-name" type="text" placeholder="Session name" required>
-        <div class="field-row">
-          <label class="radio-label"><input type="radio" name="ns-mode" value="motility" checked> Motility</label>
-          <label class="radio-label"><input type="radio" name="ns-mode" value="survival"> Survival</label>
-          <label class="radio-label"><input type="radio" name="ns-mode" value="colony"> Colony Survival</label>
-        </div>
-        <div id="ns-motility-cfg">
-          <label class="field-label">Duration (s)
-            <input id="ns-duration" type="number" value="30" min="1" max="600" class="mono" style="width:72px">
-          </label>
-        </div>
-        <div id="ns-survival-cfg" hidden>
-          <label class="checkbox-label">
-            <input id="ns-quadrants" type="checkbox"> Use four quadrants
-          </label>
-        </div>
-        <div id="ns-colony-cfg" hidden>
-          <p class="panel-hint" style="margin:0">Single still per plate, captured through a guided aiming flow.</p>
-        </div>
-        <div class="form-actions">
-          <button id="ns-submit" class="btn btn-sm btn-primary">Create</button>
-          <button id="ns-cancel" class="btn btn-sm">Cancel</button>
-        </div>
-      </div>
-
-      <div id="session-list" class="session-list" role="list" aria-label="Experiment list"></div>
-    </aside>
-
     <!-- Main content -->
     <div class="main-content">
       <div class="top-row">
@@ -227,6 +191,39 @@
 
           <!-- Session panel -->
           <div class="mode-body" data-panel="session" role="tabpanel" hidden>
+            <div class="sidebar-hdr">
+              <span class="sidebar-title">Experiments</span>
+              <button id="new-session-btn" class="btn btn-sm btn-accent">New</button>
+            </div>
+
+            <div id="new-session-form" class="inline-form" hidden>
+              <input id="ns-name" type="text" placeholder="Session name" required>
+              <div class="field-row">
+                <label class="radio-label"><input type="radio" name="ns-mode" value="motility" checked> Motility</label>
+                <label class="radio-label"><input type="radio" name="ns-mode" value="survival"> Survival</label>
+                <label class="radio-label"><input type="radio" name="ns-mode" value="colony"> Colony Survival</label>
+              </div>
+              <div id="ns-motility-cfg">
+                <label class="field-label">Duration (s)
+                  <input id="ns-duration" type="number" value="30" min="1" max="600" class="mono" style="width:72px">
+                </label>
+              </div>
+              <div id="ns-survival-cfg" hidden>
+                <label class="checkbox-label">
+                  <input id="ns-quadrants" type="checkbox"> Use four quadrants
+                </label>
+              </div>
+              <div id="ns-colony-cfg" hidden>
+                <p class="panel-hint" style="margin:0">Single still per plate, captured through a guided aiming flow.</p>
+              </div>
+              <div class="form-actions">
+                <button id="ns-submit" class="btn btn-sm btn-primary">Create</button>
+                <button id="ns-cancel" class="btn btn-sm">Cancel</button>
+              </div>
+            </div>
+
+            <div id="session-list" class="session-list" role="list" aria-label="Experiment list"></div>
+
             <div id="session-capture-body">
               <p class="panel-hint">Select a plate in the sidebar to start capturing.</p>
             </div>

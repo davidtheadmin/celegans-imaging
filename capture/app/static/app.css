@@ -39,8 +39,7 @@
 
   /* Layout */
   --hdr-h: 54px;
-  --sidebar-w: 256px;
-  --ctrl-w: 312px;
+  --ctrl-w: 320px;
   --thumb-h: 124px;
 
   /* Radii */
@@ -264,13 +263,7 @@ input[type="range"]::-moz-range-thumb {
 #app { display: contents; }
 .app-body { flex: 1; display: flex; overflow: hidden; gap: 0; }
 
-/* ── Sidebar ───────────────────────────────────────────────────────────────── */
-.sidebar {
-  width: var(--sidebar-w); flex-shrink: 0;
-  display: flex; flex-direction: column;
-  background: var(--surface); border-right: 1px solid var(--border);
-  overflow: hidden;
-}
+/* ── Experiments (relocated into the left control panel's session tab) ──────── */
 .sidebar-hdr {
   display: flex; align-items: center; gap: 8px;
   padding: 14px 16px 10px; flex-shrink: 0;
@@ -552,9 +545,10 @@ input[type="range"]::-moz-range-thumb {
 
 /* ── Controls panel ────────────────────────────────────────────────────────── */
 .ctrl-panel {
+  order: -1;                 /* render as the left column (source order kept for tab focus) */
   width: var(--ctrl-w); flex-shrink: 0;
   display: flex; flex-direction: column;
-  background: var(--surface); border-left: 1px solid var(--border); overflow: hidden;
+  background: var(--surface); border-right: 1px solid var(--border); overflow: hidden;
 }
 /* Segmented control */
 .mode-tabs {
