@@ -9,6 +9,13 @@ __pycache__/
 *.egg-info/
 .venv/
 
+# Model weights — large binaries, distributed out-of-band (never in history)
+*.pt
+launcher/vision/models/
+
+# Vision inference venv (Python 3.12; the .venv/ rule above doesn't match this name)
+launcher/vision/.venv-vision/
+
 # OS
 .DS_Store
 .claude/
