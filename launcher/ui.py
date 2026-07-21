@@ -29,6 +29,7 @@ from analysis.crawling import CrawlingAgent, CrawlingStatus
 from analysis.counting_agent import (
     CountingAgent, CountingStatus, counting_preflight,
 )
+from survival import SurvivalAgent, SurvivalStatus, survival_preflight
 from sync import SyncAgent, SyncStatus
 
 _log = logging.getLogger(__name__)
@@ -268,8 +269,8 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
     def __init__(
         self,
         parent: tk.Tk,
-        agent: "MotilityAgent | CrawlingAgent | CountingAgent",
-        status: "MotilityStatus | CrawlingStatus | CountingStatus",
+        agent: "MotilityAgent | CrawlingAgent | CountingAgent | SurvivalAgent",
+        status: "MotilityStatus | CrawlingStatus | CountingStatus | SurvivalStatus",
         title: str = "WormScan Analysis",
         noun: str = "video",
     ) -> None:
@@ -367,6 +368,7 @@ class AnalysisDialog(ctk.CTkToplevel):
         "Motility": "motility",
         "Crawling": "crawling",
         "Colony Survival": "counting",
+        "Worm Survival": "survival",
     }
 
     def __init__(
@@ -379,6 +381,8 @@ class AnalysisDialog(ctk.CTkToplevel):
         crawling_status: CrawlingStatus,
         counting_agent: CountingAgent,
         counting_status: CountingStatus,
+        survival_agent: SurvivalAgent,
+        survival_status: SurvivalStatus,
         on_settings_update: Callable[[cfg.Settings], None],
     ) -> None:
         super().__init__(parent)
@@ -395,6 +399,8 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._crawling_status = crawling_status
         self._counting_agent = counting_agent
         self._counting_status = counting_status
+        self._survival_agent = survival_agent
+        self._survival_status = survival_status
         self._on_settings_update = on_settings_update
         self._build()
 
@@ -602,6 +608,50 @@ class AnalysisDialog(ctk.CTkToplevel):
             justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
 
+        # Row 5 — worm-survival options: conf slider + save-preview checkbox.
+        # Staging inference runs in the vision venv; no cache/render/threshold.
+        self._survival_frame = widgets.Card(self, title="Worm Survival options")
+        surv_frame = self._survival_frame.content
+        _conf_row = ctk.CTkFrame(surv_frame, fg_color="transparent")
+        _conf_row.pack(anchor="w", fill="x")
+        ctk.CTkLabel(
+            _conf_row, text="Confidence", font=theme.body(),
+            text_color=theme.TEXT, anchor="w",
+        ).pack(side="left")
+        self._surv_conf = tk.DoubleVar(
+            value=float(getattr(self._settings, "survival_conf", 0.25))
+        )
+        self._surv_conf_val = ctk.CTkLabel(
+            _conf_row, text=f"{self._surv_conf.get():.2f}", font=theme.body(),
+            text_color=theme.TEXT_2, width=40,
+        )
+
+        def _on_conf_slide(v: float) -> None:
+            self._surv_conf_val.configure(text=f"{float(v):.2f}")
+
+        ctk.CTkSlider(
+            _conf_row, from_=0.05, to=0.90, number_of_steps=85,
+            variable=self._surv_conf, command=_on_conf_slide,
+            fg_color=theme.CARD, progress_color=theme.ACCENT,
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            width=180,
+        ).pack(side="left", padx=(8, 6))
+        self._surv_conf_val.pack(side="left")
+
+        self._surv_save_preview = tk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            surv_frame, text="Save preview PNGs (boxes drawn per image)",
+            variable=self._surv_save_preview, **chk_kw,
+        ).pack(anchor="w", pady=(8, 0))
+        ctk.CTkLabel(
+            surv_frame,
+            text="Detects developmental stage per worm (tiled), then scores "
+                 "survival by plate and condition. Previews are for spot-checking "
+                 "and slow the run.",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(2, 0))
+
         # Show the render frame matching the selected analysis type.
         self._mode.trace_add("write", self._on_mode_change)
         self._on_mode_change()
@@ -644,10 +694,18 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._motility_render_frame.grid_remove()
         self._crawling_render_frame.grid_remove()
         self._counting_frame.grid_remove()
+        self._survival_frame.grid_remove()
 
         if mode == "counting":
             self._clear_cache_check.grid_remove()
             self._counting_frame.grid(
+                row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
+            )
+            return
+
+        if mode == "survival":
+            self._clear_cache_check.grid_remove()
+            self._survival_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
             return
@@ -674,7 +732,8 @@ class AnalysisDialog(ctk.CTkToplevel):
             progress_title = "WormScan Motility Analysis"
 
         if (self._status.is_running() or self._crawling_status.is_running()
-                or self._counting_status.is_running()):
+                or self._counting_status.is_running()
+                or self._survival_status.is_running()):
             messagebox.showwarning(
                 "Already running",
                 "An analysis is already in progress.",
@@ -738,6 +797,35 @@ class AnalysisDialog(ctk.CTkToplevel):
                 folder,
                 split_sensitivity=split_sensitivity,
                 min_colony_um=min_colony_um,
+            )
+            self.destroy()
+            return
+
+        # Worm Survival: staging inference in the vision venv (subprocess),
+        # aggregation/Excel on this side. No Docker/ffmpeg/threshold.
+        if self._mode.get() == "survival":
+            conf = float(self._surv_conf.get())
+            save_previews = bool(self._surv_save_preview.get())
+
+            errors = survival_preflight(folder)
+            if errors:
+                messagebox.showerror(
+                    "Pre-flight checks failed",
+                    "\n\n".join(errors),
+                    parent=self,
+                )
+                return
+
+            self._on_settings_update(replace(
+                self._settings, survival_conf=conf,
+            ))
+
+            AnalysisProgressDialog(
+                self._parent, self._survival_agent, self._survival_status,
+                title="WormScan Worm-Survival Analysis", noun="plate",
+            )
+            self._survival_agent.start_analysis(
+                folder, conf=conf, save_previews=save_previews,
             )
             self.destroy()
             return
@@ -1255,6 +1343,8 @@ class MainWindow(ctk.CTk):
         crawling_status: CrawlingStatus,
         counting_agent: CountingAgent,
         counting_status: CountingStatus,
+        survival_agent: SurvivalAgent,
+        survival_status: SurvivalStatus,
     ) -> None:
         theme.init()
         super().__init__()
@@ -1267,6 +1357,8 @@ class MainWindow(ctk.CTk):
         self._crawling_status = crawling_status
         self._counting_agent = counting_agent
         self._counting_status = counting_status
+        self._survival_agent = survival_agent
+        self._survival_status = survival_status
         self._button_waiting = False
 
         self.title("WormScan Launcher")
@@ -1343,7 +1435,7 @@ class MainWindow(ctk.CTk):
         self._analysis_btn.pack(fill="x", pady=3)
         widgets.Tooltip(
             self._analysis_btn,
-            "Run motility, crawling, or colony survival on recorded videos",
+            "Run motility, crawling, colony survival, or worm survival",
         )
 
         review_btn = widgets.IconButton(
@@ -1379,6 +1471,7 @@ class MainWindow(ctk.CTk):
             ("Motility", self._motility_status, "video"),
             ("Crawling", self._crawling_status, "video"),
             ("Counting", self._counting_status, "plate"),
+            ("Worm Survival", self._survival_status, "plate"),
         ):
             result = st.pop_completed()
             if result:
@@ -1397,10 +1490,12 @@ class MainWindow(ctk.CTk):
         motility_snap = self._motility_status.snapshot()
         crawling_snap = self._crawling_status.snapshot()
         counting_snap = self._counting_status.snapshot()
+        survival_snap = self._survival_status.snapshot()
         snap = (
             motility_snap if motility_snap.running
             else crawling_snap if crawling_snap.running
-            else counting_snap
+            else counting_snap if counting_snap.running
+            else survival_snap
         )
         s_color, s_label, last_sync, files, nbytes = self._status.snapshot()
 
@@ -1451,6 +1546,8 @@ class MainWindow(ctk.CTk):
             self._crawling_status,
             self._counting_agent,
             self._counting_status,
+            self._survival_agent,
+            self._survival_status,
             self._on_settings_saved,
         )
 

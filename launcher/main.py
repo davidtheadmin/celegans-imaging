@@ -15,6 +15,7 @@ import ui as ui_mod
 from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
 from analysis.counting_agent import CountingAgent, CountingStatus
+from survival import SurvivalAgent, SurvivalStatus
 
 
 def main() -> None:
@@ -40,11 +41,16 @@ def main() -> None:
     counting_agent = CountingAgent(settings, counting_status)
     counting_agent.start()
 
+    survival_status = SurvivalStatus()
+    survival_agent = SurvivalAgent(settings, survival_status)
+    survival_agent.start()
+
     win = ui_mod.MainWindow(
         settings, agent, status,
         motility_agent, motility_status,
         crawling_agent, crawling_status,
         counting_agent, counting_status,
+        survival_agent, survival_status,
     )
     win.mainloop()
 
@@ -56,6 +62,8 @@ def main() -> None:
     crawling_agent.join(timeout=5)
     counting_agent.stop()
     counting_agent.join(timeout=5)
+    survival_agent.stop()
+    survival_agent.join(timeout=5)
     log.info("WormScan Launcher stopped")
 
 

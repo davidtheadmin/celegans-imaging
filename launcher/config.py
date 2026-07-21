@@ -28,6 +28,7 @@ class Settings:
     crawling_min_track_s: int = 30
     counting_split_sensitivity: float = 3.0
     counting_min_colony_um: float = 200.0
+    survival_conf: float = 0.25
     # Review (grid viewer) — last-used content type and video loop length.
     review_type: str = "auto"
     review_loop_s: float = 3.0
