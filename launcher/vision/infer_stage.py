@@ -16,7 +16,10 @@ Runs ONLY under vision/.venv-vision (3.12, ultralytics + torch). The launcher's
 Modes
 -----
 single   python infer_stage.py IMAGE [--conf C] [--save-preview OUT.png]
-             Emits one JSON object for the image to stdout.
+                               [--draw OUT.png] [--counts OUT.txt]
+             Emits one JSON object for the image to stdout. --draw/--counts are
+             additive side outputs (annotated PNG + per-class counts txt); stdout
+             is unchanged whether or not they are passed.
 
 batch    python infer_stage.py --batch [ROOT] [--conf C] [--no-boxes]
                                [--stdin] [--preview-dir DIR]
@@ -146,6 +149,22 @@ def save_preview(image_path: Path, boxes: list, out_path: Path) -> None:
     img.save(out_path)
 
 
+def write_counts(counts: dict, names: dict, out_path: Path) -> None:
+    """Write one line per class in model.names (0 when undetected) plus a total.
+    `names` is authoritative for the full stage list, so every stage always
+    appears even when the frame contains none of it."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    lines = []
+    for stage in (names[i] for i in sorted(names)):
+        n = int(counts.get(stage, 0))
+        total += n
+        lines.append(f"{stage}: {n}")
+    lines.append(f"total: {total}")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _preview_path(image_path: Path, preview_dir: Path) -> Path:
     """Collision-safe preview name: <stem>_<hash8>.png (paths across different
     plates can share a filename, so the abs-path hash disambiguates)."""
@@ -163,6 +182,12 @@ def run_single(args) -> int:
     if args.save_preview:
         save_preview(image_path, boxes, Path(args.save_preview))
         _log(f"[infer] preview -> {args.save_preview}")
+    if args.draw:
+        save_preview(image_path, boxes, Path(args.draw))
+        _log(f"[infer] annotated -> {args.draw}")
+    if args.counts:
+        write_counts(counts, names, Path(args.counts))
+        _log(f"[infer] counts -> {args.counts}")
     obj = {"path": str(image_path), "counts": counts, "w": w, "h": h}
     if not args.no_boxes:
         obj["boxes"] = boxes
@@ -233,6 +258,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="batch: draw boxes and save a preview PNG per image here")
     p.add_argument("--save-preview",
                    help="single: draw boxes and save a preview PNG to this path")
+    p.add_argument("--draw",
+                   help="single: draw boxes and save an annotated PNG to this path")
+    p.add_argument("--counts",
+                   help="single: write a per-class counts txt to this path")
     return p
 
 
