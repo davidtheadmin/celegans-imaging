@@ -15,7 +15,7 @@ from .camera import camera_manager
 from .config import settings
 from .models import CreatePlateRequest, CreateSessionRequest, Session
 from . import sessions as session_store
-from .routers import camera_ctrl, free_capture, manifest, plate_capture, preview, system
+from .routers import analyze, camera_ctrl, free_capture, manifest, plate_capture, preview, system
 
 _STATUS_CACHE_TTL = 30.0
 _unsynced_cache: Optional[dict] = None
@@ -75,6 +75,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="C. elegans Imaging Station", lifespan=lifespan)
 
 app.include_router(preview.router)
+app.include_router(analyze.router)
 app.include_router(camera_ctrl.router)
 app.include_router(free_capture.router)
 app.include_router(plate_capture.router)
