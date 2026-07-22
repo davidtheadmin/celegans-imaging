@@ -2,7 +2,7 @@
 
 **Ground-truth snapshot of how the code actually works — regenerated 2026-07-09 from live `HEAD` (`c7045bd`).**
 
-**Updated 2026-07-22:** documented the worm-survival staging pipeline (new §4d covering `survival.py`, the `vision/` two-venv inference layer, `infer_stage.py`, `tiled_infer.py`, and `SurvivalAgent`), plus its AnalysisDialog mode (§3.4), config field (§3.2), §1 layout entries, and a §6 validation caveat, on top of the earlier §2.6 *Analyze on laptop* addition. Verified against `HEAD` (`1aa04a3`).
+**Updated 2026-07-22:** documented the worm-survival staging pipeline (new §4d covering `survival.py`, the `vision/` two-venv inference layer, `infer_stage.py`, `tiled_infer.py`, and `SurvivalAgent`), plus its AnalysisDialog mode (§3.4), config field (§3.2), §1 layout entries, and a §6 validation caveat, on top of the earlier §2.6 *Analyze on laptop* addition. Also swept the sections the intervening cleanup and doc-correction commits (`8cf7f5c`, `24fce0e`, `6608104`) had made stale: the `dev/` script relocation and the removed launcher `bend_calibration.py` copy (§1), the corrected `CLAUDE.md`/`README.md` camera / deps / roadmap claims, and the motility dead-code and comment fixes across §2.1, §4.7, §4.8–4.11, §4b, and §6. Verified against `HEAD` (`1aa04a3`).
 
 This describes the code as it sits in the working tree right now. The tree is
 **clean** (no uncommitted/untracked changes); there is one unpushed commit
@@ -73,12 +73,10 @@ Top-level, one line each:
 - `launcher/` — the Windows CustomTkinter app: syncs files off the Pi, runs the local analysis pipelines, builds grid viewers.
   - `main.py` — entry point; starts five agents (Sync, Motility, Crawling, Counting, Survival) plus the UI-less `AnalyzeWorker` (§2.6), and hands the five + their status objects to `MainWindow`.
   - `theme.py` / `widgets.py` — **new** CTk design-token + reusable-widget layers (view-only).
-  - `_widget_gallery.py` — **new** standalone dev harness that renders the widget catalogue; not imported by the app (hardcoded sample paths). Dev-only.
   - `ui.py` — MainWindow + Settings/Analysis/Review/progress dialogs (fully CTk).
   - `config.py`, `sync.py` — settings dataclass + background sync thread.
   - `survival.py` — the worm-survival pipeline (agent + stats + Excel + curve). Calls the vision venv by subprocess, never imports ultralytics. See §4d.
   - `analyze_worker.py` — the UI-less `AnalyzeWorker` behind the capture UI's "Analyze on laptop" button (§2.6).
-  - `bend_calibration.py` — tracked copy of the bend-method calibration script, with hardcoded `C:\Users\Isabe\…` paths (a near-duplicate of `docs/calibration/bend_calibration.py`).
 - `launcher/analysis/` — the analysis pipelines and shared helpers:
   - Motility: `motility.py`, `analysis_csv.py`, `fragment_grouping.py`, `flicker_filter.py`, `plots.py`.
   - Crawling: `crawling.py`, `crawling_metrics.py`, `crawling_fragment_grouping.py`, `crawling_plots.py`, `crawling_render.py`.
@@ -87,13 +85,12 @@ Top-level, one line each:
   - Staging (parked): `normalize.py`, `test_normalize.py`, `canonical_scale.json` are a scale-normalization utility for the YOLO staging pipeline. They are **not imported** by `infer_stage.py`, `tiled_infer.py`, or `survival.py`, and are not currently used by any pipeline. Open item in `BACKLOG.md` ("YOLO staging — scale normalization").
 - `launcher/vision/` — self-contained staging-inference folder with its own Python 3.12 venv (`.venv-vision/`, git-ignored). Holds `tiled_infer.py` (tiling + NMS library, import target, no CLI), `infer_stage.py` (the CLI the 3.13 launcher shells out to), and `models/staging.pt` (git-ignored model weights, travel by copy). See §4d.
 - `launcher/viewers/` — two standalone HTML-grid-viewer generators (`make_image_viewer.py`, `make_video_viewer.py`), driven by the launcher's "Review" button.
-- `launcher/tools/` — ad-hoc diagnostic scripts, **all now tracked** (`tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`). None are imported by the app; several carry hardcoded `C:\Users\Isabe\…` paths.
+- `dev/` — dev-only scripts moved out of `launcher/` (commit `6608104`), none imported by the app: `_widget_gallery.py` (CTk widget-catalogue harness), `tools/` (ad-hoc diagnostics: `tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`), and the former root debug scripts (`check_skel_flag.py`, `check_skeletons.py`, `inspect_filter_decisions{,2,3}.py`). Several carry hardcoded `C:\Users\Isabe\…` paths.
 - `deploy/` — three systemd units: capture service, retention oneshot service, retention timer.
 - `scripts/` — bash helpers: `deploy.sh` (push→pull→restart), clock sync, data wipe, folder renamers, video mover.
 - `docs/calibration/` — the original bend-calibration script + reference PNGs (fast/slow worm examples).
-- Root debug scripts (`check_skel_flag.py`, `check_skeletons.py`, `inspect_filter_decisions{,2,3}.py`) — tracked, not imported, hardcoded `C:\Users\Isabe\Desktop\Tierpsyclips\…` paths.
-- `CLAUDE.md` — project instructions. **Stale in several places** (see §6).
-- `README.md`, `STATUS.md`, `BACKLOG.md`, `VIEWER_LAUNCHER_SPEC.md`, `motility_analysis_spec.md` — narrative/spec docs. `README.md` repeats several `CLAUDE.md` errors (see §6).
+- `CLAUDE.md` — project instructions. **Stale in a few places** (see §6).
+- `README.md`, `STATUS.md`, `BACKLOG.md`, `VIEWER_LAUNCHER_SPEC.md`, `motility_analysis_spec.md` — narrative/spec docs. `README.md`'s camera / deps / motility-method / layout claims were corrected alongside `CLAUDE.md` in commit `24fce0e`.
 
 The repo holds **two** Tierpsy-parameter JSONs at `launcher/`: `motility_params.json`
 and `crawling_params.json`. They differ materially and **intentionally** (see §4.6).
@@ -108,15 +105,16 @@ and `EnvironmentFile=.../capture/.env`. The working directory matters: the stati
 mount uses the **relative** path `app/static` (`main.py`), so the app only serves
 its web UI when launched from `capture/`.
 
-### 2.1 The camera is an IMX477 HQ Camera, not an IMX708 Module 3
+### 2.1 The camera is an IMX477 HQ Camera (4056×3040)
 
-`CLAUDE.md` and `README.md` say "Raspberry Pi Camera Module 3 (IMX708)". The code
-says otherwise and is internally consistent about it:
+`CLAUDE.md` and `README.md` now identify it correctly (commit `24fce0e`); an
+earlier revision of both called it a "Raspberry Pi Camera Module 3 (IMX708)". The
+code has always been internally consistent:
 
 - `capture/capture.py` docstring: "Camera: Sony IMX477 HQ Camera (12.3 MP)", sensor 4056×3040.
 - `camera.py`: `FULL_W, FULL_H = 4056, 3040` (the IMX477 full array; the IMX708 is 4608×2592).
 
-So full-res frames are 4056×3040. Treat the camera sections in both docs as wrong.
+So full-res frames are 4056×3040.
 
 ### 2.2 Endpoints
 
@@ -314,7 +312,9 @@ Desktop `WormScan.lnk` (targets `pythonw.exe "launcher/main.py"`, WorkingDirecto
 openpyxl, opencv-python, imageio-ffmpeg, scipy, **scikit-image, tifffile,
 imagecodecs, customtkinter** (the last four are new — scikit-image/tifffile/
 imagecodecs back the counting pipeline + TIFF I/O; customtkinter backs the UI).
-`CLAUDE.md`'s "requests (only)" claim is badly stale.
+`CLAUDE.md` and `README.md` now list this full stack (commit `24fce0e`); the
+earlier "requests (only)" wording is gone. Note ultralytics and torch are **not**
+here: staging inference runs in the separate `vision/.venv-vision` (§4d).
 
 ### 3.6 Review (Grid Viewer) feature — unchanged
 
@@ -364,25 +364,26 @@ divergence (leave as-is):
 `body_vec = skel[20]−skel[30]`, signed angle via `atan2(cross, dot)`; <10 valid
 frames dropped. Detrend = 0.3 s rolling mean minus 2.0 s baseline. `find_peaks`
 on ± signal with `prominence = head_angle_prominence` — effective **0.50 rad**
-from JSON (the `0.30` function-signature defaults are **dead**). `bends =
-(n_pos+n_neg)/2`, `BPM = bends/duration_min`; curl vs collision groups use
-subtly different denominators. Every row is stamped `bend_method =
-"head_angle_peaks_v2"` despite a "Bend counter — UNCHANGED from v1 / Do not
-modify" comment (comment and label disagree; label wins).
+from JSON. (The dead `0.30` default on `compute_head_angle_signal` was removed in
+`8cf7f5c`; a `0.30` default survives only on `read_fragments`, overridden by every
+caller.) `bends = (n_pos+n_neg)/2`, `BPM = bends/duration_min`; curl vs collision
+groups use subtly different denominators. Every row is stamped `bend_method =
+"head_angle_peaks_v2"`; the earlier "UNCHANGED from v1 / Do not modify" comment
+that contradicted that label was corrected in `8cf7f5c`.
 
 ### 4.8–4.11 Grouping, filters, schema, renders
 
 Fragment grouping (`fragment_grouping.py`, curl vs collision via union-find,
 `TIME_GAP=5 s`, `DIST=50 px`), flicker filter (`FLICKER_WINDOW=0.5 s`,
 `STD_THRESHOLD=20 px`), debris filter (stationary + flickery-blob rules).
-`is_long = duration_s >= long_threshold_s` (default 5 s) gates the summary.
-`is_full_track` (coverage ≥ 90) is **computed but never read or exported** — dead.
-Outputs: `motility_results.xlsx` (per-condition sheets + `_summary`; drops
-`member_tierpsy_ids`/`bend_method`/`is_full_track`), `motility_summary.csv`,
+`is_long = duration_s >= long_threshold_s` (default 5 s) gates the summary. (The
+old `is_full_track` field, coverage ≥ 90, was computed-but-unused and was removed
+in `8cf7f5c`.) Outputs: `motility_results.xlsx` (per-condition sheets + `_summary`;
+drops `member_tierpsy_ids`/`bend_method`), `motility_summary.csv`,
 `overview.png`, `per_video/*.png` + logs. Optional renders (`render_video.py`,
 AVI required): `_tracked.mp4`, `_curvature.mp4` (only place `curvature_midbody`
-is used), `_sidebyside.mp4`, per-worm traces (loop var `full_track_rows` filters
-on `is_long`, not `is_full_track`). `render_video.py` also holds the
+is used), `_sidebyside.mp4`, per-worm traces (loop var `long_rows`, renamed from
+`full_track_rows` in `8cf7f5c`, filters on `is_long`). `render_video.py` also holds the
 velocity-arrow overlay used by crawling.
 
 ---
@@ -396,9 +397,9 @@ velocity-arrow overlay used by crawling.
 - **Grouping**: `crawling_fragment_grouping.link_fragments` — a position-only
   nearest-neighbour stitcher (`T_MAX_S=5`, `D_MAX=150 px`, ambiguity refusal with
   `AMBIG_RATIO=2`, `AMBIG_FLOOR_PX=3`, `AMBIG_TIME_WINDOW_S=1`). **Not** the
-  motility engine; no curl/collision classification, no flicker filter. The
-  `crawling.py` module docstring calling it "a near-exact copy … same params …
-  same output format" is **triply false**.
+  motility engine; no curl/collision classification, no flicker filter. Its
+  `crawling.py` module docstring, which once called it "a near-exact copy … same
+  params … same output format", was corrected in `8cf7f5c` to state the divergence.
 - **Metrics** (`compute_crawling_metrics`, two passes): head-angle BPM + bend CV,
   speed kinematics (forward/backward/paused), reversals (`motion_mode`, tolerating
   ≤`REVERSAL_PAUSE_TOLERANCE_FRAMES=60` measured pauses), path geometry
@@ -605,29 +606,22 @@ per-tile conf `0.25`, model `vision/models/staging.pt` run through
 
 Roughly ordered by how likely they are to bite you.
 
-1. **`CLAUDE.md` and `README.md` camera identity is wrong.** Hardware is IMX477 HQ Camera (4056×3040), confirmed by `capture.py`/`camera.py`. (§2.1)
-2. **`CLAUDE.md` on-disk layout is wrong.** Real names `experiments/`/`pictures/`/`videos/`; `camera_settings.json` is undocumented there. (§2.3a)
-3. **Stills are TIFF, not JPEG.** (§2.3)
-4. **Flat-field directory mismatch — likely a real, still-present bug.** The service reads the master flat from `DATA_ROOT/flatfield` but its error message tells you to run `capture/capture.py --capture-flat`, whose default `FF_DIR` is `<repo>/data/flatfield`. Following the instructions writes a flat the service can't find. Dormant because flat-field is opt-in per request.
-5. **BGR/RGB asymmetry** between `capture_still` (swaps) and the flat-building `capture.py` (doesn't). Mostly cosmetic (flat is per-channel normalised). (§2.4)
-6. **Bend rate is a head-angle metric, not curvature** (prominence 0.50 rad). (§4.7)
-7. **`head_angle_prominence` function-signature defaults (0.30) are dead**; real value 0.50 from JSON. (§4.7)
-8. **"Bend counter UNCHANGED from v1 / Do not modify" comment vs `bend_method="head_angle_peaks_v2"` label** disagree; label wins. (§4.7)
-9. **Curl vs collision BPM use different denominators.** (§4.7)
-10. **`crawling.py` module docstring is triply false** (params, engine, output schema all differ from motility). (§4b)
-11. **`is_full_track` (motility) computed but never used/exported.** Dead field; per-worm-trace render var `full_track_rows` filters on `is_long`. (§4.8–4.11)
-12. **Motility Excel drops computed columns** (`member_tierpsy_ids`, `bend_method`, `is_full_track`).
-13. **Crawling Tierpsy timeout hardcoded to 3600 s**, ignoring `analysis_video_timeout_s`. (§4b)
-14. **Crawling `threshold_s` half-used** (feeds `is_long`, not the gate); motility min-fragment spinbox validated even when inert. (§3.4, §4b)
-15. **Velocity-arrow reversal/turn columns are explicitly provisional** — two parallel reversal metrics ship today. (§4b)
-16. **Static file mount is CWD-relative** — only correct because systemd sets `WorkingDirectory=.../capture`.
-17. **`microns_per_pixel = -1.0`: analysis outputs are pixels / px/s.** The BL-normalized crawling columns cancel plate magnification but are still pixel-derived; the ImageJ TIFF calibration scales the *image file*, not the HDF5 features. Counting *does* derive µm/px from the detected well radius, so colony sizes are physical.
-18. **`CLAUDE.md`/`README.md` say the launcher needs "requests (only)".** It needs the full scientific stack plus scikit-image, tifffile, imagecodecs, customtkinter. (§3.5)
-19. **Mixed async/sync in the session router** (`create_session`/`add_plate` run on the event loop; the rest use `asyncio.to_thread`).
-20. **`clock-sync` and `shutdown` depend on sudoers entries.**
-21. **`bend_calibration.py` is duplicated and tracked twice** — `docs/calibration/` and `launcher/`, the latter with hardcoded `C:\Users\Isabe\Documents\WormScan\…` manual-count paths.
-22. **`CLAUDE.md` phase roadmap is stale** — it lists "Phase 4 Analysis service / Phase 5 Web UI" as future, but the launcher-hosted analysis (motility, crawling, counting) and both web UIs are built. The stash carries a corrected roadmap that hasn't been applied.
-23. **Tierpsy Docker image is pinned to `:latest`** — analysis is not reproducible across Tierpsy releases. (see AUDIT)
-24. **Counting `crop_wells` is treated as a validated black box** by `counting.py`/`counting_agent.py`; there is no automated regression test guarding either.
-25. **"Analyze on laptop" counts are a QA aid, not data.** The annotated-frame counts from `routers/analyze.py` → `infer_stage.py --draw/--counts` are raw per-image model calls with soft adult / L2–L3 boundaries — use them for live eyeballing, never as reported figures. (§2.6)
-26. **Worm-survival readout is validated only on training data so far**, and its survivor cutoff sits on the model's weakest boundary (L2/L3), so exact irradiated percentages are soft even where the qualitative effect holds. Per-class confidence-threshold calibration is a prerequisite before staging counts are treated as data. Tracked in `BACKLOG.md`. (§4d)
+1. **`CLAUDE.md` on-disk layout is wrong.** Real names `experiments/`/`pictures/`/`videos/`; `camera_settings.json` is undocumented there. (§2.3a)
+2. **Stills are TIFF, not JPEG.** (§2.3)
+3. **Flat-field directory mismatch — likely a real, still-present bug.** The service reads the master flat from `DATA_ROOT/flatfield` but its error message tells you to run `capture/capture.py --capture-flat`, whose default `FF_DIR` is `<repo>/data/flatfield`. Following the instructions writes a flat the service can't find. Dormant because flat-field is opt-in per request.
+4. **BGR/RGB asymmetry** between `capture_still` (swaps) and the flat-building `capture.py` (doesn't). Mostly cosmetic (flat is per-channel normalised). (§2.4)
+5. **Bend rate is a head-angle metric, not curvature** (prominence 0.50 rad). (§4.7)
+6. **Operative bend prominence is 0.50 rad from JSON.** The dead `0.30` default on `compute_head_angle_signal` was removed (`8cf7f5c`); a `0.30` default remains only on `read_fragments`, overridden by every caller. (§4.7)
+7. **Curl vs collision BPM use different denominators.** (§4.7)
+8. **Motility Excel drops computed columns** (`member_tierpsy_ids`, `bend_method`). (§4.8–4.11)
+9. **Crawling Tierpsy timeout hardcoded to 3600 s**, ignoring `analysis_video_timeout_s`. (§4b)
+10. **Crawling `threshold_s` half-used** (feeds `is_long`, not the gate); motility min-fragment spinbox validated even when inert. (§3.4, §4b)
+11. **Velocity-arrow reversal/turn columns are explicitly provisional** — two parallel reversal metrics ship today. (§4b)
+12. **Static file mount is CWD-relative** — only correct because systemd sets `WorkingDirectory=.../capture`.
+13. **`microns_per_pixel = -1.0`: analysis outputs are pixels / px/s.** The BL-normalized crawling columns cancel plate magnification but are still pixel-derived; the ImageJ TIFF calibration scales the *image file*, not the HDF5 features. Counting *does* derive µm/px from the detected well radius, so colony sizes are physical.
+14. **Mixed async/sync in the session router** (`create_session`/`add_plate` run on the event loop; the rest use `asyncio.to_thread`).
+15. **`clock-sync` and `shutdown` depend on sudoers entries.**
+16. **Tierpsy Docker image is pinned to `:latest`** — analysis is not reproducible across Tierpsy releases. (see AUDIT)
+17. **Counting `crop_wells` is treated as a validated black box** by `counting.py`/`counting_agent.py`; there is no automated regression test guarding either.
+18. **"Analyze on laptop" counts are a QA aid, not data.** The annotated-frame counts from `routers/analyze.py` → `infer_stage.py --draw/--counts` are raw per-image model calls with soft adult / L2–L3 boundaries — use them for live eyeballing, never as reported figures. (§2.6)
+19. **Worm-survival readout is validated only on training data so far**, and its survivor cutoff sits on the model's weakest boundary (L2/L3), so exact irradiated percentages are soft even where the qualitative effect holds. Per-class confidence-threshold calibration is a prerequisite before staging counts are treated as data. Tracked in `BACKLOG.md`. (§4d)
