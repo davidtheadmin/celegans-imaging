@@ -640,6 +640,44 @@ async function captureFreeStill() {
   }
 }
 
+// ── Analyze on laptop ──────────────────────────────────────────────────────────
+async function analyzeOnLaptop() {
+  const btn = document.getElementById('analyze-btn');
+  const msg = document.getElementById('analyze-msg');
+  const origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Capturing…';
+  msg.hidden = true; msg.textContent = '';
+  const show = (t) => { msg.textContent = t; msg.hidden = false; announce(t); };
+  try {
+    const { job_id } = await apiJson('/analyze', { method: 'POST', body: {} });
+    // Poll status every 500ms for up to 8s, waiting for the laptop to grab it.
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 500));
+      let state = null;
+      try {
+        const r = await fetch(`/analyze/status/${job_id}`,
+                              { headers: { 'X-Auth-Token': S.token } });
+        if (r.ok) state = (await r.json()).state;
+      } catch {}
+      if (state === 'taken') { show('Sent to laptop, check the launcher.'); return; }
+      if (state === 'gone')  { show('Job expired, press again.'); return; }
+    }
+    // Nobody grabbed it: cancel so it never processes late, and prompt the user.
+    try {
+      await fetch(`/analyze/cancel/${job_id}`,
+                  { method: 'POST', headers: { 'X-Auth-Token': S.token } });
+    } catch {}
+    show('Launcher not running on the laptop. Open it, then press again.');
+  } catch (err) {
+    show(`Error: ${err.message}`);
+  } finally {
+    btn.innerHTML = origHtml;
+    btn.disabled = false;
+  }
+}
+
 // ── Free Video ─────────────────────────────────────────────────────────────────
 async function captureFreeVideo() {
   const btn = document.getElementById('video-btn');
@@ -1893,6 +1931,7 @@ function bindEvents() {
   });
 
   document.getElementById('still-btn').addEventListener('click', captureFreeStill);
+  document.getElementById('analyze-btn').addEventListener('click', analyzeOnLaptop);
   document.getElementById('video-btn').addEventListener('click', captureFreeVideo);
   initVideoDuration();
 
