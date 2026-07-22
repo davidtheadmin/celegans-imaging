@@ -12,6 +12,7 @@ import logging
 import config
 import sync as sync_mod
 import ui as ui_mod
+from analyze_worker import AnalyzeWorker
 from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
 from analysis.counting_agent import CountingAgent, CountingStatus
@@ -45,6 +46,10 @@ def main() -> None:
     survival_agent = SurvivalAgent(settings, survival_status)
     survival_agent.start()
 
+    # "Analyze on laptop" long-poll worker (no UI; opens its outputs directly).
+    analyze_agent = AnalyzeWorker(settings)
+    analyze_agent.start()
+
     win = ui_mod.MainWindow(
         settings, agent, status,
         motility_agent, motility_status,
@@ -64,6 +69,8 @@ def main() -> None:
     counting_agent.join(timeout=5)
     survival_agent.stop()
     survival_agent.join(timeout=5)
+    analyze_agent.stop()
+    analyze_agent.join(timeout=5)
     log.info("WormScan Launcher stopped")
 
 
