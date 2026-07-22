@@ -2,7 +2,7 @@
 
 **Ground-truth snapshot of how the code actually works — regenerated 2026-07-09 from live `HEAD` (`c7045bd`).**
 
-**Updated 2026-07-22:** added §2.6 (the *Analyze on laptop* feature), a matching §6 entry, and corrected §3's thread count (now six, was four). Everything else below still reflects `c7045bd` and has **not** been re-verified since — in particular the worm-survival staging pipeline (`vision/`, `infer_stage.py`, `survival.py`, `SurvivalAgent`) landed after this snapshot and its internals are not yet described here.
+**Updated 2026-07-22:** documented the worm-survival staging pipeline (new §4d covering `survival.py`, the `vision/` two-venv inference layer, `infer_stage.py`, `tiled_infer.py`, and `SurvivalAgent`), plus its AnalysisDialog mode (§3.4), config field (§3.2), §1 layout entries, and a §6 validation caveat, on top of the earlier §2.6 *Analyze on laptop* addition. Verified against `HEAD` (`1aa04a3`).
 
 This describes the code as it sits in the working tree right now. The tree is
 **clean** (no uncommitted/untracked changes); there is one unpushed commit
@@ -71,17 +71,21 @@ Top-level, one line each:
 - `capture/retention.py` — disk-retention daemon, run via systemd timer (`python -m capture.retention`).
 - `capture/app/static/` — the web UI. `index.html` + `app.js` + `app.css` (restyled) + **new** `themes.css` (light/dark) + **new** `extras.js`.
 - `launcher/` — the Windows CustomTkinter app: syncs files off the Pi, runs the local analysis pipelines, builds grid viewers.
-  - `main.py` — entry point; starts four agents (Sync, Motility, Crawling, Counting) and hands all four + their status objects to `MainWindow`.
+  - `main.py` — entry point; starts five agents (Sync, Motility, Crawling, Counting, Survival) plus the UI-less `AnalyzeWorker` (§2.6), and hands the five + their status objects to `MainWindow`.
   - `theme.py` / `widgets.py` — **new** CTk design-token + reusable-widget layers (view-only).
   - `_widget_gallery.py` — **new** standalone dev harness that renders the widget catalogue; not imported by the app (hardcoded sample paths). Dev-only.
   - `ui.py` — MainWindow + Settings/Analysis/Review/progress dialogs (fully CTk).
   - `config.py`, `sync.py` — settings dataclass + background sync thread.
+  - `survival.py` — the worm-survival pipeline (agent + stats + Excel + curve). Calls the vision venv by subprocess, never imports ultralytics. See §4d.
+  - `analyze_worker.py` — the UI-less `AnalyzeWorker` behind the capture UI's "Analyze on laptop" button (§2.6).
   - `bend_calibration.py` — tracked copy of the bend-method calibration script, with hardcoded `C:\Users\Isabe\…` paths (a near-duplicate of `docs/calibration/bend_calibration.py`).
 - `launcher/analysis/` — the analysis pipelines and shared helpers:
   - Motility: `motility.py`, `analysis_csv.py`, `fragment_grouping.py`, `flicker_filter.py`, `plots.py`.
   - Crawling: `crawling.py`, `crawling_metrics.py`, `crawling_fragment_grouping.py`, `crawling_plots.py`, `crawling_render.py`.
   - Counting/colony: `counting.py`, `counting_agent.py`, `crop_wells.py` (**new pipeline**).
   - Shared: `ffmpeg_utils.py`, `docker_utils.py`, `render_video.py`, `concurrency.py`.
+  - Staging (parked): `normalize.py`, `test_normalize.py`, `canonical_scale.json` are a scale-normalization utility for the YOLO staging pipeline. They are **not imported** by `infer_stage.py`, `tiled_infer.py`, or `survival.py`, and are not currently used by any pipeline. Open item in `BACKLOG.md` ("YOLO staging — scale normalization").
+- `launcher/vision/` — self-contained staging-inference folder with its own Python 3.12 venv (`.venv-vision/`, git-ignored). Holds `tiled_infer.py` (tiling + NMS library, import target, no CLI), `infer_stage.py` (the CLI the 3.13 launcher shells out to), and `models/staging.pt` (git-ignored model weights, travel by copy). See §4d.
 - `launcher/viewers/` — two standalone HTML-grid-viewer generators (`make_image_viewer.py`, `make_video_viewer.py`), driven by the launcher's "Review" button.
 - `launcher/tools/` — ad-hoc diagnostic scripts, **all now tracked** (`tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`). None are imported by the app; several carry hardcoded `C:\Users\Isabe\…` paths.
 - `deploy/` — three systemd units: capture service, retention oneshot service, retention timer.
@@ -231,7 +235,7 @@ background threads — `SyncAgent`, `MotilityAgent`, `CrawlingAgent`,
 first five are each paired with a thread-safe status object and handed to
 `MainWindow`; `AnalyzeWorker` has no status object and opens its outputs directly.
 (Review spawns its own short-lived worker thread on demand.) `SurvivalAgent`'s
-pipeline internals are not yet documented here — see the update note at the top.
+pipeline is §4d.
 
 ### 3.1 Thread model (unchanged contract)
 
@@ -250,6 +254,7 @@ A `Settings` dataclass persisted to `%APPDATA%\WormScan\config.json`; logs to
 - `pi_url = "http://192.168.50.2:8000"`, `token = ""`, `mirror_root = ~/Documents/WormScan`, `poll_interval_s = 120`.
 - Analysis: `tierpsy_image = "tierpsy/tierpsy-tracker"`, `tierpsy_image_tag = "latest"`, `docker_command = "docker"`, `analysis_video_timeout_s = 600`, `motility_long_threshold_s = 5.0`, `crawling_min_track_s = 30`.
 - **Counting (new): `counting_split_sensitivity = 3.0`, `counting_min_colony_um = 200.0`.**
+- **Survival (new): `survival_conf = 0.25`** (staging per-tile confidence).
 - `review_type = "auto"`, `review_loop_s = 3.0`, `concurrent_videos = "auto"`.
 
 `load()` filters unknown keys against the dataclass fields, so a stale config
@@ -276,13 +281,15 @@ until the next green sync.
 `SettingsDialog` edits pi_url/token/mirror/poll-interval (≥10). It does **not**
 expose the analysis fields.
 
-`AnalysisDialog` uses a **segmented mode picker** with three live modes:
-**Motility**, **Crawling**, and **Colony Survival** (internal `"counting"`).
-Counting is no longer disabled. Per-mode UI:
+`AnalysisDialog` uses a **segmented mode picker** with four live modes:
+**Motility**, **Crawling**, **Colony Survival** (internal `"counting"`), and
+**Worm Survival** (internal `"survival"`). Counting is no longer disabled.
+Per-mode UI:
 
 - Motility: folder picker, "Min fragment length (s)" spinbox (1–30), clear-cache checkbox, renders (Tracked / Curvature / Side-by-side / Per-worm traces).
 - Crawling: same picker, "Min track span (s)" spinbox (1–600, from `crawling_min_track_s`), renders (Tracked / Side-by-side / Path traces).
 - Colony Survival: a "Colony Survival options" card with two knobs — split sensitivity (default 3.0) and min colony µm (default 200.0). **No Docker/ffmpeg/threshold, no cache, no video render** — pure-Python image analysis (§4c).
+- Worm Survival: a "Worm Survival options" card with a staging-confidence slider (default 0.25, persisted as `survival_conf`) and a save-previews checkbox. On Start it runs `survival_preflight` (images + vision venv + inference script + model + pandas/numpy/openpyxl; no Docker) and the SurvivalAgent (§4d).
 
 On Start it validates inputs, runs the mode-appropriate preflight (`run_preflight`
 for motility/crawling; `counting_preflight` for counting — the latter only checks
@@ -450,6 +457,119 @@ TIFF-tag-preserving reader `_read`. Also a standalone CLI.
 
 ---
 
+## 4d. Worm-Survival pipeline (NEW)
+
+Staging-model survival readout for UV / dose plate images. Entry:
+`SurvivalAgent._run_analysis` (`launcher/survival.py`), mirroring the
+Motility / Crawling / Counting agent / status / cancel / progress contract
+exactly (`SurvivalStatus` uses the same worker-writes / UI-reads split). It is
+the fourth AnalysisDialog mode, **Worm Survival** (internal `"survival"`, §3.4).
+Heavy deps (`pandas`, `numpy`, `openpyxl`) import lazily; `survival_preflight()`
+checks for images, the vision venv, the inference script, the model, and those
+three packages. No Docker, no ffmpeg, no cache, no video render.
+
+### The `vision/` layer: staging inference (two-venv boundary)
+
+Inference is physically separated from the launcher. `launcher/vision/` is a
+self-contained folder carrying its own **Python 3.12 venv** (`.venv-vision/`,
+ultralytics + torch, git-ignored). The launcher runs on 3.13 and cannot import
+ultralytics, so it shells out; keeping the AGPL-coupled stack in one detachable
+folder is the second reason. `survival.py` never imports ultralytics, torch, or
+`tiled_infer`. All inference is one subprocess call to the vision python:
+
+```
+vision/.venv-vision/Scripts/python.exe  vision/infer_stage.py --batch --stdin \
+    --model vision/models/staging.pt --conf <c> --no-boxes [--preview-dir DIR]
+```
+
+- `tiled_infer.py`: the shared tiling + NMS library (import target, no CLI, no
+  model loading). It splits a full 4056×3040 frame into **676×608 tiles** (a 6×5
+  division of the frame) stepped at **0.2 overlap**, resizes each tile to **640**,
+  runs the model per tile, shifts boxes back to full-frame coords, and merges
+  with per-class NMS (iou 0.45). The whole frame is never run at once, because
+  staging reads absolute worm size. Boxes come back as
+  `[x1, y1, x2, y2, score, class_name]`, with the name already resolved from
+  `model.names`. Two seam-cleanup knobs (`edge_margin`, `class_agnostic_iou`)
+  exist but default off, so infer_stage's call reproduces the plain per-class
+  merge.
+- `infer_stage.py`: the CLI wrapper (single and batch, `--stdin`, JSON / JSON
+  Lines on stdout, progress and errors on stderr). The model loads once and is
+  reused for every image, so batch cost is per-image. The batch meta line carries
+  the authoritative `names` list, so the 3.13 consumer never loads the model. Its
+  `--draw` / `--counts` side outputs feed §2.6; stdout is byte-identical with or
+  without them, so survival.py is unaffected. `models/staging.pt` is git-ignored
+  (large binary, travels by copy).
+
+### Survivor mapping (`SURVIVAL_CONFIG`)
+
+Stage strings come from `model.names` at run time. `SURVIVAL_CONFIG` in
+`survival.py` is the only place they map to survival categories:
+
+| category | stages | in denominator? |
+|----------|--------|-----------------|
+| survivors | L3, L4, young adult, adult | yes |
+| non_survivors | L1, L2 | yes |
+| excluded | egg | no (counted and reported separately) |
+
+`survival % = survivors / (survivors + non_survivors) × 100`. Any stage the model
+reports that is not in the dict lands in an `unmapped` column, is excluded from
+the denominator, and is logged loudly, so a retrain that adds or renames a class
+fails visibly instead of miscounting. Matching is case-insensitive and
+whitespace-tolerant.
+
+### Grouping (auto-detected; plate is the unit of replication)
+
+`decide_grouping_mode` chooses per run:
+
+- **filename mode** when at least 80% of image stems carry **both** a dose and a
+  plate token. Tokens match by shape, not position (the session tag varies in
+  length): dose `^(\d+)(J|uM|µM)$`, plate `^p(\d+)$` (both case-insensitive),
+  strain is the first token, a trailing pure-digit frame token is ignored. The
+  condition label is rebuilt as `"<strain> <dose><unit>"` so it stays parseable
+  by the shared condition grammar
+  `_COND_RE = ^(?P<strain>.+?)\s+(?P<dose>\d+)\s*(?P<unit>[Jj]|[uUµ][Mm])$`. Stems
+  missing a token go to a visible `__unparsed__` condition, never silently
+  dropped.
+- **directory mode** otherwise: the counting-style depth rule (depth 0 gives
+  `default` / stem, depth 1 gives `default` / parent, depth 2+ gives grandparent /
+  parent).
+
+The chosen mode, encoded fraction, and condition / plate / image counts are
+printed loudly (console and `run_info`). Plate is the replication unit:
+per-condition mean, SD, min, and max are taken over per-plate survival %.
+
+### Outputs
+
+Written to `<folder>/_survival_<YYYY-MM-DD_HHMMSS>/`:
+
+- `worm_survival_results.xlsx`, sheets **run_info, per_image, per_plate,
+  per_condition, dose_response** (dose_response only when at least one condition
+  parses to strain + dose). Excel is the primary output.
+- `survival_curve.png`, a dose-response curve (one line per strain, SD error
+  bars, jittered per-plate scatter). Plotting is fully wrapped in try / except and
+  runs matplotlib headless (`Agg`), so any plot failure, including matplotlib
+  being absent, is logged and swallowed and never fails the run.
+- `log.txt`, plus `previews/` when the save-previews box is ticked.
+
+`matplotlib` is a declared launcher dependency (§3.5).
+
+### Model and validation caveat
+
+`staging.pt` is the current **v6** model (YOLO11n, seven classes: egg, L1, L2, L3,
+L4, young adult, adult), trained off-repo and copied in. Only the seven class
+names and the 0.25 default conf are code-verifiable here; the rest is model
+provenance. **The survival readout has so far only been run on training data, so
+it is partly circular:** it matched expected biology, but that is a pipeline
+check, not an independent result. The survivor cutoff sits on the **L2/L3
+boundary**, the model's weakest spot, so exact irradiated percentages are soft
+even where the qualitative effect is robust. Per-class confidence thresholds must
+be calibrated against manual counts before any staging count is treated as data
+rather than a live QA readout. That work, and the `normalize.py` passthrough
+checks, are tracked in `BACKLOG.md` (see "Staging model — per-class confidence
+thresholds" and "YOLO staging — scale normalization").
+
+---
+
 ## 5. Configuration surface
 
 **Pi service env vars** (`capture/.env`, prefix `CELEGANS_`): `TOKEN` (required),
@@ -472,8 +592,10 @@ TIFF-tag-preserving reader `_read`. Also a standalone CLI.
 crawling `MIN_SPAN_S=30`, `SKELETON_COVERAGE_MIN=0.70`, linker `D_MAX=150`/
 `T_MAX_S=5`, arrow 140°/60°; counting `well_diameter_mm=34.8`,
 `background_radius_um=3000`, `confluence_frac=0.55`; `_MAX_WORKERS=8`; render
-libx264 crf 22. Segoe font files `C:\Windows\Fonts\SegoeIcons.ttf` /
-`segmdl2.ttf` are probed by `widgets.py`.
+libx264 crf 22; staging tiles `676×608` at `0.2` overlap resized to `640`,
+per-tile conf `0.25`, model `vision/models/staging.pt` run through
+`vision/.venv-vision` (Python 3.12). Segoe font files
+`C:\Windows\Fonts\SegoeIcons.ttf` / `segmdl2.ttf` are probed by `widgets.py`.
 
 **Auth:** one shared token, `secrets.compare_digest`, header or query param.
 
@@ -508,3 +630,4 @@ Roughly ordered by how likely they are to bite you.
 23. **Tierpsy Docker image is pinned to `:latest`** — analysis is not reproducible across Tierpsy releases. (see AUDIT)
 24. **Counting `crop_wells` is treated as a validated black box** by `counting.py`/`counting_agent.py`; there is no automated regression test guarding either.
 25. **"Analyze on laptop" counts are a QA aid, not data.** The annotated-frame counts from `routers/analyze.py` → `infer_stage.py --draw/--counts` are raw per-image model calls with soft adult / L2–L3 boundaries — use them for live eyeballing, never as reported figures. (§2.6)
+26. **Worm-survival readout is validated only on training data so far**, and its survivor cutoff sits on the model's weakest boundary (L2/L3), so exact irradiated percentages are soft even where the qualitative effect holds. Per-class confidence-threshold calibration is a prerequisite before staging counts are treated as data. Tracked in `BACKLOG.md`. (§4d)
