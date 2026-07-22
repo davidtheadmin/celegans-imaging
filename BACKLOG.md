@@ -149,3 +149,13 @@ error here poisons the training set:
   `scale = 1.0000`, zero interpolation. If any file logs a non-exact scale (e.g.
   `0.9998`), the batch is NOT all at one identical calibration as assumed —
   STOP and report the spread rather than writing it as training data.
+
+## Staging model — per-class confidence thresholds
+
+The worm-survival staging model (`launcher/vision/infer_stage.py`) runs a single
+global confidence threshold (`--conf`, default 0.25) across every stage class.
+Counts are unreliable where classes are easily confused — **adult, and especially
+the L2/L3 boundary**. Finalize **per-class** confidence thresholds, calibrated
+against manual stage counts, before any staging count is treated as data rather
+than a live QA readout. Until then the "Analyze on laptop" annotated counts
+(CURRENT_STATE §2.6 / §6.25) are eyeballing aids only.

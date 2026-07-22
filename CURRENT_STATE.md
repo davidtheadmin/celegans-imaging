@@ -2,6 +2,8 @@
 
 **Ground-truth snapshot of how the code actually works — regenerated 2026-07-09 from live `HEAD` (`c7045bd`).**
 
+**Updated 2026-07-22:** added §2.6 (the *Analyze on laptop* feature), a matching §6 entry, and corrected §3's thread count (now six, was four). Everything else below still reflects `c7045bd` and has **not** been re-verified since — in particular the worm-survival staging pipeline (`vision/`, `infer_stage.py`, `survival.py`, `SurvivalAgent`) landed after this snapshot and its internals are not yet described here.
+
 This describes the code as it sits in the working tree right now. The tree is
 **clean** (no uncommitted/untracked changes); there is one unpushed commit
 (`c7045bd`, ahead of `origin/main` by 1) and one stash (`stash@{0}: polish files
@@ -190,14 +192,46 @@ Re-derives `DATA_ROOT`/dir-names from env. Knobs: `MIN_FREE_GB=5`,
 A capture-time guard (`disk_guard.ensure_capture_space`) refuses captures with
 **HTTP 507** if free disk stays below `CELEGANS_CAPTURE_MIN_FREE_GB` (2.0) after a reclaim.
 
+### 2.6 "Analyze on laptop" — full-res frame hand-off (`routers/analyze.py`)
+
+A button in the capture web UI grabs a full-res frame and hands it to the laptop,
+where the launcher's vision venv runs the staging model and auto-opens an
+annotated PNG plus a counts txt. The transport is a long-poll *from* the laptop
+*to* the Pi, so the laptop stays a pure HTTP client with no inbound listener. On
+the Pi, `routers/analyze.py` keeps a **single job slot** guarded by an
+`asyncio.Condition`, token-authenticated like every other route: `POST /analyze`
+captures a frame and parks it — a new press **replaces** any frame still waiting,
+so the launcher never processes a stale capture — and the launcher's
+`GET /analyze/next` long-poll (25 s, `204` on idle) drains it;
+`GET /analyze/status/{jid}` and `POST /analyze/cancel/{jid}` round it out. The
+frame is LZW-TIFF-encoded **in memory** and never written to Pi disk.
+
+On the laptop, `launcher/analyze_worker.py` runs `AnalyzeWorker`, a
+`threading.Thread` following the same `start()/stop()/join()` lifecycle as the
+other agents, but unlike them it carries no status object and is not handed to
+`MainWindow` — it just runs and opens its outputs (see the thread list in §3).
+Each frame lands in
+`Documents\WormScan\analyze_last\<timestamp>\` (frame + `annotated.png` +
+`counts.txt`, pruned to the 10 most recent runs) and is shelled out to the vision
+venv's `infer_stage.py`, which gained `--draw` and `--counts` flags; its stdout
+JSON contract is unchanged, so `survival.py` (which batch-calls the same CLI) is
+unaffected.
+
+**Caveat:** the counts drawn on the annotated frame are raw per-image model calls
+— adult, and the L2/L3 boundary in particular, are soft — so this is a live QA
+aid for eyeballing a plate, **not** a paper number. (Also in §6.)
+
 ---
 
 ## 3. Windows launcher (`launcher/`)
 
-A **CustomTkinter** desktop app (was plain Tkinter). `main.py` wires up four
+A **CustomTkinter** desktop app (was plain Tkinter). `main.py` wires up six
 background threads — `SyncAgent`, `MotilityAgent`, `CrawlingAgent`,
-`CountingAgent` — each paired with a thread-safe status object, and hands all
-eight to `MainWindow`. (Review spawns its own short-lived worker thread on demand.)
+`CountingAgent`, `SurvivalAgent`, and the UI-less `AnalyzeWorker` (§2.6). The
+first five are each paired with a thread-safe status object and handed to
+`MainWindow`; `AnalyzeWorker` has no status object and opens its outputs directly.
+(Review spawns its own short-lived worker thread on demand.) `SurvivalAgent`'s
+pipeline internals are not yet documented here — see the update note at the top.
 
 ### 3.1 Thread model (unchanged contract)
 
@@ -473,3 +507,4 @@ Roughly ordered by how likely they are to bite you.
 22. **`CLAUDE.md` phase roadmap is stale** — it lists "Phase 4 Analysis service / Phase 5 Web UI" as future, but the launcher-hosted analysis (motility, crawling, counting) and both web UIs are built. The stash carries a corrected roadmap that hasn't been applied.
 23. **Tierpsy Docker image is pinned to `:latest`** — analysis is not reproducible across Tierpsy releases. (see AUDIT)
 24. **Counting `crop_wells` is treated as a validated black box** by `counting.py`/`counting_agent.py`; there is no automated regression test guarding either.
+25. **"Analyze on laptop" counts are a QA aid, not data.** The annotated-frame counts from `routers/analyze.py` → `infer_stage.py --draw/--counts` are raw per-image model calls with soft adult / L2–L3 boundaries — use them for live eyeballing, never as reported figures. (§2.6)
