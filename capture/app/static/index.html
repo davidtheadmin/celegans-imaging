@@ -180,13 +180,17 @@
             <p class="panel-hint">Capture a full-resolution picture to the Pictures folder.</p>
             <button id="still-btn" class="btn btn-primary btn-capture">Capture Still <span class="kbd-hint">[Space]</span></button>
             <p id="still-msg" class="capture-msg" hidden></p>
-            <button id="analyze-btn" class="btn">Analyze on laptop</button>
-            <!-- Off by default: a plate is rarely a question about worms AND
-                 eggs at once. Ticked, the laptop keeps egg detections (egg
-                 survival, bleached-egg drops). -->
-            <label class="checkbox-label">
-              <input id="analyze-eggs" type="checkbox"> Count eggs
-            </label>
+            <!-- Button and its per-press option share one row: .mode-body is a
+                 flex column with a 16px gap, so a loose sibling label reads as a
+                 panel-level control rather than a modifier for this button.
+                 Eggs off by default — a plate is rarely a question about worms
+                 AND eggs at once; tick it for egg survival / bleached-egg drops. -->
+            <div class="analyze-row">
+              <button id="analyze-btn" class="btn">Analyze on laptop</button>
+              <label class="checkbox-label" for="analyze-eggs">
+                <input id="analyze-eggs" type="checkbox"> Count eggs
+              </label>
+            </div>
             <p id="analyze-msg" class="capture-msg" hidden></p>
           </div>
 
