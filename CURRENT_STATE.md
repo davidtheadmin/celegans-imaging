@@ -2,6 +2,39 @@
 
 **Ground-truth snapshot of how the code actually works — regenerated 2026-07-09 from live `HEAD` (`c7045bd`).**
 
+**Updated 2026-07-27 (third pass):** added the **egg toggle** — a "Count eggs"
+checkbox in the launcher's Worm Survival card and next to the capture UI's
+*Analyze on laptop* button, backed by `exclude_classes` in `stage_conf.json`
+(ships as `["egg"]`, i.e. eggs OFF). Excluded classes are dropped *pre-NMS*, and
+every consumer reports them as **"not counted", never 0**. Touches
+`tiled_infer.py`, `infer_stage.py`, `stage_conf.json`, `config.py`
+(`survival_count_eggs`), `survival.py`, `ui.py`, `analyze_worker.py`, and — needing
+a **Pi deploy** — `capture/app/routers/analyze.py`, `index.html`, `app.js` (§2.6,
+§3.2, §3.4, §4d). Also recorded the staging model's real training
+hyperparameters, read out of `staging.pt` (§4d "Model provenance"), and a new
+open item on stage bias on mixed plates (§6 item 23).
+
+**Updated 2026-07-27 (second pass, after field feedback):** the duplicate fix
+held — "barely any extra boxes anymore" — but three residual failures showed up on
+real plates. Two are now addressed: **cross-class NMS is ON**
+(`merge.class_agnostic_iou = 0.7`) for one worm carrying two labels at nearly the
+same box (the L3/L4 pair), and a **per-class size gate** (`class_size_px`,
+sqrt(w·h) bounds) now exists for debris that scores *high* on a stage it cannot
+physically be — shipped **empty/off**, because the bounds are
+magnification-dependent and must be measured, which
+`dev/tools/stage_conf_report.py --suggest` now does. The third — an extra box
+where two worms sit close together — is **not** addressed pending an example
+image; see §6 item 21. All of this is in §4d.
+
+**Updated 2026-07-27:** the staging inference layer gained **per-class
+confidence thresholds** and a **targeted duplicate-box fix**. New shared defaults
+file `launcher/vision/stage_conf.json` (§4d, §5); `tiled_infer.py` merge rewritten
+(seam flagging + containment-based suppression, §4d); `infer_stage.py` threshold
+flags (§4d); `config.py` field swap `survival_conf` → `survival_class_conf` (§3.2);
+seven per-class sliders in the Worm Survival card (§3.4); `analyze_worker.py` now
+re-reads config per frame so the laptop button matches (§2.6); new diagnostic
+`dev/tools/stage_conf_report.py` (§1). §6 items 18–19 revised, new item 20.
+
 **Updated 2026-07-22:** documented the worm-survival staging pipeline (new §4d covering `survival.py`, the `vision/` two-venv inference layer, `infer_stage.py`, `tiled_infer.py`, and `SurvivalAgent`), plus its AnalysisDialog mode (§3.4), config field (§3.2), §1 layout entries, and a §6 validation caveat, on top of the earlier §2.6 *Analyze on laptop* addition. Also swept the sections the intervening cleanup and doc-correction commits (`8cf7f5c`, `24fce0e`, `6608104`) had made stale: the `dev/` script relocation and the removed launcher `bend_calibration.py` copy (§1), the corrected `CLAUDE.md`/`README.md` camera / deps / roadmap claims, and the motility dead-code and comment fixes across §2.1, §4.7, §4.8–4.11, §4b, and §6. Verified against `HEAD` (`1aa04a3`).
 
 This describes the code as it sits in the working tree right now. The tree is
@@ -83,9 +116,9 @@ Top-level, one line each:
   - Counting/colony: `counting.py`, `counting_agent.py`, `crop_wells.py` (**new pipeline**).
   - Shared: `ffmpeg_utils.py`, `docker_utils.py`, `render_video.py`, `concurrency.py`.
   - Staging (parked): `normalize.py`, `test_normalize.py`, `canonical_scale.json` are a scale-normalization utility for the YOLO staging pipeline. They are **not imported** by `infer_stage.py`, `tiled_infer.py`, or `survival.py`, and are not currently used by any pipeline. Open item in `BACKLOG.md` ("YOLO staging — scale normalization").
-- `launcher/vision/` — self-contained staging-inference folder with its own Python 3.12 venv (`.venv-vision/`, git-ignored). Holds `tiled_infer.py` (tiling + NMS library, import target, no CLI), `infer_stage.py` (the CLI the 3.13 launcher shells out to), and `models/staging.pt` (git-ignored model weights, travel by copy). See §4d.
+- `launcher/vision/` — self-contained staging-inference folder with its own Python 3.12 venv (`.venv-vision/`, git-ignored). Holds `tiled_infer.py` (tiling + NMS library, import target, no CLI), `infer_stage.py` (the CLI the 3.13 launcher shells out to), **new** `stage_conf.json` (tracked; the shared per-class-threshold / tiling / seam defaults both venvs read), and `models/staging.pt` (git-ignored model weights, travel by copy). See §4d.
 - `launcher/viewers/` — two standalone HTML-grid-viewer generators (`make_image_viewer.py`, `make_video_viewer.py`), driven by the launcher's "Review" button.
-- `dev/` — dev-only scripts moved out of `launcher/` (commit `6608104`), none imported by the app: `_widget_gallery.py` (CTk widget-catalogue harness), `tools/` (ad-hoc diagnostics: `tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`), and the former root debug scripts (`check_skel_flag.py`, `check_skeletons.py`, `inspect_filter_decisions{,2,3}.py`). Several carry hardcoded `C:\Users\Isabe\…` paths.
+- `dev/` — dev-only scripts moved out of `launcher/` (commit `6608104`), none imported by the app: `_widget_gallery.py` (CTk widget-catalogue harness), `tools/` (ad-hoc diagnostics: `tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`, **new** `stage_conf_report.py` — profiles the staging model's per-class confidence distribution, box-size percentiles, size-plausibility percentiles and seam-fragment rate on a real plate set, so `vision/stage_conf.json` can be set from data; runs in the VISION venv, writes `_stage_conf_report/`, changes nothing. `--suggest` additionally writes `stage_conf_suggested.json`, a paste-ready `class_size_px` block carrying the removal count each bound would cause plus a check that median box size actually rises along egg → adult — where it does not, the model is not separating those stages by size and they must not be gated), and the former root debug scripts (`check_skel_flag.py`, `check_skeletons.py`, `inspect_filter_decisions{,2,3}.py`). Several carry hardcoded `C:\Users\Isabe\…` paths.
 - `deploy/` — three systemd units: capture service, retention oneshot service, retention timer.
 - `scripts/` — bash helpers: `deploy.sh` (push→pull→restart), clock sync, data wipe, folder renamers, video mover.
 - `docs/calibration/` — the original bend-calibration script + reference PNGs (fast/slow worm examples).
@@ -219,9 +252,31 @@ venv's `infer_stage.py`, which gained `--draw` and `--counts` flags; its stdout
 JSON contract is unchanged, so `survival.py` (which batch-calls the same CLI) is
 unaffected.
 
-**Caveat:** the counts drawn on the annotated frame are raw per-image model calls
-— adult, and the L2/L3 boundary in particular, are soft — so this is a live QA
-aid for eyeballing a plate, **not** a paper number. (Also in §6.)
+**Per-press options ride through the Pi as headers.** The web UI's `POST /analyze`
+body now carries `count_eggs` (an `AnalyzeRequest` pydantic model, defaulting to
+`False`, so an older UI posting `{}` behaves exactly as before). The Pi parks it
+in the job slot alongside the frame and hands it back on `/analyze/next` as an
+`X-Count-Eggs: 1|0` **response header** — the body is the TIFF, so options cannot
+travel in it. The Pi never interprets the flag; it is a relay, which means a
+future analysis option needs no Pi deploy, only the two ends. On the laptop a
+**missing** header reads as `None`, not `False`, and the worker then passes
+nothing so `stage_conf.json` decides — an old Pi paired with a new launcher
+degrades to the default rather than silently forcing eggs off.
+
+**Thresholds match the batch pipeline by construction.** `_run_inference` passes
+no `--conf`, so `infer_stage.py` falls back to `vision/stage_conf.json` — the same
+per-class defaults the Worm Survival dialog seeds its sliders from. Once the user
+has moved those sliders, the button follows: `_class_conf()` calls
+`config.load()` **per frame** and forwards `survival_class_conf` as
+`--class-conf`. It re-reads the file rather than using `self._settings` because
+this worker is handed the `Settings` object once at launch and is not on the
+`_on_settings_saved` propagation list, so its copy goes stale the moment the
+sliders are touched. A read failure silently falls back to `stage_conf.json`.
+
+**Caveat:** the counts drawn on the annotated frame are still raw per-image model
+calls — adult, and the L2/L3 boundary in particular, are soft — so this is a live
+QA aid for eyeballing a plate, **not** a paper number. Per-class thresholds make
+it tunable; they do not make it calibrated. (Also in §6.)
 
 ---
 
@@ -252,7 +307,18 @@ A `Settings` dataclass persisted to `%APPDATA%\WormScan\config.json`; logs to
 - `pi_url = "http://192.168.50.2:8000"`, `token = ""`, `mirror_root = ~/Documents/WormScan`, `poll_interval_s = 120`.
 - Analysis: `tierpsy_image = "tierpsy/tierpsy-tracker"`, `tierpsy_image_tag = "latest"`, `docker_command = "docker"`, `analysis_video_timeout_s = 600`, `motility_long_threshold_s = 5.0`, `crawling_min_track_s = 30`.
 - **Counting (new): `counting_split_sensitivity = 3.0`, `counting_min_colony_um = 200.0`.**
-- **Survival (new): `survival_conf = 0.25`** (staging per-tile confidence).
+- **Survival: `survival_class_conf = {}`** — per-class staging confidence,
+  `{stage_name: floor}`. Empty means "use `launcher/vision/stage_conf.json`", the
+  same file `infer_stage.py` falls back to, so an untouched install and the
+  capture UI's *Analyze on laptop* button run identical thresholds. The analysis
+  dialog fills it in from that file on Start; its *Reset to defaults* button
+  restores from the file, not from the saved config. **`survival_conf = 0.25` is
+  legacy and no longer read** — kept in the dataclass only so an old
+  `config.json` still loads.
+- **Survival: `survival_count_eggs = False`** — whether egg detections are kept.
+  Off by default because a plate is almost never a question about worms *and*
+  eggs at once; eggs sit outside the survival denominator either way, so this
+  changes the egg column and the on-image clutter, never the survival percentage.
 - `review_type = "auto"`, `review_loop_s = 3.0`, `concurrent_videos = "auto"`.
 
 `load()` filters unknown keys against the dataclass fields, so a stale config
@@ -287,7 +353,7 @@ Per-mode UI:
 - Motility: folder picker, "Min fragment length (s)" spinbox (1–30), clear-cache checkbox, renders (Tracked / Curvature / Side-by-side / Per-worm traces).
 - Crawling: same picker, "Min track span (s)" spinbox (1–600, from `crawling_min_track_s`), renders (Tracked / Side-by-side / Path traces).
 - Colony Survival: a "Colony Survival options" card with two knobs — split sensitivity (default 3.0) and min colony µm (default 200.0). **No Docker/ffmpeg/threshold, no cache, no video render** — pure-Python image analysis (§4c).
-- Worm Survival: a "Worm Survival options" card with a staging-confidence slider (default 0.25, persisted as `survival_conf`) and a save-previews checkbox. On Start it runs `survival_preflight` (images + vision venv + inference script + model + pandas/numpy/openpyxl; no Docker) and the SurvivalAgent (§4d).
+- Worm Survival: a "Worm Survival options" card with **one confidence slider per stage class** (seven rows: egg, L1, L2, L3, L4, young adult, adult), a *Reset to defaults* button, a **"Count eggs"** checkbox (default **off**, persisted as `survival_count_eggs`; resolved to an explicit `exclude_classes` list on Start so the checkbox always beats the `stage_conf.json` default in both directions), and a save-previews checkbox. Slider values and the class list both come from `launcher/vision/stage_conf.json` via `survival.default_class_conf()` — the 3.13 side cannot load the model, so a retrain that renames a class needs that file updated. If the file is missing/unreadable the card says so and the run falls back to `infer_stage.py`'s own uniform default. Values are persisted as `survival_class_conf`. On Start it runs `survival_preflight` (images + vision venv + inference script + model + pandas/numpy/openpyxl; no Docker) and the SurvivalAgent (§4d).
 
 On Start it validates inputs, runs the mode-appropriate preflight (`run_preflight`
 for motility/crawling; `counting_preflight` for counting — the latter only checks
@@ -297,7 +363,10 @@ rough edges from the old doc remain (the motility "Min fragment length" spinbox 
 still validated even when it's inert for another mode; crawling's `threshold_s` is
 still passed and only feeds `is_long`, not the gate).
 
-`_on_settings_saved` propagates `update_settings` to all agents. Review
+`_on_settings_saved` propagates `update_settings` to sync, motility, crawling,
+counting and survival. `AnalyzeWorker` is deliberately **not** on that list — it
+has no status object and is not held by `MainWindow` — so it re-reads
+`config.json` per frame instead (§2.6). Review
 (`ReviewDialog` / `_ReviewProgressDialog` / `_ReviewStatus`) is unchanged (§3.6).
 
 ### 3.5 setup.bat / venv / deps
@@ -480,23 +549,122 @@ folder is the second reason. `survival.py` never imports ultralytics, torch, or
 
 ```
 vision/.venv-vision/Scripts/python.exe  vision/infer_stage.py --batch --stdin \
-    --model vision/models/staging.pt --conf <c> --no-boxes [--preview-dir DIR]
+    --model vision/models/staging.pt --no-boxes \
+    [--class-conf '{"L2":0.3,...}'] [--preview-dir DIR]
 ```
 
+`--conf` is **no longer passed**. Omitting every threshold flag means
+`stage_conf.json` applies; `--class-conf` (inline JSON) is layered over it when
+the user has moved the sliders. This is the same fallback the *Analyze on laptop*
+button relies on, which is what keeps the two paths in step.
+
+- **`stage_conf.json` (new, tracked)**: the single source of truth for the
+  thresholds and merge params, read by `infer_stage.py` when no flag overrides it
+  **and** by the 3.13 launcher (`survival.load_stage_defaults()` /
+  `default_class_conf()`, plain JSON — no cross-venv import) to seed the sliders.
+  Six blocks: `class_conf` (per-class floors + a `_default` catch-all, key order
+  = slider order), `tiling.overlap`, `seam` (`margin_px`, `cover_frac`),
+  `merge.class_agnostic_iou`, `class_size_px` (per-class `[min, max]` of
+  sqrt(w·h) in px; empty by default), and `exclude_classes` (ships `["egg"]`) —
+  see §4d and the in-file `_README` blocks.
+  **The shipped numbers were chosen, not calibrated** — see the `_README` block in
+  the file itself, and `dev/tools/stage_conf_report.py` (§1) for the tool that
+  replaces them with values read off a real confidence distribution.
 - `tiled_infer.py`: the shared tiling + NMS library (import target, no CLI, no
-  model loading). It splits a full 4056×3040 frame into **676×608 tiles** (a 6×5
-  division of the frame) stepped at **0.2 overlap**, resizes each tile to **640**,
-  runs the model per tile, shifts boxes back to full-frame coords, and merges
-  with per-class NMS (iou 0.45). The whole frame is never run at once, because
-  staging reads absolute worm size. Boxes come back as
-  `[x1, y1, x2, y2, score, class_name]`, with the name already resolved from
-  `model.names`. Two seam-cleanup knobs (`edge_margin`, `class_agnostic_iou`)
-  exist but default off, so infer_stage's call reproduces the plain per-class
-  merge.
+  model loading). It splits a full 4056×3040 frame into **676×608 tiles** stepped
+  at `overlap` (default now **0.35**, was 0.2), resizes each tile to **640**, runs
+  the model per tile, shifts boxes back to full-frame coords, and merges. The
+  whole frame is never run at once, because staging reads absolute worm size.
+  Boxes come back as `[x1, y1, x2, y2, score, class_name]`, name resolved from
+  `model.names`.
+
+  **Tile geometry (the earlier "6×5 division" claim was wrong).** Origins step by
+  `round(tile × (1 − overlap))` with a final origin snapped to the frame edge, so
+  at overlap 0.2 the frame is **8×7 = 56 tiles** stepping 541×486 — adjacent tiles
+  share only **135 px in x / 122 px in y**. A box is guaranteed to sit fully
+  inside *some* tile only when it is no larger than `tile − step`. At 0.2 that is
+  135×122 px; at 0.35 it is 237×213 px (72 tiles, ~29% slower). `tile_w`/`tile_h`/
+  `imgsz` remain off-limits — they set the pixels-per-object scale staging reads —
+  but `overlap` only moves where the seams fall, so it is safe to tune.
+
+  **Class exclusion (`exclude_classes`, ships `["egg"]`)** drops a class from the
+  run entirely, before any merge. Dropping pre-NMS rather than filtering the
+  output is load-bearing, not tidiness: an egg box that is never created also
+  cannot suppress a real L1 it overlaps, and eggs and L1 are the two smallest and
+  most confusable classes. A synthetic check confirms an egg detection outscoring
+  and swallowing an overlapping L1 under the 0.70 cross-class NMS, and confirms
+  that excluding eggs recovers that L1. **An excluded class is not a class that
+  scored zero**: `counts.txt` prints `not counted`, the Excel drops the column
+  entirely rather than filling it with zeros, and `run_info` names the exclusion —
+  a 0 would read as "no eggs on this plate" for a plate that might be covered in
+  them. Eggs are already outside the survival denominator (`SURVIVAL_CONFIG`), so
+  this changes the egg column and the box clutter, never the survival percentage.
+
+  **Merge, in order:** class exclusion, per-class confidence floor **and** per-class size gate on
+  every raw detection *before* any NMS (so a label that missed its own threshold,
+  or that is the wrong physical size for what it claims to be, can never win a
+  merge against the one that is right; the model itself is auto-run at the minimum
+  confidence across classes, or those boxes never come back) → per-class NMS
+  (iou 0.45) → **class-agnostic NMS** (`class_agnostic_iou`, now **on at 0.70**)
+  → **seam-fragment suppression** (on by default via `stage_conf.json`).
+
+  **Per-class size gate (`class_size_px`)** rejects a detection whose box is the
+  wrong physical size for its class, measured as `sqrt(w × h)` in full-frame px
+  (geometric mean, not the longer side: a coiled worm and the same worm stretched
+  have very different max-sides but similar box areas). It exists because staging
+  *is* a size readout — egg < L1 < L2 < L3 < L4 < young adult < adult — so a 40 px
+  speck labelled "adult" is not a low-confidence adult, it is not a worm, and a
+  confidence threshold provably cannot catch it: the model scores such debris
+  *high*. **Truncated detections are exempt** — a worm clipped by a seam is
+  legitimately undersized, and gating it could delete the only detection of a real
+  worm. Shipped **empty (off)**: the plausible pixel size of a stage depends on
+  magnification, so there is no honest default and a guessed bound deletes real
+  worms. `dev/tools/stage_conf_report.py --suggest` measures it (§1).
+
+  **Class-agnostic NMS (`class_agnostic_iou`, 0.70)** handles the case per-class
+  NMS structurally cannot see: **one** object carrying **two** labels at nearly
+  the same box — the same worm called L3 in one tile and L4 in another. Per-class
+  NMS only ever compares boxes of the same class, so that pair survives it
+  untouched, and seam suppression does not fire either when both boxes sit in a
+  tile interior. At 0.70 two boxes must be essentially the same rectangle to
+  merge, which one object produces and two neighbouring worms realistically do
+  not; verified against synthetic side-by-side and crossing pairs. Lower it
+  (~0.55) if same-worm pairs persist, raise it if adjacent worms are being
+  collapsed. This is a **complement** to the seam pass, not a substitute — a small
+  box nested in a large one has low IoU by construction.
+
+  **Seam-fragment suppression** is the fix for one worm getting two boxes. A
+  detection within `seam_margin` px of an **interior** tile border is flagged
+  `truncated` — a candidate fragment, not a worm — and, unlike the older
+  `edge_margin` knob, is **not** dropped on the spot. After the merge,
+  `suppress_seam_fragments` walks detections in descending score and drops a
+  truncated box only when ≥ `cover_frac` of **its own area** lies inside a box
+  already kept, of **any class**. Two properties matter: (a) the test is
+  `covered_fraction` (intersection-over-self), not IoU — a stub a third the area
+  of the correct box has IoU ≤ 0.33 and sails straight through a 0.45 NMS while
+  reading 1.0 on containment; (b) walking highest-score-first and only comparing
+  against already-kept boxes makes it order-deterministic and mutually safe, so
+  two truncated halves of one worm cannot annihilate each other and a fragment
+  with nothing covering it survives as the only evidence of that worm. Comparison
+  is class-agnostic on purpose: the case it exists for is a stub labelled L2
+  sitting inside the correct L3 box, which per-class NMS never even compares —
+  and which biases survival % in **both** directions at once, since L2 is a
+  non-survivor and L3 a survivor.
 - `infer_stage.py`: the CLI wrapper (single and batch, `--stdin`, JSON / JSON
   Lines on stdout, progress and errors on stderr). The model loads once and is
-  reused for every image, so batch cost is per-image. The batch meta line carries
-  the authoritative `names` list, so the 3.13 consumer never loads the model. Its
+  reused for every image, so batch cost is per-image. Threshold flags:
+  `--class-conf` (inline JSON, merged over the file), `--conf` (uniform floor for
+  every class, overrides both — the bluntest instrument, kept for pre-per-class
+  callers), `--class-size-px` (inline JSON, merged over the file), `--overlap`,
+  `--seam-margin`, `--seam-cover-frac`, `--class-agnostic-iou`,
+  `--stage-conf PATH`, three kill switches (`--no-seam-suppress`,
+  `--no-class-agnostic`, `--no-size-gate` — each disables exactly one pass, so a
+  regression can be bisected without editing the config), and `--print-config`
+  (resolve everything, print JSON, exit — does not load the model, so it is the
+  cheap way to check what a run *would* use). The batch meta line carries the
+  authoritative `names` list plus the resolved `class_conf`, `overlap`, `seam`,
+  `class_agnostic_iou` and `class_size_px`, so the 3.13 consumer never loads the
+  model and records what actually ran. Its
   `--draw` / `--counts` side outputs feed §2.6; stdout is byte-identical with or
   without them, so survival.py is unaffected. `models/staging.pt` is git-ignored
   (large binary, travels by copy).
@@ -545,7 +713,11 @@ Written to `<folder>/_survival_<YYYY-MM-DD_HHMMSS>/`:
 
 - `worm_survival_results.xlsx`, sheets **run_info, per_image, per_plate,
   per_condition, dose_response** (dose_response only when at least one condition
-  parses to strain + dose). Excel is the primary output.
+  parses to strain + dose). Excel is the primary output. `run_info` records
+  `conf_min`, `conf_per_class`, `tile` (with the overlap used) and
+  `seam_suppression`, `class_agnostic_iou` and `class_size_px` — all echoed from
+  the inference **meta line**, not from what the launcher asked for, so a saved
+  report states how it was actually produced.
 - `survival_curve.png`, a dose-response curve (one line per strain, SD error
   bars, jittered per-plate scatter). Plotting is fully wrapped in try / except and
   runs matplotlib headless (`Agg`), so any plot failure, including matplotlib
@@ -553,6 +725,28 @@ Written to `<folder>/_survival_<YYYY-MM-DD_HHMMSS>/`:
 - `log.txt`, plus `previews/` when the save-previews box is ticked.
 
 `matplotlib` is a declared launcher dependency (§3.5).
+
+### Model provenance (read out of `staging.pt`, 2026-07-27)
+
+The checkpoint's own `train_args` — recoverable without torch by unpickling the
+`.pt` zip with a permissive `Unpickler` — records how the shipped model was
+actually trained. This matters because several pipeline assumptions depend on it:
+
+- **base `yolo11m.pt`**, not `yolo11n` as an earlier revision of this document
+  claimed. Run name `staging_v5`; trained 2026-07-25, ultralytics 8.4.96.
+- `imgsz 640`, `epochs 120` with `patience 40` — early-stopped at epoch 77.
+- Final val: **P 0.752, R 0.754, mAP50 0.789, mAP50-95 0.489** (all classes
+  pooled; the checkpoint carries no per-class breakdown).
+- **`scale: 0.0`, `multi_scale: 0.0`, `mosaic: 0.0`**, and `degrees`, `translate`,
+  `shear`, `perspective`, `mixup`, `cutmix`, `copy_paste`, `erasing` all `0.0`.
+  Only `fliplr 0.5` / `flipud 0.5` and mild HSV jitter are active.
+- Dataset `Wormscan.v9-firstrealtrain.yolov11` (a Roboflow export, off-repo).
+
+`scale: 0.0` is the important one and it is **good news**: no random rescaling
+means absolute worm size was preserved in training, so the model *can* read the
+size signal the tiling scheme is built around. It also rules out the most obvious
+explanation for stage misassignment. `mosaic: 0.0` is the flip side — see §6
+item 23.
 
 ### Model and validation caveat
 
@@ -593,9 +787,14 @@ thresholds" and "YOLO staging — scale normalization").
 crawling `MIN_SPAN_S=30`, `SKELETON_COVERAGE_MIN=0.70`, linker `D_MAX=150`/
 `T_MAX_S=5`, arrow 140°/60°; counting `well_diameter_mm=34.8`,
 `background_radius_um=3000`, `confluence_frac=0.55`; `_MAX_WORKERS=8`; render
-libx264 crf 22; staging tiles `676×608` at `0.2` overlap resized to `640`,
-per-tile conf `0.25`, model `vision/models/staging.pt` run through
-`vision/.venv-vision` (Python 3.12). Segoe font files
+libx264 crf 22; staging tiles `676×608` resized to `640` (both fixed in code); overlap,
+per-class confidence and the seam params now live in
+`vision/stage_conf.json` (shipped: overlap `0.35`, `_default` 0.25 with
+egg/L1/L2/L3/young-adult `0.30` and adult `0.35`, seam `margin_px 12` /
+`cover_frac 0.6`, `merge.class_agnostic_iou 0.70`, `class_size_px` **empty**) — `tiled_infer.py`'s own signature defaults stay at the
+historical overlap `0.2` with both seam passes off, so a bare library call is
+still byte-compatible with the old behaviour; model `vision/models/staging.pt`
+run through `vision/.venv-vision` (Python 3.12). Segoe font files
 `C:\Windows\Fonts\SegoeIcons.ttf` / `segmdl2.ttf` are probed by `widgets.py`.
 
 **Auth:** one shared token, `secrets.compare_digest`, header or query param.
@@ -623,5 +822,8 @@ Roughly ordered by how likely they are to bite you.
 15. **`clock-sync` and `shutdown` depend on sudoers entries.**
 16. **Tierpsy Docker image is pinned to `:latest`** — analysis is not reproducible across Tierpsy releases. (see AUDIT)
 17. **Counting `crop_wells` is treated as a validated black box** by `counting.py`/`counting_agent.py`; there is no automated regression test guarding either.
-18. **"Analyze on laptop" counts are a QA aid, not data.** The annotated-frame counts from `routers/analyze.py` → `infer_stage.py --draw/--counts` are raw per-image model calls with soft adult / L2–L3 boundaries — use them for live eyeballing, never as reported figures. (§2.6)
+18. **"Analyze on laptop" counts are a QA aid, not data.** The annotated-frame counts from `routers/analyze.py` → `infer_stage.py --draw/--counts` are raw per-image model calls with soft adult / L2–L3 boundaries — use them for live eyeballing, never as reported figures. They now run the same per-class thresholds as the batch pipeline, which makes them *consistent*, not *calibrated*. (§2.6)
 19. **Worm-survival readout is validated only on training data so far**, and its survivor cutoff sits on the model's weakest boundary (L2/L3), so exact irradiated percentages are soft even where the qualitative effect holds. Per-class confidence-threshold calibration is a prerequisite before staging counts are treated as data. Tracked in `BACKLOG.md`. (§4d)
+23. **Stage calls skew old on MIXED plates, and L1/L2 are almost never emitted** (reported 2026-07-27, **open**). On uniform survival plates carrying only L1/L2 the model is good; on plates with a spread of stages it calls worms older than they are. The leading hypothesis is a **training shortcut**, not a size-reading failure: with `mosaic: 0.0` and every spatial augmentation off (§4d "Model provenance"), each training sample is a verbatim crop of one real plate — and if those plates were synchronised, **every training tile contained exactly one class**. Under that condition the detector never has to discriminate stage *within* an image, because any image-level cue predicts the label perfectly, and gradient descent takes the cheapest route. That single mechanism predicts both symptoms: a uniform plate gets the image-level cue right, a mixed plate has one guess applied to every worm in the tile. **The existing validation metrics cannot detect this** — a random split of the same uniform plates lets the shortcut work at val time too, which is how P/R ≈ 0.75 coexists with the observed failure. A val set that cannot fail is not measuring the thing that matters. Ruling out the mundane alternative first (a magnification difference between the two plate sets, which would shift every size and therefore every stage) is cheap via §1's size percentiles. Tracked in `BACKLOG.md`.
+21. **Two worms close together can still produce an extra box** (reported from the field 2026-07-27, **not fixed**). Neither current pass covers it: the spurious box is not seam-flagged when both worms sit in a tile interior, and it does not reach IoU 0.70 against either real worm, so cross-class NMS leaves it. Every plausible rule here — suppressing a box that contains two or more other kept boxes, or any mostly-contained box regardless of seam origin — can delete a real worm that is genuinely close to another, which is exactly the situation being detected. **Deliberately left alone pending an example preview PNG**: guessing a rule trades a cosmetic duplicate for a silently lost worm, and a lost worm does not announce itself in the counts. Tracked in `BACKLOG.md`.
+22. **The shipped per-class thresholds in `stage_conf.json` are chosen, not calibrated**, and the seam/overlap defaults have not been measured against a real plate set either. Nothing in the pipeline distinguishes a tuned threshold from a guessed one, so the numbers look as authoritative in `run_info` as calibrated ones would. Run `dev/tools/stage_conf_report.py` and replace them before treating any count as data. The same applies to `class_size_px`, which ships **empty** precisely so that no un-measured bound is ever silently enforced. Two specific things it answers: whether each class's count-vs-threshold curve has a flat region at all (no flat region = a retrain problem, not a threshold one), and whether the 95th-percentile box exceeds the whole-object guarantee at the current overlap (if so, worms are still being sliced and `overlap` should go up). (§4d, §1)

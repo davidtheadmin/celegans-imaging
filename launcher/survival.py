@@ -51,6 +51,51 @@ _VISION_DIR = Path(__file__).parent / "vision"
 _VISION_PY = _VISION_DIR / ".venv-vision" / "Scripts" / "python.exe"
 _INFER_SCRIPT = _VISION_DIR / "infer_stage.py"
 _MODEL_PATH = _VISION_DIR / "models" / "staging.pt"
+_STAGE_CONF = _VISION_DIR / "stage_conf.json"
+
+
+# ---------------------------------------------------------------------------
+# Shared staging defaults (vision/stage_conf.json)
+#
+# The same file infer_stage.py reads when nothing is passed on the command
+# line. Reading it here — plain JSON, no vision-venv import — is what lets the
+# analysis dialog seed its per-class sliders, and the "Analyze on laptop"
+# button run, with numbers identical to a batch survival run. Do NOT duplicate
+# these values in this module: if the file is unreadable we deliberately return
+# nothing and let infer_stage.py apply its own fallback, so there is never a
+# second set of defaults to drift.
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CLASS_CONF_FALLBACK = 0.25
+
+
+def load_stage_defaults() -> dict:
+    """Read vision/stage_conf.json. Returns {} if missing/unreadable."""
+    try:
+        raw = json.loads(_STAGE_CONF.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("could not read %s: %s", _STAGE_CONF, exc)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def default_exclude_classes() -> list[str]:
+    """Classes stage_conf.json drops by default (ships as ["egg"])."""
+    return [str(c) for c in (load_stage_defaults().get("exclude_classes") or [])]
+
+
+def default_class_conf() -> dict[str, float]:
+    """Per-class confidence defaults, in the order the sliders should appear.
+
+    Drops the "_default" catch-all: it is a fallback for classes the file does
+    not name, not something to put a slider on. Class names come from this file
+    rather than from model.names because the 3.13 side cannot load the model —
+    if a retrain renames a class, update stage_conf.json. A name that no longer
+    exists is harmless (infer_stage matches by name and ignores strangers), and
+    a *new* class the file misses still runs, on "_default".
+    """
+    conf = (load_stage_defaults().get("class_conf") or {})
+    return {k: float(v) for k, v in conf.items() if not k.startswith("_")}
 
 # ---------------------------------------------------------------------------
 # Survivor mapping — THE ONLY place stage names are referenced. Stage strings
@@ -269,18 +314,25 @@ def _survival_pct(n_surv: int, n_non: int) -> float:
 
 def run_inference(
     images: list[Path],
-    conf: float,
+    class_conf: dict[str, float],
     *,
+    exclude_classes: Optional[list[str]] = None,
     preview_dir: Optional[Path],
     write_log: Callable[[str], None],
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
-) -> tuple[list[str], list[dict]]:
+) -> tuple[list[str], list[dict], dict]:
     """Call vision/infer_stage.py once for the whole image list via stdin.
 
-    Returns (stage_names, records). stage_names is the authoritative model class
-    list from the meta line. records are the per-image JSON objects (each has
-    "path" and either "counts"/"w"/"h" or "error").
+    Returns (stage_names, records, meta). stage_names is the authoritative model
+    class list from the meta line. records are the per-image JSON objects (each
+    has "path" and either "counts"/"w"/"h" or "error"). meta is the whole meta
+    line, which carries the thresholds and tiling params actually used — those
+    go straight into run_info so a saved report says how it was produced.
+
+    `class_conf` is passed through as inline JSON. Anything it does not name
+    falls back to vision/stage_conf.json, so an empty dict means "use the shared
+    defaults" and the run still matches the Analyze-on-laptop button.
 
     Raises RuntimeError if the vision venv/model is missing or the subprocess
     fails before emitting any records.
@@ -294,9 +346,16 @@ def run_inference(
         str(_VISION_PY), str(_INFER_SCRIPT),
         "--batch", "--stdin",
         "--model", str(_MODEL_PATH),
-        "--conf", f"{conf}",
         "--no-boxes",  # stats never need per-box lists; previews drawn in-proc
     ]
+    if class_conf:
+        # Not shell-quoted anywhere: Popen gets an argv list, so the JSON goes
+        # across verbatim regardless of braces/quotes on Windows.
+        cmd += ["--class-conf", json.dumps(class_conf)]
+    if exclude_classes is not None:
+        # Always passed explicitly (even as an empty string) so the UI checkbox
+        # is authoritative and cannot be silently overridden by the file default.
+        cmd += ["--exclude-classes", ",".join(exclude_classes)]
     if preview_dir is not None:
         cmd += ["--preview-dir", str(preview_dir)]
 
@@ -329,6 +388,7 @@ def run_inference(
 
     stage_names: list[str] = []
     records: list[dict] = []
+    meta: dict = {}
     total = len(images)
     cancelled = False
 
@@ -343,8 +403,20 @@ def run_inference(
             write_log(f"[infer] unparseable stdout line: {line[:200]}")
             continue
         if "path" not in obj:  # meta line
+            meta = obj
             stage_names = list(obj.get("names", []))
             write_log(f"Model classes: {stage_names}")
+            eff = obj.get("class_conf") or {}
+            if eff:
+                write_log("Per-class confidence: " + ", ".join(
+                    f"{k}={float(v):.2f}" for k, v in eff.items()))
+            write_log(
+                f"Tiling overlap: {obj.get('overlap')}   "
+                f"seam suppression: {obj.get('seam')}"
+            )
+            excl = obj.get("exclude_classes") or []
+            write_log("Excluded classes (NOT counted, not zero): "
+                      + (", ".join(excl) if excl else "(none)"))
             continue
         records.append(obj)
         if progress_cb is not None:
@@ -364,7 +436,7 @@ def run_inference(
         write_log("--- end vision venv stderr ---")
 
     if cancelled:
-        return stage_names, records
+        return stage_names, records, meta
 
     if proc.returncode not in (0, None) and not records:
         raise RuntimeError(
@@ -372,7 +444,7 @@ def run_inference(
             f"(see log for vision-venv stderr)."
         )
 
-    return stage_names, records
+    return stage_names, records, meta
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +606,7 @@ def write_excel(
     *,
     stage_names: list[str],
     unmapped: list[str],
-    conf: float,
+    meta: dict,
     n_images: int,
     summary: dict,
     write_log: Callable[[str], None],
@@ -563,11 +635,32 @@ def write_excel(
     def _df(rows, cols):
         return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
 
+    # Thresholds/tiling are echoed from the inference meta line rather than from
+    # what we asked for, so the report records what actually ran.
+    eff_conf = meta.get("class_conf") or {}
+    seam = meta.get("seam") or {}
+    overlap = meta.get("overlap", "?")
+
     run_info = [
         ("timestamp", datetime.now().isoformat(timespec="seconds")),
         ("model_path", str(_MODEL_PATH)),
-        ("conf", conf),
-        ("tile", "676x608 (tiled_infer, overlap 0.2)"),
+        ("conf_min", meta.get("conf", "")),
+        ("conf_per_class",
+         ", ".join(f"{k}={float(v):.2f}" for k, v in eff_conf.items())
+         or "(uniform)"),
+        ("tile", f"676x608 (tiled_infer, overlap {overlap})"),
+        ("seam_suppression",
+         f"margin {seam.get('margin_px')} px, cover {seam.get('cover_frac')}"
+         if seam.get("cover_frac") is not None else "off"),
+        ("class_agnostic_iou", meta.get("class_agnostic_iou") or "off"),
+        ("class_size_px",
+         ", ".join(f"{k}={list(v)}" for k, v in
+                   (meta.get("class_size_px") or {}).items()) or "off"),
+        ("excluded_classes",
+         ", ".join(meta.get("exclude_classes") or []) or "(none)"),
+        ("excluded_note",
+         "excluded classes were NOT detected — their absence is not a count of 0"
+         if meta.get("exclude_classes") else ""),
         ("grouping_mode", summary.get("mode", "")),
         ("encoded_fraction", f"{summary.get('encoded_fraction', 0.0):.2f}"),
         ("n_conditions", summary.get("n_conditions", 0)),
@@ -698,10 +791,11 @@ def write_survival_curve(
 
 def analyze(
     root: Path,
-    conf: float,
+    class_conf: dict[str, float],
     save_previews: bool,
     out_dir: Path,
     *,
+    exclude_classes: Optional[list[str]] = None,
     write_log: Callable[[str], None],
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
@@ -716,16 +810,31 @@ def analyze(
     images = find_images(root)
     write_log(f"Folder: {root}")
     write_log(f"Images found: {len(images)}")
-    write_log(f"Conf: {conf:.2f}")
+    write_log(
+        "Conf (per class): "
+        + (", ".join(f"{k}={float(v):.2f}" for k, v in class_conf.items())
+           if class_conf else "(vision/stage_conf.json defaults)")
+    )
     write_log(f"Save previews: {save_previews}")
 
-    stage_names, records = run_inference(
-        images, conf,
+    stage_names, records, meta = run_inference(
+        images, class_conf,
+        exclude_classes=exclude_classes,
         preview_dir=preview_dir,
         write_log=write_log,
         progress_cb=progress_cb,
         cancel_check=cancel_check,
     )
+
+    # Drop excluded classes from the column set entirely rather than carrying a
+    # column of zeros: a zero says "none found", which is a claim we did not
+    # make. run_info records the exclusion so the sheet is still self-describing.
+    excluded_eff = [str(c) for c in (meta.get("exclude_classes") or [])]
+    if excluded_eff:
+        _skip = {_norm(c) for c in excluded_eff}
+        stage_names = [s for s in stage_names if _norm(s) not in _skip]
+        write_log("Excluded from the report (not counted): "
+                  + ", ".join(excluded_eff))
 
     cats, unmapped = build_stage_categories(stage_names, SURVIVAL_CONFIG)
     if unmapped:
@@ -769,7 +878,7 @@ def analyze(
     out_xlsx = out_dir / "worm_survival_results.xlsx"
     write_excel(
         out_xlsx, agg,
-        stage_names=stage_names, unmapped=unmapped, conf=conf,
+        stage_names=stage_names, unmapped=unmapped, meta=meta,
         n_images=len(images), summary=summary, write_log=write_log,
     )
     _console_summary(agg, write_log)
@@ -936,7 +1045,8 @@ class SurvivalAgent(threading.Thread):
         self._cancel = threading.Event()
         self._wake = threading.Event()
         self._folder: Optional[Path] = None
-        self._conf: float = 0.25
+        self._class_conf: dict[str, float] = {}
+        self._exclude_classes: Optional[list[str]] = None
         self._save_previews: bool = False
 
     def update_settings(self, settings: object) -> None:
@@ -955,13 +1065,21 @@ class SurvivalAgent(threading.Thread):
     def start_analysis(
         self,
         folder: Path,
-        conf: float = 0.25,
+        class_conf: Optional[dict[str, float]] = None,
         save_previews: bool = False,
+        exclude_classes: Optional[list[str]] = None,
     ) -> None:
-        """UI thread: trigger a survival run on the given folder."""
+        """UI thread: trigger a survival run on the given folder.
+
+        class_conf maps stage name -> confidence floor. None or {} means "use
+        vision/stage_conf.json", which is also what the Analyze-on-laptop
+        button uses, so the two paths agree by construction.
+        """
         with self._lock:
             self._folder = folder
-            self._conf = conf
+            self._class_conf = dict(class_conf or {})
+            self._exclude_classes = (None if exclude_classes is None
+                                     else list(exclude_classes))
             self._save_previews = save_previews
         self.status.update(
             running=True,
@@ -982,13 +1100,15 @@ class SurvivalAgent(threading.Thread):
                 break
             with self._lock:
                 folder = self._folder
-                conf = self._conf
+                class_conf = self._class_conf
+                exclude_classes = self._exclude_classes
                 save_previews = self._save_previews
                 self._folder = None
             if folder is not None:
                 self._cancel.clear()
                 try:
-                    self._run_analysis(folder, conf, save_previews)
+                    self._run_analysis(folder, class_conf, save_previews,
+                                       exclude_classes)
                 except Exception:
                     log.exception("SurvivalAgent crashed")
                     self.status.update(
@@ -998,7 +1118,8 @@ class SurvivalAgent(threading.Thread):
                     )
 
     def _run_analysis(
-        self, folder: Path, conf: float, save_previews: bool
+        self, folder: Path, class_conf: dict[str, float], save_previews: bool,
+        exclude_classes: Optional[list[str]] = None,
     ) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         out_dir = folder / f"{_ANALYSIS_PREFIX}_{timestamp}"
@@ -1032,7 +1153,8 @@ class SurvivalAgent(threading.Thread):
 
             write_log(f"Run: {timestamp}")
             result = analyze(
-                folder, conf, save_previews, out_dir,
+                folder, class_conf, save_previews, out_dir,
+                exclude_classes=exclude_classes,
                 write_log=write_log,
                 progress_cb=progress_cb,
                 cancel_check=self._cancel.is_set,

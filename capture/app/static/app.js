@@ -650,7 +650,11 @@ async function analyzeOnLaptop() {
   msg.hidden = true; msg.textContent = '';
   const show = (t) => { msg.textContent = t; msg.hidden = false; announce(t); };
   try {
-    const { job_id } = await apiJson('/analyze', { method: 'POST', body: {} });
+    // Per-press option; the Pi only relays it to the laptop, which owns the
+    // model and every inference setting. Unchecked is the common case.
+    const countEggs = !!document.getElementById('analyze-eggs')?.checked;
+    const { job_id } = await apiJson(
+      '/analyze', { method: 'POST', body: { count_eggs: countEggs } });
     // Poll status every 500ms for up to 8s, waiting for the laptop to grab it.
     const deadline = Date.now() + 8000;
     while (Date.now() < deadline) {

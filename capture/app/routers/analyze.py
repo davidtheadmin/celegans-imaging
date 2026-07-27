@@ -17,15 +17,27 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from PIL import Image
+from pydantic import BaseModel
 
 from ..auth import require_token
 from ..camera import camera_manager
 
 router = APIRouter(prefix="/analyze")
 
+class AnalyzeRequest(BaseModel):
+    """Per-press options. The Pi does not interpret these — it only relays them
+    to the laptop, which owns the model and every inference setting. Keeping the
+    Pi dumb here means a new analysis option needs no Pi deploy, only the two
+    ends. Defaults match the launcher's own defaults so an old web UI that posts
+    an empty body behaves exactly as before."""
+
+    count_eggs: bool = False
+
+
 # Single-slot holder guarded by an asyncio.Condition. _slot is either None or
-# {"id": str, "state": "pending"|"taken", "data": bytes|None}. Frame bytes are
-# dropped once taken; the id+state linger so status queries can still answer.
+# {"id": str, "state": "pending"|"taken", "data": bytes|None, "opts": dict}.
+# Frame bytes are dropped once taken; the id+state linger so status queries can
+# still answer.
 _cond = asyncio.Condition()
 _slot: dict | None = None
 
@@ -46,7 +58,7 @@ def _encode_tiff(arr) -> bytes:
 
 
 @router.post("", dependencies=[Depends(require_token)])
-async def analyze():
+async def analyze(req: AnalyzeRequest = AnalyzeRequest()):
     """Capture a full-res frame and park it in the slot, replacing any frame
     still waiting. Returns the new job id for the web UI to poll."""
     _require_camera()
@@ -55,7 +67,8 @@ async def analyze():
     job_id = secrets.token_hex(8)
     global _slot
     async with _cond:
-        _slot = {"id": job_id, "state": "pending", "data": data}
+        _slot = {"id": job_id, "state": "pending", "data": data,
+                 "opts": {"count_eggs": req.count_eggs}}
         _cond.notify_all()
     return {"job_id": job_id}
 
@@ -79,8 +92,16 @@ async def analyze_next():
         data = _slot["data"]
         _slot["data"] = None  # free the frame; id+state stay for status queries
         job_id = _slot["id"]
+        opts = _slot.get("opts") or {}
+    # Options ride back as headers rather than in the body, because the body is
+    # the TIFF. Header values are "1"/"0" strings; the laptop treats a missing
+    # header as the default, so an older Pi and a newer launcher still work.
     return Response(
-        content=data, media_type="image/tiff", headers={"X-Job-Id": job_id}
+        content=data, media_type="image/tiff",
+        headers={
+            "X-Job-Id": job_id,
+            "X-Count-Eggs": "1" if opts.get("count_eggs") else "0",
+        },
     )
 
 

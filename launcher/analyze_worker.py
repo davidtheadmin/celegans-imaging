@@ -12,6 +12,7 @@ only shells out to it, exactly as survival.py does for batch staging. Follows th
 same start()/stop()/join() thread lifecycle as the other launcher agents.
 """
 import datetime
+import json
 import logging
 import os
 import shutil
@@ -20,6 +21,8 @@ import threading
 from pathlib import Path
 
 import requests
+
+import config
 
 log = logging.getLogger(__name__)
 
@@ -53,15 +56,29 @@ def _prune_runs(root: Path, keep: int) -> None:
         shutil.rmtree(old, ignore_errors=True)
 
 
-def _run_inference(frame_path: Path, run_dir: Path) -> None:
+def _run_inference(frame_path: Path, run_dir: Path,
+                   class_conf: dict | None = None,
+                   count_eggs: bool | None = None) -> None:
     annotated = run_dir / "annotated.png"
     counts = run_dir / "counts.txt"
+    cmd = [str(_VENV_PY), str(_INFER), str(frame_path),
+           "--draw", str(annotated), "--counts", str(counts)]
+    # count_eggs is None when the Pi did not send the header (older service):
+    # say nothing and let stage_conf.json decide, rather than forcing a default
+    # the user never chose.
+    if count_eggs is True:
+        cmd += ["--count-eggs"]
+    elif count_eggs is False:
+        cmd += ["--exclude-classes", "egg"]
+    # No --conf and no --class-conf means infer_stage.py falls back to
+    # vision/stage_conf.json — the same per-class thresholds the Worm Survival
+    # batch run starts from, so the button and the pipeline never disagree by
+    # accident. We only pass thresholds when the user has actually moved the
+    # sliders in the analysis dialog, so the button follows their tuning too.
+    if class_conf:
+        cmd += ["--class-conf", json.dumps(class_conf)]
     try:
-        subprocess.run(
-            [str(_VENV_PY), str(_INFER), str(frame_path),
-             "--draw", str(annotated), "--counts", str(counts)],
-            check=True, capture_output=True, text=True,
-        )
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         log.error("infer_stage failed (rc=%s):\n%s", exc.returncode, exc.stderr)
         return
@@ -116,4 +133,23 @@ class AnalyzeWorker(threading.Thread):
         frame = run_dir / "frame.tif"
         frame.write_bytes(resp.content)
         log.info("analyze job %s: %d bytes -> %s", job_id, len(resp.content), run_dir)
-        _run_inference(frame, run_dir)
+        # Missing header -> None -> stage_conf.json default (see _run_inference).
+        raw = resp.headers.get("X-Count-Eggs")
+        count_eggs = None if raw is None else (raw == "1")
+        _run_inference(frame, run_dir, self._class_conf(), count_eggs)
+
+    def _class_conf(self) -> dict | None:
+        """Per-class thresholds for this frame, or None for the shared defaults.
+
+        Re-read from config.json rather than from self._settings: this worker is
+        handed the Settings object once at launch and is not on the
+        _on_settings_saved propagation list, so its copy goes stale the moment
+        the user touches the sliders. One small file read per button press, and
+        it is the same file config.load() reads everywhere else — no second
+        source of truth. A read failure just falls back to stage_conf.json.
+        """
+        try:
+            return config.load().survival_class_conf or None
+        except Exception as exc:
+            log.debug("could not re-read config for analyze thresholds: %s", exc)
+            return None

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+#
+# REQUIRES THE PI TO HAVE INTERNET — it pulls from GitHub on the Pi itself.
+# If the Pi is offline (it normally is), use scripts/deploy_local.sh instead,
+# which copies the files straight over SSH from this laptop.
+#
 set -euo pipefail
 
 echo "==> Pushing to GitHub..."

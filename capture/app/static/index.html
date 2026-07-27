@@ -181,6 +181,12 @@
             <button id="still-btn" class="btn btn-primary btn-capture">Capture Still <span class="kbd-hint">[Space]</span></button>
             <p id="still-msg" class="capture-msg" hidden></p>
             <button id="analyze-btn" class="btn">Analyze on laptop</button>
+            <!-- Off by default: a plate is rarely a question about worms AND
+                 eggs at once. Ticked, the laptop keeps egg detections (egg
+                 survival, bleached-egg drops). -->
+            <label class="checkbox-label">
+              <input id="analyze-eggs" type="checkbox"> Count eggs
+            </label>
             <p id="analyze-msg" class="capture-msg" hidden></p>
           </div>
 

@@ -152,10 +152,280 @@ error here poisons the training set:
 
 ## Staging model — per-class confidence thresholds
 
-The worm-survival staging model (`launcher/vision/infer_stage.py`) runs a single
-global confidence threshold (`--conf`, default 0.25) across every stage class.
-Counts are unreliable where classes are easily confused — **adult, and especially
-the L2/L3 boundary**. Finalize **per-class** confidence thresholds, calibrated
-against manual stage counts, before any staging count is treated as data rather
-than a live QA readout. Until then the "Analyze on laptop" annotated counts
-(CURRENT_STATE §2.6 / §6.25) are eyeballing aids only.
+**Plumbing done 2026-07-27; calibration still open.**
+
+Per-class thresholds now exist end to end. `launcher/vision/stage_conf.json` is
+the single source of truth: `infer_stage.py` reads it whenever no threshold flag
+overrides it, and the launcher reads the same file to seed the seven per-stage
+sliders in the Worm Survival card (and to power their *Reset to defaults*). The
+*Analyze on laptop* button inherits it by passing no `--conf` at all, so the
+button and the batch pipeline cannot silently disagree. Values are applied to
+every raw tile detection **before** any NMS, and persisted as
+`survival_class_conf`.
+
+**What is still open — the actual calibration.** The shipped numbers
+(`_default` 0.25; egg/L1/L2/L3/young adult 0.30; adult 0.35) were **chosen, not
+measured**. They lift the classes the model is known to be shakiest on off the
+old uniform 0.25 and leave the rest near it; that is a starting point, nothing
+more. Nothing downstream distinguishes a tuned threshold from a guessed one, so
+they will look exactly as authoritative in `run_info` as calibrated ones would.
+
+To close this out:
+
+- [ ] Run `dev/tools/stage_conf_report.py` (VISION venv) on a real plate set. It
+      reports, per class, the count surviving each threshold from 0.05 to 0.60;
+      box-size percentiles; and the seam-fragment / cross-class-duplicate rate.
+- [ ] Set each class's threshold where its count-vs-threshold curve flattens —
+      the steep part is noise dying, the flat part is real worms. **A class with
+      no flat region is a retrain problem, not a threshold one.** Say so in the
+      report rather than picking a number.
+- [ ] Cross-check against manual stage counts on at least one plate per dose,
+      especially across the L2/L3 cutoff, before any count is reported as data.
+- [ ] Raising a threshold drops uncertain calls from BOTH sides of the survival
+      ratio — it does not reassign them. Confirm N per plate stays high enough
+      that the remaining ratio is still meaningful.
+
+Until that is done the "Analyze on laptop" annotated counts (CURRENT_STATE §2.6 /
+§6.18) and the Worm Survival Excel are eyeballing aids only.
+
+## Staging — duplicate boxes on one worm (fixed 2026-07-27, wants field checking)
+
+**Symptom:** one worm got two boxes — a correct one plus a smaller box covering
+only part of it, usually a different stage.
+
+**Cause, three layers deep.** (1) The merge in `tiled_infer.py` was per-class NMS
+only, so the same worm labelled L2 in one tile and L3 in another was never even
+compared — and that pair biases survival % in both directions at once, since L2
+is a non-survivor and L3 a survivor. (2) NMS is IoU-based, and IoU is structurally
+the wrong test for a nested box: a stub a third the area of the correct box has
+IoU ≤ 0.33 and survives a 0.45 threshold even when it is entirely inside.
+(3) The fragment existed at all because the overlap band was too narrow — at
+overlap 0.2 the frame is 8×7 = 56 tiles stepping 541×486, sharing only 135×122 px,
+so any worm whose box exceeds that is **not** guaranteed to sit fully inside any
+tile and gets sliced by every seam that touches it.
+
+**Fix.** Seam-touching detections are flagged `truncated` instead of dropped, and
+a truncated box is removed only when ≥ `cover_frac` of its own area sits inside a
+higher-scoring box of any class (`covered_fraction`, not IoU). A fragment nothing
+covers survives, so a worm is never lost. Overlap default raised 0.2 → 0.35
+(72 tiles, ~29% slower, guarantee 237×213 px) so fewer fragments are generated in
+the first place. All three are settings in `stage_conf.json`.
+
+**Field result 2026-07-27: "barely any extra boxes anymore."** Three residual
+cases came back; the second is now fixed, the third is below as its own item.
+
+**Fixed in the same pass — one worm, two labels, near-identical boxes** (reported
+as "a regular worm and one smaller worm got annotated as L3 and L4 with a very
+similar sized box"). Per-class NMS structurally cannot see this: it only ever
+compares boxes of the same class. Seam suppression does not fire either, because
+both boxes sit in a tile interior and are never flagged truncated. Fix:
+`merge.class_agnostic_iou` is now **on at 0.70** — one extra NMS across all
+classes. At 0.70 the two boxes must be essentially the same rectangle to merge,
+which one object produces and two neighbouring worms realistically do not
+(verified against synthetic side-by-side and crossing pairs). Lower to ~0.55 if
+pairs persist; raise if adjacent worms start being collapsed.
+
+Still to do:
+
+- [ ] Confirm on real plates that the duplicate is actually gone and nothing real
+      disappeared — compare a run at `--no-seam-suppress` against the default.
+      Each pass now has its own kill switch (`--no-seam-suppress`,
+      `--no-class-agnostic`, `--no-size-gate`) so a regression can be bisected
+      without editing the config.
+- [ ] Check the box-size percentiles from `stage_conf_report.py`: if w_p95/h_p95
+      still exceed 237×213 px, worms are being sliced even at overlap 0.35 and it
+      should go higher.
+- [ ] The general containment rule (suppress ANY mostly-contained box, not just
+      seam-flagged ones) is deliberately NOT enabled — it would catch more
+      duplicates but can eat a real L1 or egg lying on top of a coiled adult.
+      Revisit only if the targeted rule proves insufficient.
+
+## Staging — egg counting is now a toggle (done 2026-07-27)
+
+"You rarely want to know how many worms of what are there AND eggs at the same
+time. The only time you want egg counts is an egg survival, or when you put a
+drop of eggs from bleaching."
+
+`exclude_classes` in `stage_conf.json` ships as `["egg"]`. A **"Count eggs"**
+checkbox appears in the launcher's Worm Survival card (persisted as
+`survival_count_eggs`) and beside the capture UI's *Analyze on laptop* button;
+the web-UI flag rides to the laptop as an `X-Count-Eggs` response header on
+`/analyze/next`, with the Pi acting purely as a relay so future options need no
+Pi deploy.
+
+Two decisions worth remembering:
+
+- Exclusion happens **pre-NMS**, not as an output filter. An egg box that is
+  never created also cannot suppress a real L1 it overlaps — verified
+  synthetically, and directly relevant to the L1/L2 problem above.
+- An excluded class is reported as **"not counted"**, never `0`. `counts.txt`
+  says so, the Excel drops the column rather than zero-filling it, and `run_info`
+  names the exclusion. `0` would read as "no eggs on this plate" for a plate that
+  might be covered in them.
+
+Survival percentage is unaffected either way — eggs were already outside the
+denominator in `SURVIVAL_CONFIG`.
+
+- [ ] Needs a **Pi deploy** (`scripts/deploy.sh`) for the web-UI half:
+      `capture/app/routers/analyze.py`, `static/index.html`, `static/app.js`. The
+      launcher half works immediately. Until the Pi is deployed the button keeps
+      working and falls back to the `stage_conf.json` default (eggs off).
+
+## Staging — debris scoring HIGH on 'adult' (gate built, needs measuring)
+
+Reported 2026-07-27: "quite some debris which it detects as adult with quite a
+high confidence. That's weird because they look totally different. They are small
+little globs."
+
+**Why no confidence threshold can fix this.** The model is *confident*, so raising
+`class_conf["adult"]` does not touch these — it only deletes real adults. The
+usable signal is size: staging is fundamentally a size readout, the stages are
+ordered egg < L1 < L2 < L3 < L4 < young adult < adult, and a small glob labelled
+"adult" is not an uncertain adult, it is not a worm at all. That is a
+*plausibility* failure, not a *confidence* failure, and it needs a different lever.
+
+**Built:** `class_size_px` in `stage_conf.json` — per-class `[min, max]` on
+`sqrt(w × h)` in full-frame px, applied to raw detections before any NMS.
+Seam-truncated boxes are exempt (a clipped worm is legitimately undersized and
+gating it would delete a real worm).
+
+**Shipped empty, i.e. off.** The pixel size of a stage depends on the
+magnification, so there is no honest default; a guessed bound silently deletes
+real worms, and a deleted worm does not announce itself in the counts.
+
+- [ ] Measure it. `launcher\vision\.venv-vision\Scripts\python.exe
+      dev\tools\stage_conf_report.py --suggest "<folder of plates>"` writes
+      `stage_conf_suggested.json` (paste-ready) plus, per class, the fraction each
+      bound would remove.
+- [ ] **Read the removal counts before pasting.** The percentiles are cut from the
+      model's own detections, so a class already polluted with debris has its lower
+      bound set BY that debris and the gate will not remove it. For adult
+      specifically — the contaminated class — set the lower bound by hand instead:
+      an adult cannot be smaller than a typical L4, so L4's median is the natural
+      floor.
+- [ ] Check the report's ordering line. If median size does NOT rise along
+      egg → adult, the model is not separating those stages by size and they must
+      not be gated — that is a retrain problem and the report says so.
+- [ ] Longer term this is a training-data problem: add hard-negative debris crops
+      to the next staging model rather than filtering them out downstream forever.
+
+## Staging — stage calls skew OLD on mixed plates (OPEN, discuss before building)
+
+Reported 2026-07-27: "on mixed plates it tends to call worms older than they are.
+It basically never calls anything L1 and L2, while when I let it analyze a
+survival it's actually pretty good at that — but there it's only L1 and L2 on a
+plate."
+
+### What the model file says
+
+`staging.pt`'s own `train_args` (readable without torch: the `.pt` is a zip, and
+a permissive `Unpickler` walks the checkpoint pickle):
+
+| setting | value | why it matters |
+|---|---|---|
+| `scale` | **0.0** | no random rescaling — absolute worm size WAS preserved in training |
+| `multi_scale` | 0.0 | same |
+| `mosaic` | **0.0** | every training sample is a verbatim crop of ONE plate |
+| `degrees`/`translate`/`shear`/`perspective` | 0.0 | no spatial augmentation at all |
+| `mixup`/`cutmix`/`copy_paste`/`erasing` | 0.0 | no compositing augmentation |
+| `fliplr`/`flipud` | 0.5 | the only geometric augmentation |
+| base model | `yolo11m.pt` | (docs previously said 11n — corrected) |
+| val | P 0.752, R 0.754, mAP50 0.789, mAP50-95 0.489 | pooled; no per-class breakdown in the ckpt |
+
+`scale: 0.0` is good news and it **rules out the obvious explanation**: the model
+was not trained to be scale-invariant, so it can read the absolute size the whole
+tiling scheme is built around.
+
+### Leading hypothesis: a training shortcut, not a size-reading failure
+
+With `mosaic: 0.0` and no spatial augmentation, each training image is one real
+plate crop. If those plates were **synchronised** — one stage per plate — then
+every training tile contained **exactly one class**. Under that condition the
+detector never has to discriminate stage *within* an image: any image-level cue
+(lawn texture, worm density, illumination) predicts the label perfectly, and
+gradient descent takes the cheapest route available. The model can reach
+P/R ≈ 0.75 having learned *"what stage is this plate?"* rather than *"what stage
+is this worm?"*.
+
+That one mechanism predicts both halves of the report exactly:
+
+- uniform survival plate (only L1/L2) → the image-level cue is correct → good calls;
+- mixed plate → one guess applied to every worm in the tile, skewed toward
+  whatever dominates the tile's appearance → everything reads old, and L1/L2
+  essentially never win.
+
+**The current validation cannot detect this.** A random split of the same uniform
+plates lets the shortcut work at val time too, which is exactly how P/R ≈ 0.75
+coexists with the observed failure. A val set that cannot fail is not measuring
+the thing that matters.
+
+### Ladder — cheapest first
+
+- [ ] **Rule out the mundane cause first.** If the mixed plates were imaged at a
+      different FOV/working distance, every worm is bigger in pixels and every
+      stage shifts older, with no model pathology at all. Compare the size
+      percentiles from `stage_conf_report.py` between a mixed set and a survival
+      set for the same nominal stage. Cheap, and embarrassing to miss.
+- [ ] **Check whether L1/L2 fire at all below our own floors.** We set L1 = L2 =
+      0.30 but L4 = 0.25, so if young calls come back weaker we are compounding
+      the bias ourselves. Section 1 of the report answers this directly. A
+      band-aid, but a legitimate one.
+- [ ] **Check what the cross-class NMS is eating.** Run a mixed plate with
+      `--no-class-agnostic`. If L1/L2 boxes reappear as duplicates under older
+      labels, the model *does* fire young labels and merely ranks them lower —
+      a calibration problem, addressable with per-class score offsets. If they do
+      not appear at all, the model genuinely is not seeing them, and only
+      retraining helps. **This single test splits the whole problem in two.**
+- [ ] **The decisive experiment: a context-sensitivity test.** Build a tile-sized
+      canvas of sampled plate background, paste ONE detected worm into it **at
+      the original pixel scale** (so absolute size is untouched), and re-run.
+      Compare the isolated call against the in-context call across many worms. If
+      small worms systematically flip from L4 to L1 once their neighbours are
+      removed, the shortcut hypothesis is confirmed outright.
+- [ ] **The real fix: retrain with `mosaic=1.0`, keeping `scale=0.0`.** Mosaic
+      stitches four training images into one canvas, so worms from four different
+      plates — and therefore different stages — co-occur in a single training
+      image, and image-level cues stop being predictive. With `scale=0.0` the
+      mosaic pieces are not resized, so this destroys the shortcut **without**
+      touching the size signal. `close_mosaic: 10` is already set. One line in
+      the training command, with a real mechanism behind it.
+- [ ] **Put mixed plates in the VALIDATION set**, not just the training set.
+      Without that there is no way to tell whether any of the above worked.
+- [ ] Consider adding rotation (`degrees`) — worms lie at arbitrary angles and
+      flips only cover four orientations. Secondary, but nearly free.
+
+### Incidental: the egg toggle may already help L1
+
+Eggs and L1 are the two smallest, most confusable classes. A synthetic check
+confirmed an egg detection outscoring and swallowing an overlapping L1 under the
+0.70 cross-class NMS. Since eggs are now excluded **pre-NMS** by default, that L1
+survives. Watch whether L1 counts on mixed plates move at all after this change,
+before attributing everything to the model.
+
+## Staging — extra box where two worms sit close together (OPEN, not fixed)
+
+Reported 2026-07-27: "when there are 2 or more worms close together it sometimes
+gets confused and puts an extra box."
+
+**Deliberately not fixed, pending an example image.** Neither existing pass
+covers it: the spurious box is not seam-flagged when both worms are in a tile
+interior, and it does not reach IoU 0.70 against either real worm, so
+class-agnostic NMS leaves it alone. Every rule that would catch it is dangerous
+in exactly this situation:
+
+- suppressing a box that *contains* two or more other kept boxes assumes the
+  containing box is the false one — but when the model splits one coiled worm
+  into two, the containing box is the correct one and the two inner boxes are the
+  error, and nothing downstream can tell those cases apart;
+- suppressing any mostly-contained box regardless of seam origin (the "general
+  containment rule" above) eats a real L1 or egg lying across a larger worm.
+
+Both trade a cosmetic duplicate for a silently lost worm. Since the counts are
+the output, a lost worm is strictly worse than an extra box.
+
+- [ ] Get a preview PNG of the failure (tick "Save preview PNGs" in the Worm
+      Survival card, or run with `--preview-dir`) showing the extra box and the
+      two worms, then pick a rule that fits what the box actually is.
+- [ ] `stage_conf_report.py` section 3 already counts cross-class overlapping
+      pairs; extend it to report *how many* kept boxes each box contains, which
+      quantifies how often this happens before any rule is chosen.

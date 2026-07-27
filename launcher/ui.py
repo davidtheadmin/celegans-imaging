@@ -29,7 +29,13 @@ from analysis.crawling import CrawlingAgent, CrawlingStatus
 from analysis.counting_agent import (
     CountingAgent, CountingStatus, counting_preflight,
 )
-from survival import SurvivalAgent, SurvivalStatus, survival_preflight
+from survival import (
+    SurvivalAgent,
+    SurvivalStatus,
+    default_class_conf,
+    default_exclude_classes,
+    survival_preflight,
+)
 from sync import SyncAgent, SyncStatus
 
 _log = logging.getLogger(__name__)
@@ -608,35 +614,95 @@ class AnalysisDialog(ctk.CTkToplevel):
             justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
 
-        # Row 5 — worm-survival options: conf slider + save-preview checkbox.
-        # Staging inference runs in the vision venv; no cache/render/threshold.
+        # Row 5 — worm-survival options: one confidence slider PER STAGE CLASS,
+        # plus save-previews. Staging inference runs in the vision venv; no
+        # cache/render/threshold.
+        #
+        # Why per class: the survivor cutoff sits on the L2/L3 boundary, which
+        # is exactly where the model is weakest, so a single global threshold
+        # cannot be tightened on the confusable classes without also throwing
+        # away confident calls on the easy ones.
+        #
+        # Defaults come from launcher/vision/stage_conf.json — the same file
+        # infer_stage.py reads when nothing is passed — so these sliders start
+        # on the values the "Analyze on laptop" button already uses. The class
+        # list comes from that file too (this venv cannot load the model).
         self._survival_frame = widgets.Card(self, title="Worm Survival options")
         surv_frame = self._survival_frame.content
-        _conf_row = ctk.CTkFrame(surv_frame, fg_color="transparent")
-        _conf_row.pack(anchor="w", fill="x")
+
+        self._surv_defaults = default_class_conf()
+        saved = dict(getattr(self._settings, "survival_class_conf", None) or {})
+        self._surv_conf_vars: dict[str, tk.DoubleVar] = {}
+        self._surv_conf_labels: dict[str, ctk.CTkLabel] = {}
+
+        if not self._surv_defaults:
+            # stage_conf.json missing or unreadable: say so rather than drawing
+            # an empty card. The run still works — infer_stage.py falls back to
+            # its own uniform default — it just isn't tunable from here.
+            ctk.CTkLabel(
+                surv_frame,
+                text="Per-class thresholds unavailable "
+                     "(launcher/vision/stage_conf.json missing or unreadable). "
+                     "The run will use the inference script's built-in default.",
+                font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+                justify="left", wraplength=360,
+            ).pack(anchor="w")
+        else:
+            ctk.CTkLabel(
+                surv_frame, text="Confidence per stage", font=theme.body(),
+                text_color=theme.TEXT, anchor="w",
+            ).pack(anchor="w", pady=(0, 4))
+
+            for stage, default in self._surv_defaults.items():
+                row = ctk.CTkFrame(surv_frame, fg_color="transparent")
+                row.pack(anchor="w", fill="x", pady=1)
+                ctk.CTkLabel(
+                    row, text=stage, font=theme.body(), text_color=theme.TEXT,
+                    anchor="w", width=90,
+                ).pack(side="left")
+                var = tk.DoubleVar(value=float(saved.get(stage, default)))
+                val_label = ctk.CTkLabel(
+                    row, text=f"{var.get():.2f}", font=theme.body(),
+                    text_color=theme.TEXT_2, width=40,
+                )
+                # Bind the label per row: a shared handler would close over the
+                # loop variable and every slider would rewrite the last label.
+                ctk.CTkSlider(
+                    row, from_=0.05, to=0.90, number_of_steps=85,
+                    variable=var,
+                    command=lambda v, lbl=val_label: lbl.configure(
+                        text=f"{float(v):.2f}"),
+                    fg_color=theme.CARD, progress_color=theme.ACCENT,
+                    button_color=theme.ACCENT,
+                    button_hover_color=theme.ACCENT_HOVER,
+                    width=170,
+                ).pack(side="left", padx=(8, 6))
+                val_label.pack(side="left")
+                self._surv_conf_vars[stage] = var
+                self._surv_conf_labels[stage] = val_label
+
+            widgets.secondary_button(
+                surv_frame, "Reset to defaults", self._reset_survival_conf,
+            ).pack(anchor="w", pady=(6, 0))
+
+        # Eggs off by default: a plate is almost never a question about worms
+        # AND eggs at once. Eggs sit outside the survival denominator either
+        # way (SURVIVAL_CONFIG), so this changes the egg column and the box
+        # clutter, never the survival percentage.
+        self._surv_count_eggs = tk.BooleanVar(
+            value=bool(getattr(self._settings, "survival_count_eggs", False))
+        )
+        ctk.CTkCheckBox(
+            surv_frame, text="Count eggs (for egg survival / bleached-egg drops)",
+            variable=self._surv_count_eggs, **chk_kw,
+        ).pack(anchor="w", pady=(8, 0))
         ctk.CTkLabel(
-            _conf_row, text="Confidence", font=theme.body(),
-            text_color=theme.TEXT, anchor="w",
-        ).pack(side="left")
-        self._surv_conf = tk.DoubleVar(
-            value=float(getattr(self._settings, "survival_conf", 0.25))
-        )
-        self._surv_conf_val = ctk.CTkLabel(
-            _conf_row, text=f"{self._surv_conf.get():.2f}", font=theme.body(),
-            text_color=theme.TEXT_2, width=40,
-        )
-
-        def _on_conf_slide(v: float) -> None:
-            self._surv_conf_val.configure(text=f"{float(v):.2f}")
-
-        ctk.CTkSlider(
-            _conf_row, from_=0.05, to=0.90, number_of_steps=85,
-            variable=self._surv_conf, command=_on_conf_slide,
-            fg_color=theme.CARD, progress_color=theme.ACCENT,
-            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
-            width=180,
-        ).pack(side="left", padx=(8, 6))
-        self._surv_conf_val.pack(side="left")
+            surv_frame,
+            text="Off: eggs are not detected at all, and the report says "
+                 "\"not counted\" rather than 0.",
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=360,
+        ).pack(anchor="w", pady=(0, 2))
 
         self._surv_save_preview = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
@@ -646,8 +712,10 @@ class AnalysisDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             surv_frame,
             text="Detects developmental stage per worm (tiled), then scores "
-                 "survival by plate and condition. Previews are for spot-checking "
-                 "and slow the run.",
+                 "survival by plate and condition. Raising a stage's threshold "
+                 "drops its uncertain calls from BOTH the numerator and the "
+                 "denominator — it does not reassign them. Previews are for "
+                 "spot-checking and slow the run.",
             font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
             justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
@@ -665,6 +733,20 @@ class AnalysisDialog(ctk.CTkToplevel):
         widgets.secondary_button(btn_frame, "Cancel", self.destroy).pack(
             side="left", padx=6
         )
+
+    def _reset_survival_conf(self) -> None:
+        """Put every per-stage slider back to the shared stage_conf.json value.
+
+        Restores from the file that was read when the dialog opened, so this
+        always agrees with what the Analyze-on-laptop button does, not with
+        whatever was last saved into config.json.
+        """
+        for stage, default in self._surv_defaults.items():
+            var = self._surv_conf_vars.get(stage)
+            if var is None:
+                continue
+            var.set(float(default))
+            self._surv_conf_labels[stage].configure(text=f"{float(default):.2f}")
 
     def _on_segment(self, label: str) -> None:
         """Map the capitalised segment label to its canonical mode string.
@@ -804,8 +886,20 @@ class AnalysisDialog(ctk.CTkToplevel):
         # Worm Survival: staging inference in the vision venv (subprocess),
         # aggregation/Excel on this side. No Docker/ffmpeg/threshold.
         if self._mode.get() == "survival":
-            conf = float(self._surv_conf.get())
+            # Round to the slider's own resolution so config.json holds 0.30,
+            # not 0.30000000000000004 from the DoubleVar.
+            class_conf = {
+                stage: round(float(var.get()), 2)
+                for stage, var in self._surv_conf_vars.items()
+            }
             save_previews = bool(self._surv_save_preview.get())
+            count_eggs = bool(self._surv_count_eggs.get())
+            # Resolve to an explicit list here so the checkbox always wins over
+            # the stage_conf.json default, in both directions.
+            exclude_classes = (
+                [] if count_eggs
+                else (default_exclude_classes() or ["egg"])
+            )
 
             errors = survival_preflight(folder)
             if errors:
@@ -817,7 +911,9 @@ class AnalysisDialog(ctk.CTkToplevel):
                 return
 
             self._on_settings_update(replace(
-                self._settings, survival_conf=conf,
+                self._settings,
+                survival_class_conf=class_conf,
+                survival_count_eggs=count_eggs,
             ))
 
             AnalysisProgressDialog(
@@ -825,7 +921,8 @@ class AnalysisDialog(ctk.CTkToplevel):
                 title="WormScan Worm-Survival Analysis", noun="plate",
             )
             self._survival_agent.start_analysis(
-                folder, conf=conf, save_previews=save_previews,
+                folder, class_conf=class_conf, save_previews=save_previews,
+                exclude_classes=exclude_classes,
             )
             self.destroy()
             return
@@ -1595,7 +1692,14 @@ class MainWindow(ctk.CTk):
         self._motility_agent.update_settings(new)
         self._crawling_agent.update_settings(new)
         self._counting_agent.update_settings(new)
-        _log.info("Settings update propagated to: sync, motility, crawling, counting")
+        self._survival_agent.update_settings(new)
+        # AnalyzeWorker is intentionally absent: it has no status object and is
+        # not held by MainWindow. It re-reads config.json per frame instead, so
+        # it picks up the per-class thresholds cfg.save() just wrote above.
+        _log.info(
+            "Settings update propagated to: sync, motility, crawling, "
+            "counting, survival"
+        )
 
     def _on_close(self) -> None:
         self._agent.stop()

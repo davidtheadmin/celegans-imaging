@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -28,7 +28,20 @@ class Settings:
     crawling_min_track_s: int = 30
     counting_split_sensitivity: float = 3.0
     counting_min_colony_um: float = 200.0
-    survival_conf: float = 0.25
+    # Worm survival: per-class staging confidence, {stage_name: floor}. Empty
+    # means "use launcher/vision/stage_conf.json", the same file infer_stage.py
+    # falls back to, so an untouched install and the capture UI's "Analyze on
+    # laptop" button run identical thresholds. The analysis dialog fills this in
+    # from that file the first time it opens, and its "Reset to defaults" button
+    # puts it back. survival_conf below is the pre-per-class single slider; it
+    # is no longer read, kept only so an old config.json still loads cleanly.
+    survival_class_conf: dict = field(default_factory=dict)
+    # Count egg detections? Default False: a plate is almost never a question
+    # about worms AND eggs at once, and eggs are already outside the survival
+    # denominator, so leaving them off changes clutter and the egg column, never
+    # the survival percentage. Tick it for an egg-survival assay.
+    survival_count_eggs: bool = False
+    survival_conf: float = 0.25   # legacy, unused
     # Review (grid viewer) — last-used content type and video loop length.
     review_type: str = "auto"
     review_loop_s: float = 3.0

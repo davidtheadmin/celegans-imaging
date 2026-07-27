@@ -1,0 +1,121 @@
+{
+  "_README": [
+    "Shared staging-inference defaults. This file is the SINGLE SOURCE OF TRUTH:",
+    "infer_stage.py reads it when no override is passed on the command line, so",
+    "the launcher's Worm Survival run and the capture web UI's 'Analyze on",
+    "laptop' button start from identical numbers. The launcher also reads it to",
+    "seed the per-class sliders and to power their 'Reset to defaults' button.",
+    "",
+    "class_conf: per-class confidence floor, applied to every raw tile detection",
+    "  BEFORE the boxes are merged. '_default' covers any class not named here,",
+    "  so a retrained model that adds a class still runs. Key order is the order",
+    "  the launcher shows the sliders in - keep it in model-class order.",
+    "",
+    "PROVENANCE OF THESE NUMBERS: chosen, not calibrated. They lift the classes",
+    "the model is known to be shakiest on (adult, and the L2/L3 boundary the",
+    "survival cutoff sits on) off the old uniform 0.25 and leave the rest near",
+    "it. Run dev/tools/stage_conf_report.py on a real plate set to replace them",
+    "with values read off the actual confidence distribution. Until then,",
+    "staging counts remain a QA readout, not data - see BACKLOG.md."
+  ],
+
+  "class_conf": {
+    "_default": 0.25,
+    "egg": 0.30,
+    "L1": 0.30,
+    "L2": 0.30,
+    "L3": 0.30,
+    "L4": 0.25,
+    "young adult": 0.30,
+    "adult": 0.35
+  },
+
+  "tiling": {
+    "_comment": [
+      "overlap only. tile_w/tile_h/imgsz are deliberately NOT settable here:",
+      "staging reads absolute worm size, so changing them silently degrades",
+      "accuracy. overlap moves where the seams fall without touching scale.",
+      "0.20 -> 56 tiles, whole-object guarantee 135x122 px",
+      "0.30 -> 63 tiles, whole-object guarantee 203x182 px",
+      "0.35 -> 72 tiles, whole-object guarantee 237x213 px (~29% slower than 0.20)"
+    ],
+    "overlap": 0.35
+  },
+
+  "seam": {
+    "_comment": [
+      "Targeted duplicate-box fix. A detection within margin_px of an INTERIOR",
+      "tile seam is flagged as a possible worm fragment, and dropped only if at",
+      "least cover_frac of its area sits inside a higher-scoring box of any",
+      "class. A fragment nothing covers is kept, so a worm is never lost.",
+      "Set cover_frac to null to disable the pass."
+    ],
+    "margin_px": 12,
+    "cover_frac": 0.6
+  },
+
+  "merge": {
+    "_comment": [
+      "class_agnostic_iou: one extra NMS across ALL classes after the per-class",
+      "pass, for the case of ONE worm carrying TWO labels at nearly the same box",
+      "(the classic L3-here/L4-there pair). Per-class NMS cannot see that pair at",
+      "all - it only ever compares boxes of the same class.",
+      "",
+      "At 0.70 two boxes must be almost the same rectangle to be merged, which",
+      "one object produces and two neighbouring worms realistically do not.",
+      "LOWER it (~0.55) if same-worm pairs still slip through; RAISE it if two",
+      "genuinely adjacent worms are being collapsed into one. null = off, which",
+      "is the pre-2026-07-27 behaviour."
+    ],
+    "class_agnostic_iou": 0.7
+  },
+
+  "exclude_classes": ["egg"],
+  "_exclude_classes_README": [
+    "Classes dropped from the run entirely, before any merge. Default is eggs:",
+    "a plate is almost never a question about worms AND eggs at the same time,",
+    "and egg boxes are pure clutter on a staging plate. Egg counts are wanted",
+    "for an egg-survival assay or a drop of bleached eggs — tick 'Count eggs'",
+    "in the launcher's Worm Survival card, or on the capture UI's Analyze",
+    "button, and that run keeps them.",
+    "",
+    "Eggs are already excluded from the survival denominator (SURVIVAL_CONFIG",
+    "in survival.py), so this changes the egg column and the clutter, never the",
+    "survival percentage.",
+    "",
+    "An excluded class is NOT a class that scored zero. counts.txt prints",
+    "'not counted', the Excel drops the column, and run_info names the",
+    "exclusion — printing 0 would read as 'no eggs on this plate'.",
+    "",
+    "Set to [] to count everything by default."
+  ],
+
+  "class_size_px": {
+    "_README": [
+      "Per-class plausible box size, as [min, max] of sqrt(width * height) in",
+      "full-frame pixels. Either bound may be null. A class absent from this",
+      "block is not size-gated at all.",
+      "",
+      "WHY THIS EXISTS: staging is a size readout - the stages are ordered",
+      "egg < L1 < L2 < L3 < L4 < young adult < adult. A small round speck of",
+      "debris scoring 0.8 on 'adult' is not an uncertain adult, it is not a worm,",
+      "and no confidence threshold can fix that because the model is confident.",
+      "A size gate can: an adult-sized label on a debris-sized box is impossible",
+      "regardless of score.",
+      "",
+      "EMPTY BY DEFAULT ON PURPOSE. The pixel size of a stage depends on the",
+      "magnification, so there is no honest default to ship - a guessed number",
+      "here deletes real worms. Measure it:",
+      "",
+      "    launcher\\vision\\.venv-vision\\Scripts\\python.exe ^",
+      "        dev\\tools\\stage_conf_report.py --suggest \"C:\\path\\to\\images\"",
+      "",
+      "That writes stage_conf_suggested.json with a ready-to-paste block plus a",
+      "count of what each bound would have removed. Read the removal counts",
+      "before pasting.",
+      "",
+      "Boxes flagged as seam-truncated are exempt from this gate - a worm clipped",
+      "by a tile edge is legitimately undersized and is handled by the seam pass."
+    ]
+  }
+}
