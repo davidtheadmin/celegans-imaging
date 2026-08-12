@@ -2,6 +2,17 @@
 
 **Ground-truth snapshot of how the code actually works — regenerated 2026-07-09 from live `HEAD` (`c7045bd`).**
 
+**Updated 2026-07-27 (fourth pass):** the Roboflow training-data round-trip is
+back in the repo and wired to the shared module — `dev/tools/prep_roboflow.py`
+(TIFF → 8-bit PNG + metadata filenames) and `dev/tools/tiled_assist.py`
+(pre-annotate → VOC xml + preview → upload). `tiled_assist.py` had been living
+loose in `Documents\WormScan` importing a `tiled_infer.py` copy **that no longer
+exists**, so it was broken; it now imports `launcher/vision/tiled_infer.py` and
+inherits every merge cleanup. Also corrected the tile-geometry note: 4056/6 and
+3040/5 are exactly 676×608, so the tile size **is** Roboflow's 6×5 tiling
+preprocessing — the earlier "the 6×5 claim was wrong" correction was itself
+wrong (§4d, §1).
+
 **Updated 2026-07-27 (third pass):** added the **egg toggle** — a "Count eggs"
 checkbox in the launcher's Worm Survival card and next to the capture UI's
 *Analyze on laptop* button, backed by `exclude_classes` in `stage_conf.json`
@@ -118,7 +129,7 @@ Top-level, one line each:
   - Staging (parked): `normalize.py`, `test_normalize.py`, `canonical_scale.json` are a scale-normalization utility for the YOLO staging pipeline. They are **not imported** by `infer_stage.py`, `tiled_infer.py`, or `survival.py`, and are not currently used by any pipeline. Open item in `BACKLOG.md` ("YOLO staging — scale normalization").
 - `launcher/vision/` — self-contained staging-inference folder with its own Python 3.12 venv (`.venv-vision/`, git-ignored). Holds `tiled_infer.py` (tiling + NMS library, import target, no CLI), `infer_stage.py` (the CLI the 3.13 launcher shells out to), **new** `stage_conf.json` (tracked; the shared per-class-threshold / tiling / seam defaults both venvs read), and `models/staging.pt` (git-ignored model weights, travel by copy). See §4d.
 - `launcher/viewers/` — two standalone HTML-grid-viewer generators (`make_image_viewer.py`, `make_video_viewer.py`), driven by the launcher's "Review" button.
-- `dev/` — dev-only scripts moved out of `launcher/` (commit `6608104`), none imported by the app: `_widget_gallery.py` (CTk widget-catalogue harness), `tools/` (ad-hoc diagnostics: `tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`, **new** `stage_conf_report.py` — profiles the staging model's per-class confidence distribution, box-size percentiles, size-plausibility percentiles and seam-fragment rate on a real plate set, so `vision/stage_conf.json` can be set from data; runs in the VISION venv, writes `_stage_conf_report/`, changes nothing. `--suggest` additionally writes `stage_conf_suggested.json`, a paste-ready `class_size_px` block carrying the removal count each bound would cause plus a check that median box size actually rises along egg → adult — where it does not, the model is not separating those stages by size and they must not be gated), and the former root debug scripts (`check_skel_flag.py`, `check_skeletons.py`, `inspect_filter_decisions{,2,3}.py`). Several carry hardcoded `C:\Users\Isabe\…` paths.
+- `dev/` — dev-only scripts moved out of `launcher/` (commit `6608104`), none imported by the app: `_widget_gallery.py` (CTk widget-catalogue harness), `tools/` (ad-hoc diagnostics: `tierpsy_param_sweep.py`, `inspect_skeleton_failures.py`, `inspect_head_angle_spectrum.py`, `compute_shape_metrics.py`, `contrast_analysis.py`, `contrast.csv`, `cut_clip.py`, `worm_stage_preview.py`, **new** `stage_conf_report.py` — profiles the staging model's per-class confidence distribution, box-size percentiles, size-plausibility percentiles and seam-fragment rate on a real plate set, so `vision/stage_conf.json` can be set from data; runs in the VISION venv, writes `_stage_conf_report/`, changes nothing. `--suggest` additionally writes `stage_conf_suggested.json`, a paste-ready `class_size_px` block carrying the removal count each bound would cause plus a check that median box size actually rises along egg → adult — where it does not, the model is not separating those stages by size and they must not be gated), **new** `prep_roboflow.py` (converts a `<strain> <cohort>/plate NN/` trainset tree to flat 8-bit PNGs named `{strain}_{stage}_{cohort}_p{NN}_{NNNN}.png` plus `manifest.csv`; dry-run unless `--go`; accepts several roots), **new** `tiled_assist.py` (pre-annotates full frames with the staging model via the shared `tiled_infer`, writes Pascal-VOC xml + previews, then `--upload`s image+xml to Roboflow as *predictions* to be corrected — **annotates every class by default**, deliberately overriding `stage_conf.json`'s counting-time `exclude_classes`, because a pre-annotation that omits eggs teaches the next model that eggs are background), and the former root debug scripts (`check_skel_flag.py`, `check_skeletons.py`, `inspect_filter_decisions{,2,3}.py`). Several carry hardcoded `C:\Users\Isabe\…` paths.
 - `deploy/` — three systemd units: capture service, retention oneshot service, retention timer.
 - `scripts/` — bash helpers: `deploy.sh` (push→pull→restart), clock sync, data wipe, folder renamers, video mover.
 - `docs/calibration/` — the original bend-calibration script + reference PNGs (fast/slow worm examples).
@@ -578,7 +589,17 @@ button relies on, which is what keeps the two paths in step.
   Boxes come back as `[x1, y1, x2, y2, score, class_name]`, name resolved from
   `model.names`.
 
-  **Tile geometry (the earlier "6×5 division" claim was wrong).** Origins step by
+  **Where 676×608 comes from.** 4056/6 and 3040/5, exactly — the tile size *is*
+  Roboflow's 6×5 tiling preprocessing, applied at dataset-generation time to the
+  full frames that get uploaded. Inference re-tiles at that same size so the
+  model sees objects at the pixel scale it was trained on. This is also why
+  `tiled_assist.py` uploads **full frames**, never tiles: tiling twice would
+  halve the effective worm size. (An earlier revision of this document called the
+  "6×5" claim wrong; it is not — 6×5 describes Roboflow's non-overlapping dataset
+  grid, while the numbers below describe how many tiles *inference* runs once
+  overlap is added. Both are correct and describe different things.)
+
+  **Tile geometry at inference.** Origins step by
   `round(tile × (1 − overlap))` with a final origin snapped to the frame edge, so
   at overlap 0.2 the frame is **8×7 = 56 tiles** stepping 541×486 — adjacent tiles
   share only **135 px in x / 122 px in y**. A box is guaranteed to sit fully
@@ -605,8 +626,23 @@ button relies on, which is what keeps the two paths in step.
   or that is the wrong physical size for what it claims to be, can never win a
   merge against the one that is right; the model itself is auto-run at the minimum
   confidence across classes, or those boxes never come back) → per-class NMS
-  (iou 0.45) → **class-agnostic NMS** (`class_agnostic_iou`, now **on at 0.70**)
+  (iou 0.45) → **nested same-class suppression** (`merge.same_class_cover_frac`,
+  **on at 0.80**) → **class-agnostic NMS** (`class_agnostic_iou`, **on at 0.70**)
   → **seam-fragment suppression** (on by default via `stage_conf.json`).
+
+  **Nested same-class suppression** drops a box when ≥80% of its own area sits
+  inside a **larger box of the same class**. It exists because a big worm yields
+  both a whole box and a partial box at 50–71% the linear size, which puts their
+  IoU at 0.25–0.45 — structurally under any usable NMS threshold, so per-class
+  NMS can never reach it. Measured on a 15-frame gravid-adult set: 19 such
+  `adult`-in-`adult` pairs, all below the 0.45 threshold, only 11 near a seam, and
+  no worm exceeding the whole-object guarantee — so neither NMS nor the seam pass
+  could have caught them. Same-class **only**, and that is the safety argument:
+  two worms at one stage are the same size so one cannot nest inside the other,
+  whereas cross-class nesting is real biology (a gravid adult is full of eggs).
+  The **larger** box wins regardless of score, because a partial detection
+  sometimes outscores the whole worm. Replayed over that set: 615 → 593 boxes,
+  every removal an `adult`, no other class touched.
 
   **Per-class size gate (`class_size_px`)** rejects a detection whose box is the
   wrong physical size for its class, measured as `sqrt(w × h)` in full-frame px

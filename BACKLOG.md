@@ -359,6 +359,23 @@ plates lets the shortcut work at val time too, which is exactly how P/R ≈ 0.75
 coexists with the observed failure. A val set that cannot fail is not measuring
 the thing that matters.
 
+### Direct evidence from the trainset folders (2026-07-27)
+
+`Documents\WormScan\experiments\` makes the shortcut hypothesis concrete —
+almost every training set is **one stage per folder**:
+
+```
+Train_L1_staged      Trainset_L1        Trainset_L1_more   Trainset_L1_moremore
+Train_eggs bleached  Train_gravidAdult  Train_youngAdult_more
+Trainset_Eggs+Adult  Train_survival     Train_mix   <-- the only mixed one
+```
+
+That is exactly the condition under which "what stage is this plate?" is a
+sufficient hypothesis for the training loss. Adding another single-stage set
+(e.g. `Train_gravidAdult`) is still useful for appearance coverage, but on its
+own it **reinforces** the shortcut rather than removing it. Weight future
+annotation effort toward mixed plates, and put mixed plates in val.
+
 ### Ladder — cheapest first
 
 - [ ] **Rule out the mundane cause first.** If the mixed plates were imaged at a
@@ -401,6 +418,48 @@ confirmed an egg detection outscoring and swallowing an overlapping L1 under the
 0.70 cross-class NMS. Since eggs are now excluded **pre-NMS** by default, that L1
 survives. Watch whether L1 counts on mixed plates move at all after this change,
 before attributing everything to the model.
+
+## Staging — nested same-class boxes on big worms (fixed 2026-07-27)
+
+Found on `Train_gravidAdult` while pre-annotating for Roboflow: duplicates were
+back. Measured across all 15 frames rather than guessed:
+
+| check | result |
+|---|---|
+| same-class pairs above the 0.45 per-class NMS threshold | 1 of 416 — NMS working |
+| cross-class pairs above the 0.70 class-agnostic threshold | 0 — working |
+| **`adult` nested >=90% inside another `adult`** | **19** |
+| `egg` / `L2` nested inside `adult` | 3 — real biology, must survive |
+| adult box size sqrt(w·h) | p50 134, max 204 px vs a 237 px guarantee |
+
+So this was NOT a slicing problem (overlap 0.35 is ample; nothing exceeds the
+guarantee) and NOT a config mistake. The inner boxes are 50–71% the linear size
+of the outer, which puts their IoU at **0.25–0.45** — every one of them sits just
+under the NMS threshold, and that is structural: a box ~60% the linear size of
+another has IoU ~0.35 by construction. No NMS threshold can reach these without
+also merging genuinely distinct worms. Only 11/19 are near a seam, so seam
+suppression cannot cover it either.
+
+Why it never appeared before: survival plates are L1/L2 — small and separated.
+Gravid adults are large, coiled and clumped, so the model emits a partial box
+*and* a whole box on one worm.
+
+**Fix: `merge.same_class_cover_frac` (0.8, on).** Drop a box when that fraction
+of its own area sits inside a LARGER box of the **same class**. Same-class only,
+and that restriction is the whole safety argument — two worms at the same stage
+are the same size, so one cannot be nested inside the other, whereas cross-class
+nesting is real (a gravid adult is full of eggs). The larger box wins regardless
+of score: a partial detection sometimes outscores the whole worm, and keeping
+the confident fragment would be backwards.
+
+Replayed over the existing 15 frames: **615 -> 593 boxes, and every one of the 22
+removed is an `adult`** — no egg, L1, L2 or L3 box is touched at any threshold
+from 0.7 to 0.9. Disable with `--no-same-class-nesting`.
+
+This also supersedes the earlier "general containment rule" note above: the
+blanket version was correctly refused, because at any useful threshold it would
+have deleted the eggs inside the gravid adults. Restricting to same-class is
+what makes containment safe.
 
 ## Staging — extra box where two worms sit close together (OPEN, not fixed)
 

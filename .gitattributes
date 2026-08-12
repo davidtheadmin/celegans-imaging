@@ -1,0 +1,47 @@
+# Line endings.
+#
+# Why this file exists: the repo's committed content is LF, but the working
+# tree drifted to CRLF for most files, so `git status` showed ~40 files as
+# fully rewritten and `git diff` with no path was useless for review. With no
+# .gitattributes and core.autocrlf unset, nothing was normalising anything.
+#
+# `text=auto` means: git decides per file whether it is text, and stores text
+# as LF in the repository regardless of what the working tree holds. Checkout
+# leaves LF here (core.autocrlf is unset), which is what every editor and tool
+# in this project already handles — the launcher is Python, the capture UI is
+# JS/CSS, and both run fine with LF on Windows.
+*               text=auto
+
+# Windows batch files are the one real exception: cmd.exe can mis-parse labels
+# and goto targets in an LF-only .bat, so these stay CRLF on disk.
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+*.ps1           text eol=crlf
+
+# Anything that runs on the Pi must be LF, whatever the laptop does to it.
+*.sh            text eol=lf
+*.service       text eol=lf
+*.py            text eol=lf
+
+# Binary, so git never tries to "fix" the bytes or diff them as text.
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.tif           binary
+*.tiff          binary
+*.bmp           binary
+*.webp          binary
+*.ico           binary
+*.mp4           binary
+*.avi           binary
+*.mov           binary
+*.mkv           binary
+*.pt            binary
+*.pth           binary
+*.xlsx          binary
+*.xlsm          binary
+*.h5            binary
+*.hdf5          binary
+*.ttf           binary
+*.woff          binary
+*.woff2         binary

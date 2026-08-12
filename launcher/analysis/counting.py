@@ -9,8 +9,15 @@ Pipeline per image (experiment/condition/plateNN/<one image>):
   2. derive um/px from the detected radius (or TIFF tags) for physical sizes
   3. build a stain map that surfaces faint colonies (green / OD / gray), then
      flatten illumination with a gentle large-kernel white-tophat
-  4. threshold inside the mask, then split touching colonies with a
-     distance-transform + h-maxima marker-controlled watershed (NOT plain CCL)
+  3b. optionally blur that map (--smooth-um) so feathery, non-solid colonies
+     read as one object rather than a spray of fragments; detection only,
+     intensity is still measured on the unblurred map
+  4. threshold inside the mask -- either the automatic (per-plate) threshold
+     scaled by the detection-sensitivity dial (--sensitivity), or one absolute
+     optical-density level applied to every plate (--threshold fixed), which is
+     what makes counts comparable across a dose series -- then split touching
+     colonies with a distance-transform + h-maxima marker-controlled watershed
+     (NOT plain connected components)
   5. filter by real colony diameter, well-boundary contact, and solidity
   6. confluence fallback: if the stained-area fraction is high, flag the count
      unreliable but still report both count and stained area
@@ -53,6 +60,25 @@ _MAX_DEPTH = 3
 _ANALYSIS_PREFIX = "_counting_analysis"
 
 
+# Detection sensitivity: a single 0-10 dial the dialog exposes, mapped to a
+# multiplier on the automatic (Otsu) threshold. NEUTRAL reproduces the
+# pre-slider behaviour exactly, so an untouched install counts as it always did;
+# SPAN sets how far each end of the dial can move the threshold.
+_SENS_NEUTRAL = 5.0
+_SENS_SPAN = 2.5
+
+
+def threshold_scale(sensitivity: float) -> float:
+    """Map the 0-10 sensitivity dial to a multiplier on the auto threshold.
+
+    Geometric around the neutral point so each step is the same *relative* move:
+    5 -> 1.00 (unchanged), 7.5 -> 0.63, 10 -> 0.40 (picks up faint/sparse
+    colonies), 2.5 -> 1.58, 0 -> 2.50 (only the darkest cores).
+    """
+    s = min(10.0, max(0.0, float(sensitivity)))
+    return float(_SENS_SPAN ** ((_SENS_NEUTRAL - s) / _SENS_NEUTRAL))
+
+
 @dataclass
 class CountingOptions:
     """Per-run knobs consumed by process_image / find_images. Field names and
@@ -60,6 +86,9 @@ class CountingOptions:
     Namespace (CLI) or a CountingOptions (agent) interchangeably."""
     split_sensitivity: float = 3.0
     min_colony_um: float = 200.0
+    sensitivity: float = _SENS_NEUTRAL
+    smooth_um: float = 0.0
+    od_threshold: float = 0.0
     well_diameter_mm: float = 34.8
     stain_channel: str = "od"
     threshold: str = "otsu"
@@ -212,26 +241,72 @@ def flatten(stain: np.ndarray, bg_radius_px: float, scale: float = 0.25) -> np.n
 # ----------------------------------------------------------------------------
 # Segmentation
 # ----------------------------------------------------------------------------
-def threshold_in_mask(stain: np.ndarray, mask: np.ndarray,
-                      method: str) -> tuple[np.ndarray, float]:
-    """Binarize the stain map inside the well mask. Returns (binary, threshold)."""
+def smooth_stain(stain: np.ndarray, smooth_um: float,
+                 um_per_px: float | None) -> np.ndarray:
+    """Gaussian-blur the stain map at a colony-relevant scale, or pass through.
+
+    Colonies that grow as loose, feathery clusters (adherent mammalian lines
+    stained with crystal violet, say) are not solid discs: at full resolution a
+    single colony is a spray of stained specks with pale gaps. Thresholding that
+    texture directly splinters one colony into dozens of fragments and loses its
+    faint halo entirely. Blurring first at roughly one colony-feature width
+    turns the spray back into one blob, so the threshold and the watershed both
+    see colonies instead of texture. 0 disables it (the historical behaviour).
+
+    Only the *detection* map is blurred: intensity is still measured on the
+    unsmoothed map, so mean_stain / integrated_stain keep their meaning.
+    """
+    if not smooth_um or smooth_um <= 0:
+        return stain
+    sigma_px = (smooth_um / um_per_px) if um_per_px else smooth_um
+    if sigma_px < 0.5:
+        return stain
+    return cv2.GaussianBlur(stain, (0, 0), float(sigma_px))
+
+
+def threshold_in_mask(stain: np.ndarray, mask: np.ndarray, method: str,
+                      scale: float = 1.0,
+                      od_threshold: float = 0.0) -> tuple[np.ndarray, float]:
+    """Binarize the stain map inside the well mask. Returns (binary, threshold).
+
+    ``scale`` is the detection-sensitivity multiplier from threshold_scale():
+    below 1 the threshold drops and faint colonies survive, above 1 only the
+    darkest cores do. 1.0 is the historical behaviour. It applies to the
+    automatic methods only -- a "fixed" threshold that a slider could move
+    per run would still be one number for the whole run, but calling it fixed
+    and then scaling it invites exactly the confusion this mode exists to end.
+
+    ``method="fixed"`` uses ``od_threshold`` verbatim on every plate. Otsu and
+    adaptive both derive their cut from the plate in front of them, which makes
+    each plate its own reference -- fine for reading one image, wrong for a
+    dose-response, where the whole question is how plates compare to each other.
+    The stain map in ``od`` mode is an optical density against the well's own
+    bright floor, i.e. a physical quantity on a common scale, so one absolute
+    level means the same thing on a sparse plate and a dense one.
+    """
     m = mask > 0
     vals = stain[m]
     if vals.size == 0 or float(vals.max()) <= 0:
         return np.zeros(stain.shape, bool), 0.0
+
+    if method == "fixed":
+        t = float(od_threshold)
+        return (stain > t) & m, t
 
     if method == "adaptive":
         norm = np.zeros(stain.shape, np.uint8)
         vmax = float(vals.max())
         norm[m] = np.clip(stain[m] / vmax * 255.0, 0, 255).astype(np.uint8)
         blk = max(3, (min(stain.shape) // 20) | 1)  # odd block ~5% of image
+        # Adaptive has no single threshold to scale, so sensitivity moves the
+        # constant instead: the margin a pixel must clear above its local mean.
         binary = cv2.adaptiveThreshold(norm, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY, blk, -2) > 0
+                                       cv2.THRESH_BINARY, blk, -2.0 * scale) > 0
         return binary & m, float("nan")
 
     # Otsu computed on in-mask values only (skimage's histogram-based otsu).
     from skimage.filters import threshold_otsu
-    t = float(threshold_otsu(vals))
+    t = float(threshold_otsu(vals)) * float(scale)
     return (stain > t) & m, t
 
 
@@ -399,6 +474,13 @@ def per_condition_rows(plate_rows: list[dict]) -> list[dict]:
             "colony_count_sd": float(c["colony_count"].std(ddof=1))
                                 if len(c) > 1 else 0.0,
             "mean_area_mm2": float(c["mean_area_mm2"].mean()),
+            # Stained area per condition. With a fixed threshold this is the
+            # readout that survives colonies growing into each other: once two
+            # colonies merge the COUNT is capped and no algorithm recovers the
+            # two, but the area they cover is still measured correctly.
+            "stained_fraction_mean": float(c["stained_fraction"].mean()),
+            "stained_fraction_sd": float(c["stained_fraction"].std(ddof=1))
+                                    if len(c) > 1 else 0.0,
             "n_confluent_plates": int(c["confluent"].sum()),
         })
     return out
@@ -425,7 +507,8 @@ def write_outputs(out_dir: Path, all_colony_rows: list[dict],
                   "confluent", "um_per_px", "well_radius_px", "cells_seeded",
                   "image_path"]
     cond_cols = ["condition", "n_plates", "colony_count_mean", "colony_count_sd",
-                 "mean_area_mm2", "n_confluent_plates"]
+                 "mean_area_mm2", "stained_fraction_mean", "stained_fraction_sd",
+                 "n_confluent_plates"]
 
     colony_df = _round4(pd.DataFrame(all_colony_rows, columns=colony_cols))
     plate_df = _round4(pd.DataFrame(plate_rows, columns=plate_cols))
@@ -470,7 +553,14 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
 
     stain = build_stain_map(bgr, mask, opts.stain_channel)
     stain = flatten(stain, bg_radius_px)
-    binary, thr = threshold_in_mask(stain, mask, opts.threshold)
+
+    # Detection map: optionally blurred so feathery colonies read as one object.
+    # Measurement still uses the unsmoothed `stain` below.
+    smooth_um = float(getattr(opts, "smooth_um", 0.0) or 0.0)
+    detect = smooth_stain(stain, smooth_um, um_per_px)
+    scale = threshold_scale(getattr(opts, "sensitivity", _SENS_NEUTRAL))
+    binary, thr = threshold_in_mask(detect, mask, opts.threshold, scale,
+                                    getattr(opts, "od_threshold", 0.0))
 
     stained_px = int((binary & (mask > 0)).sum())
     stained_fraction = stained_px / mask_area if mask_area else 0.0
@@ -506,8 +596,10 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
     }
 
     thr_str = "adaptive" if isinstance(thr, float) and np.isnan(thr) else f"{thr:.4f}"
+    thr_note = "fixed" if opts.threshold == "fixed" else f"x{scale:.2f}"
     write_log(
-        f"{tag}: scale={scale_src} bg_r={bg_radius_px:.0f}px thr={thr_str} "
+        f"{tag}: scale={scale_src} bg_r={bg_radius_px:.0f}px "
+        f"smooth={smooth_um:.0f}um thr={thr_str} ({thr_note}) "
         f"n_raw={len(kept_ids) + len(dropped_ids)} n_kept={len(kept_ids)} "
         f"stained={stained_fraction:.3f} confluent={confluent}"
     )
@@ -558,11 +650,26 @@ def main() -> None:
                     help="h-maxima depth; higher = fewer splits (default 3.0)")
     ap.add_argument("--min-colony-um", type=float, default=200.0,
                     help="minimum colony diameter in um (default 200)")
+    ap.add_argument("--sensitivity", type=float, default=_SENS_NEUTRAL,
+                    help="detection sensitivity 0-10; 5 = automatic threshold "
+                         "unchanged, higher picks up fainter/sparser colonies "
+                         "(default 5)")
+    ap.add_argument("--smooth-um", type=float, default=0.0,
+                    help="blur the detection map at this scale in um before "
+                         "thresholding, so feathery colonies are one object "
+                         "instead of many fragments; 0 = off (default 0)")
     # scale + stain
     ap.add_argument("--well-diameter-mm", type=float, default=34.8,
                     help="physical well diameter; 0 = use TIFF tags (default 34.8)")
     ap.add_argument("--stain-channel", choices=["green", "od", "gray"], default="od")
-    ap.add_argument("--threshold", choices=["otsu", "adaptive"], default="otsu")
+    ap.add_argument("--threshold", choices=["otsu", "adaptive", "fixed"],
+                    default="otsu",
+                    help="otsu/adaptive derive the cut per plate; fixed applies "
+                         "--od-threshold to every plate, which is what makes "
+                         "counts comparable across a dose series (default otsu)")
+    ap.add_argument("--od-threshold", type=float, default=0.0,
+                    help="absolute stain (optical density) cut used by "
+                         "--threshold fixed; ignored otherwise")
     ap.add_argument("--background-radius-um", type=float, default=3000.0,
                     help="white-tophat kernel radius in um; must exceed the "
                          "largest colony so it is not hollowed (default 3000)")

@@ -203,6 +203,10 @@ class CountingAgent(threading.Thread):
         self._folder: Optional[Path] = None
         self._split_sensitivity: float = 3.0
         self._min_colony_um: float = 200.0
+        self._sensitivity: float = 5.0
+        self._smooth_um: float = 0.0
+        self._threshold_mode: str = "otsu"
+        self._od_threshold: float = 0.05
 
     def update_settings(self, settings: object) -> None:
         with self._lock:
@@ -226,12 +230,20 @@ class CountingAgent(threading.Thread):
         folder: Path,
         split_sensitivity: float = 3.0,
         min_colony_um: float = 200.0,
+        sensitivity: float = 5.0,
+        smooth_um: float = 0.0,
+        threshold_mode: str = "otsu",
+        od_threshold: float = 0.05,
     ) -> None:
         """UI thread: trigger a counting run on the given folder."""
         with self._lock:
             self._folder = folder
             self._split_sensitivity = split_sensitivity
             self._min_colony_um = min_colony_um
+            self._sensitivity = sensitivity
+            self._smooth_um = smooth_um
+            self._threshold_mode = threshold_mode
+            self._od_threshold = od_threshold
         self.status.update(
             running=True,
             total=0,
@@ -253,11 +265,17 @@ class CountingAgent(threading.Thread):
                 folder = self._folder
                 split_sensitivity = self._split_sensitivity
                 min_colony_um = self._min_colony_um
+                sensitivity = self._sensitivity
+                smooth_um = self._smooth_um
+                threshold_mode = self._threshold_mode
+                od_threshold = self._od_threshold
                 self._folder = None
             if folder is not None:
                 self._cancel.clear()
                 try:
-                    self._run_analysis(folder, split_sensitivity, min_colony_um)
+                    self._run_analysis(folder, split_sensitivity, min_colony_um,
+                                       sensitivity, smooth_um,
+                                       threshold_mode, od_threshold)
                 except Exception:
                     log.exception("CountingAgent crashed")
                     self.status.update(
@@ -271,17 +289,25 @@ class CountingAgent(threading.Thread):
         folder: Path,
         split_sensitivity: float,
         min_colony_um: float,
+        sensitivity: float = 5.0,
+        smooth_um: float = 0.0,
+        threshold_mode: str = "otsu",
+        od_threshold: float = 0.05,
     ) -> None:
         # Lazy import: the heavy pipeline (cv2/numpy/pandas/skimage) is only
         # pulled in once a run actually starts — mirrors motility/crawling.
         from analysis.counting import (
             CountingOptions, find_images, process_image, write_outputs,
-            _ANALYSIS_PREFIX,
+            threshold_scale, _ANALYSIS_PREFIX,
         )
 
         opts = CountingOptions(
             split_sensitivity=split_sensitivity,
             min_colony_um=min_colony_um,
+            sensitivity=sensitivity,
+            smooth_um=smooth_um,
+            threshold=threshold_mode,
+            od_threshold=od_threshold,
         )
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -303,6 +329,22 @@ class CountingAgent(threading.Thread):
             write_log(f"Images found: {total}")
             write_log(f"Split sensitivity: {split_sensitivity:.2f}")
             write_log(f"Min colony diameter: {min_colony_um:.0f} um")
+            if threshold_mode == "fixed":
+                write_log(
+                    f"Threshold: FIXED at {od_threshold:.4f} OD for every plate "
+                    f"(comparable across conditions; detection sensitivity "
+                    f"does not apply)"
+                )
+            else:
+                write_log(f"Threshold: {threshold_mode} (derived per plate)")
+                write_log(
+                    f"Detection sensitivity: {sensitivity:.1f}/10 "
+                    f"(threshold x{threshold_scale(sensitivity):.2f})"
+                )
+            write_log(
+                "Colony smoothing: "
+                + (f"{smooth_um:.0f} um" if smooth_um > 0 else "off")
+            )
 
             self.status.update(
                 color="yellow",
