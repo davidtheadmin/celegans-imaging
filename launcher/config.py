@@ -28,6 +28,20 @@ class Settings:
     crawling_min_track_s: int = 30
     counting_split_sensitivity: float = 3.0
     counting_min_colony_um: float = 200.0
+    # Colony Survival detection: 0-10 dial on the automatic threshold (5 =
+    # unchanged, higher finds fainter colonies), and the blur applied to the
+    # detection map before thresholding so feathery colonies count as one
+    # object instead of many fragments (0 = off). Both default to the
+    # pre-slider behaviour, so an existing config.json counts as it always did.
+    counting_sensitivity: float = 5.0
+    counting_smooth_um: float = 0.0
+    # Threshold mode. "otsu" derives the cut from each plate separately, which
+    # makes every plate its own reference — fine for reading one image, wrong
+    # for a dose-response. "fixed" applies counting_od_threshold to every plate
+    # in the run, so counts are comparable across conditions. Default stays
+    # "otsu" so existing configs are unchanged.
+    counting_threshold_mode: str = "otsu"
+    counting_od_threshold: float = 0.05
     # Worm survival: per-class staging confidence, {stage_name: floor}. Empty
     # means "use launcher/vision/stage_conf.json", the same file infer_stage.py
     # falls back to, so an untouched install and the capture UI's "Analyze on
@@ -41,6 +55,30 @@ class Settings:
     # denominator, so leaving them off changes clutter and the egg column, never
     # the survival percentage. Tick it for an egg-survival assay.
     survival_count_eggs: bool = False
+    # Per-class score rescoring ("Correct for uneven class confidence").
+    # ON by default. The class heads are not on a common scale — the L2 head's
+    # 99th-percentile score is 0.14 while L1/L3 reach 0.80 — so an arg-max over
+    # raw scores compares numbers that do not compare, and L2 loses nearly every
+    # contest it enters. The pass runs last, after every suppression step, and
+    # RELABELS ONLY: box count and geometry are unchanged at any alpha.
+    #
+    # This flag is a switch, not a value. Ticked passes no alpha at all, so
+    # launcher/vision/stage_conf.json's rescore.alpha applies (ships at 2.0);
+    # unticked forces alpha 0, which is a bit-identical no-op. The number lives
+    # in that file and nowhere else, so it stays tunable without a rebuild.
+    survival_rescore: bool = True
+    # Ignore previous results and send every image through the model again?
+    # Off by default: a Development run reuses detections from earlier runs of
+    # the same folder, image by image, which is what makes "analyse each
+    # timepoint as it comes in, then combine them at the end" cheap. The cache
+    # invalidates itself whenever anything that decides which BOXES exist
+    # changes (per-class floors, size gate, tiling/merge, the model file), so
+    # this switch is an escape hatch rather than a routine setting.
+    survival_force_reanalyze: bool = False
+    # Legacy, no longer read. soft_stage_scores.csv is written on every
+    # Development run — the body-size figure is built from it, so it stopped
+    # being optional. Kept only so an old config.json still loads cleanly.
+    survival_soft_scores: bool = False
     survival_conf: float = 0.25   # legacy, unused
     # Review (grid viewer) — last-used content type and video loop length.
     review_type: str = "auto"

@@ -1,0 +1,355 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Development — explorer</title>
+<style>
+:root{color-scheme:light;--surface-1:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--mut:#898781;
+--grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--crit:#d03b3b;
+--s1:#2a78d6;--s2:#1baf7a;--s3:#eb6834;--s4:#eda100;--s5:#e87ba4;--s6:#008300;--s7:#4a3aa7;--s8:#e34948;
+--g1:#b7d3f6;--g2:#86b6ef;--g3:#3987e5;--g4:#1c5cab;--g5:#0d366b;--g6:#104281;--g7:#08203f}
+:root[data-theme=dark],
+html[data-theme=dark]{color-scheme:dark;--surface-1:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
+--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);
+--s1:#3987e5;--s2:#199e70;--s3:#d95926;--s4:#c98500;--s5:#d55181;--s6:#008300;--s7:#9085e9;--s8:#e66767;
+--g1:#9ec5f4;--g2:#6da7ec;--g3:#3987e5;--g4:#256abf;--g5:#104281;--g6:#0d366b;--g7:#08203f}
+@media(prefers-color-scheme:dark){:root:where(:not([data-theme=light])){color-scheme:dark;
+--surface-1:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;--grid:#2c2c2a;--axis:#383835;
+--ring:rgba(255,255,255,.10);--s1:#3987e5;--s2:#199e70;--s3:#d95926;--s4:#c98500;--s5:#d55181;
+--s6:#008300;--s7:#9085e9;--s8:#e66767;
+--g1:#9ec5f4;--g2:#6da7ec;--g3:#3987e5;--g4:#256abf;--g5:#104281;--g6:#0d366b;--g7:#08203f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--plane);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:28px 22px 60px}
+.wrap{max-width:1140px;margin:0 auto}
+h1{font-size:21px;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--ink2);margin:0 0 8px;font-size:13.5px;max-width:82ch}
+.warn{border-left:3px solid var(--crit);padding:6px 12px;margin:0 0 18px;color:var(--ink2);font-size:12.5px;max-width:82ch;background:var(--surface-1)}
+.card{background:var(--surface-1);border:1px solid var(--ring);border-radius:12px;padding:18px 20px 16px;margin-bottom:18px}
+h2{font-size:15px;margin:0 0 3px}
+.cap{color:var(--ink2);font-size:12.5px;margin:0 0 14px;max-width:86ch}
+.bar{position:sticky;top:0;z-index:8;background:var(--plane);padding:8px 0 10px;margin-bottom:10px;border-bottom:1px solid var(--ring)}
+.ctrl{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.ctrl b{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;font-weight:600;margin-right:3px}
+button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:999px;cursor:pointer;border:1px solid var(--ring);background:transparent;color:var(--ink2)}
+button[aria-pressed=true]{background:var(--ink);color:var(--surface-1);border-color:var(--ink)}
+.lg{display:flex;gap:15px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin-top:10px;align-items:center}
+.lg i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-1px}
+svg{display:block;width:100%;height:auto;overflow:visible}
+/* Labels sit on top of the marks they annotate; without this they swallow
+   the pointer and the bar underneath never shows its tooltip. */
+svg text{pointer-events:none}
+.scroll{overflow-x:auto;overflow-y:visible}
+.tt{position:fixed;pointer-events:none;background:var(--surface-1);border:1px solid var(--ring);border-radius:8px;
+padding:7px 10px;font-size:12px;box-shadow:0 4px 16px rgba(0,0,0,.13);opacity:0;transition:opacity .1s;z-index:9;color:var(--ink);white-space:nowrap}
+.note{font-size:12px;color:var(--mut);margin-top:12px;max-width:86ch}
+.flag{color:var(--crit)}
+</style></head><body><div class="wrap">
+<h1>Development — explorer</h1>
+<p class="sub" id="hdr"></p>
+<p class="warn" id="caveat"></p>
+
+<div class="bar"><div class="ctrl" id="theme"><b>Theme</b></div></div>
+
+<div class="card"><h2>Mean stage index</h2>
+<p class="cap" id="sicap"></p>
+<div class="ctrl" id="six"></div>
+<div class="scroll"><div id="si"></div></div><div class="lg" id="silg"></div></div>
+
+<div class="card"><h2>Stage composition</h2>
+<p class="cap">100% stacked bars, strains side by side, one panel per dose &times; timepoint. Numbers inside
+segments are % of animals detected; <b>n</b> above each bar is how many that was &mdash; watch it move.</p>
+<div class="scroll"><div id="comp"></div></div><div class="lg" id="complg"></div></div>
+
+<div class="card" id="sizecard"><h2>Body-size distribution</h2>
+<p class="cap">Every detected animal, no stage bins &mdash; the continuous quantity the classifier is
+discretising. Kernel density in log space (growth is multiplicative), curves scaled to equal height,
+&#9650; marks the median.</p>
+<div class="scroll"><div id="size"></div></div><div class="lg" id="sizelg"></div></div>
+
+<div class="card"><h2>Quality control</h2>
+<p class="cap">Whether there were enough animals to measure, and whether the four quadrants of a plate
+agree. <b>% of control</b> compares each condition with the <i>lowest dose of the same strain at the same
+timepoint</i> &mdash; its own control, never another strain's and never another day's.</p>
+<div class="ctrl" id="qck"></div><div class="scroll"><div id="qc"></div></div>
+<div class="lg" id="qclg"></div><div class="note" id="qcnote"></div></div>
+
+</div><div class="tt" id="tt"></div>
+<script>
+const D = __DATA__;
+const STR=D.strains, DOS=D.doses, TPS=D.tps, STG=D.stages, U=D.unit;
+
+/* Palette resolved in JS, not via getComputedStyle: a sandboxed frame that does
+   not expose :root custom properties returns '' — which silently becomes
+   fill:black (bars survive) and stroke:none (curves vanish). Keep it this way. */
+const PAL={light:{'--surface-1':'#fcfcfb','--ink':'#0b0b0b','--ink2':'#52514e','--mut':'#898781',
+ '--grid':'#e1e0d9','--axis':'#c3c2b7','--crit':'#d03b3b',
+ '--s1':'#2a78d6','--s2':'#1baf7a','--s3':'#eb6834','--s4':'#eda100','--s5':'#e87ba4','--s6':'#008300','--s7':'#4a3aa7','--s8':'#e34948',
+ '--g1':'#b7d3f6','--g2':'#86b6ef','--g3':'#3987e5','--g4':'#1c5cab','--g5':'#0d366b','--g6':'#104281','--g7':'#08203f'},
+ dark:{'--surface-1':'#1a1a19','--ink':'#ffffff','--ink2':'#c3c2b7','--mut':'#898781',
+ '--grid':'#2c2c2a','--axis':'#383835','--crit':'#d03b3b',
+ '--s1':'#3987e5','--s2':'#199e70','--s3':'#d95926','--s4':'#c98500','--s5':'#d55181','--s6':'#008300','--s7':'#9085e9','--s8':'#e66767',
+ '--g1':'#9ec5f4','--g2':'#6da7ec','--g3':'#3987e5','--g4':'#256abf','--g5':'#104281','--g6':'#0d366b','--g7':'#08203f'}};
+/* Fixed strain colours, so a strain is the same colour here, in the PNGs and in
+   every future run. Unknown strains fall through to the cycle. */
+const FIXED={'n2':'--s1','604':'--s2','601':'--s3'};
+const TAKEN=STR.map(s=>FIXED[String(s).toLowerCase()]).filter(Boolean);
+const POOL=['--s1','--s2','--s3','--s4','--s5','--s6','--s7','--s8'].filter(x=>TAKEN.indexOf(x)<0);
+const SC={}; let pi=0;
+STR.forEach(s=>{const fx=FIXED[String(s).toLowerCase()];
+ SC[s]=fx||(POOL.length?POOL[(pi++)%POOL.length]:'--s1');});
+const RAMPS={1:[5],2:[2,5],3:[2,4,5],4:[1,3,4,5],5:[1,2,3,4,5],6:[1,2,3,4,5,6],7:[1,2,3,4,5,6,7]};
+const PRESENT=STG.filter(s=>D.cond.some(r=>(r.n[s]||0)>0));
+const GC={};(RAMPS[PRESENT.length]||[1,2,3,4,5,6,7]).forEach((n,i)=>{if(PRESENT[i])GC[PRESENT[i]]='--g'+n;});
+STG.forEach(s=>{if(!GC[s])GC[s]='--g4';});
+
+let THEME='auto';
+const isDark=()=>THEME==='dark'||(THEME==='auto'&&matchMedia('(prefers-color-scheme: dark)').matches);
+const v=n=>(PAL[isDark()?'dark':'light'][n])||'#898781';
+const inkOn=h=>{const c=String(h).replace('#','');const p=[0,2,4].map(i=>parseInt(c.substr(i,2),16)/255);
+ return (.2126*p[0]+.7152*p[1]+.0722*p[2])<.55?'#ffffff':'#0b0b0b';};
+const tt=document.getElementById('tt');
+const hov=(el,h)=>{el.addEventListener('pointerenter',()=>{tt.innerHTML=h;tt.style.opacity=1});
+ el.addEventListener('pointermove',e=>{tt.style.left=(e.clientX+14)+'px';tt.style.top=(e.clientY-10)+'px'});
+ el.addEventListener('pointerleave',()=>tt.style.opacity=0);};
+const E=(t,a,k)=>{const n=document.createElementNS('http://www.w3.org/2000/svg',t);
+ for(const p in (a||{}))n.setAttribute(p,a[p]);(k||[]).forEach(c=>n.appendChild(c));return n;};
+const T=s=>document.createTextNode(String(s));
+const f=(x,n)=>(x===null||x===undefined||isNaN(x))?'—':(+x).toFixed(n===undefined?1:n);
+const tl=t=>(Number.isInteger(t)?t:(+t).toFixed(1))+' h';
+const dl=i=>DOS[i]===null?'(no dose)':(DOS[i]+' '+U).trim();
+const get=(s,di,ti)=>D.cond.find(r=>r.strain===s&&r.di===di&&r.ti===ti);
+const repsOf=(s,di,ti)=>D.reps.filter(r=>r.strain===s&&r.di===di&&r.ti===ti);
+const qcOf=(s,di,ti)=>D.qc.find(r=>r.strain===s&&r.di===di&&r.ti===ti);
+
+document.getElementById('hdr').textContent=
+ STR.length+' strain'+(STR.length>1?'s':'')+' × '+DOS.length+' dose'+(DOS.length>1?'s':'')+
+ (U?' ('+U+')':'')+' × '+TPS.length+' timepoint'+(TPS.length>1?'s':'')+' — '+
+ TPS.map(tl).join(' / ')+'. '+D.meta.n_detections.toLocaleString()+' animals detected across '+
+ D.meta.n_plates+' plate'+(D.meta.n_plates>1?'s':'')+' and '+D.meta.n_images+' image'+
+ (D.meta.n_images>1?'s':'')+'. '+D.meta.replicate_note+'.';
+document.getElementById('caveat').innerHTML=
+ '<b>Survival % is not shown anywhere in this explorer</b>, on purpose. Its denominator collapses in a '+
+ 'dose experiment — a strain that loses 95% of its animals has its survival computed over the ~25 that '+
+ 'are left, which makes the number rise with dose — and its cutoff sits exactly on the L2/L3 boundary, '+
+ 'the least reliable call the model makes. It is still in the workbook, with this caveat beside it. '+
+ '<br>Class-confidence correction: <b>'+D.meta.rescore+'</b>.';
+
+/* ---------- 1. mean stage index ---------- */
+let SIX = TPS.length>1 ? 'time' : 'dose';
+function stageIndex(){
+ const byTime = SIX==='time';
+ const cols = byTime ? DOS.length : TPS.length;
+ const pw=Math.max(190,330-(cols-2)*22), ph=190, padL=62,padT=30,padB=52,gap=30;
+ const W=padL+cols*(pw+gap), H=ph+padT+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Mean stage index'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ const xs = byTime ? TPS : DOS.map((_,i)=>i);
+ const xmin = byTime ? Math.min.apply(null,TPS) : 0;
+ const xmax = byTime ? Math.max.apply(null,TPS) : DOS.length-1;
+ for(let ci=0;ci<cols;ci++){
+  const ox=padL+ci*(pw+gap), oy=padT, iw=pw-56;
+  const X=x=>ox+(xmax===xmin?iw/2:iw*(x-xmin)/(xmax-xmin));
+  const Y=y=>oy+ph-ph*(Math.min(Math.max(y,0.8),5.3)-0.8)/4.5;
+  [1,2,3,4,5].forEach(g=>{const y=Y(g);
+   svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
+   if(ci===0)svg.appendChild(E('text',{x:ox-8,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':10},
+     [T(g+'  '+(['L1','L2','L3','L4','adult'][g-1]))]));});
+  svg.appendChild(E('text',{x:ox+iw/2,y:oy-12,'text-anchor':'middle',fill:v('--ink'),'font-size':12.5,
+    'font-weight':700},[T(byTime?dl(ci):tl(TPS[ci]))]));
+  STR.forEach(s=>{
+   const pts=[];
+   for(let k=0;k<xs.length;k++){
+    const di = byTime ? ci : k, ti = byTime ? k : ci;
+    const r=get(s,di,ti); if(!r||r.si_mean===null)continue;
+    pts.push({x:xs[k],r:r,di:di,ti:ti});
+    repsOf(s,di,ti).forEach((q,qi)=>{ if(q.stage_index===null)return;
+     svg.appendChild(E('circle',{cx:X(xs[k])+((qi%4)-1.5)*3.4,cy:Y(q.stage_index),r:2.4,
+       fill:v(SC[s]),opacity:.32}));});
+   }
+   if(!pts.length)return;
+   svg.appendChild(E('path',{d:pts.map((p,i)=>(i?'L':'M')+X(p.x)+' '+Y(p.r.si_mean)).join(' '),
+     fill:'none',stroke:v(SC[s]),'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'}));
+   pts.forEach(p=>{const sd=p.r.si_sd, cx=X(p.x);
+    if(sd!==null&&sd>0)svg.appendChild(E('path',{d:'M'+cx+' '+Y(p.r.si_mean+sd)+'V'+Y(p.r.si_mean-sd),
+      stroke:v(SC[s]),'stroke-width':1.3,opacity:.7}));
+    const c=E('circle',{cx:cx,cy:Y(p.r.si_mean),r:4.4,fill:v(SC[s]),stroke:v('--surface-1'),'stroke-width':1.6});
+    hov(c,'<b>'+s+' · '+dl(p.di)+' · '+tl(TPS[p.ti])+'</b><br>mean stage index '+f(p.r.si_mean,2)+
+        ' ± '+f(p.r.si_sd,2)+' SD<br>'+p.r.n_replicates+' '+p.r.replicate_unit+
+        (p.r.n_replicates===1?'':'s')+' · '+p.r.pooled_total+' animals');
+    svg.appendChild(c);});
+  });
+  xs.forEach((x,k)=>svg.appendChild(E('text',{x:X(x),y:oy+ph+18,'text-anchor':'middle',fill:v('--mut'),
+    'font-size':10},[T(byTime?tl(x):dl(k))])));
+  svg.appendChild(E('text',{x:ox+iw/2,y:oy+ph+38,'text-anchor':'middle',fill:v('--mut'),'font-size':10},
+    [T(byTime?'time':(U?'dose ('+U+')':'dose'))]));
+  svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+ }
+ const el=document.getElementById('si'); el.innerHTML=''; el.appendChild(svg);
+ document.getElementById('silg').innerHTML=STR.map(s=>'<span><i style="background:'+v(SC[s])+'"></i>'+s+'</span>').join('')
+  +'<span style="color:var(--mut)">bar = ±1 SD · faint dots = individual replicates</span>';
+ document.getElementById('sicap').textContent=
+  'L1=1, L2=2, L3=3, L4=4, adult=5; eggs excluded. The mean is taken per plate first and then averaged, '+
+  'so a 600-animal plate does not outvote a 25-animal one. '+D.meta.replicate_note+'.';
+}
+function sixBtns(){const c=document.getElementById('six'); c.innerHTML='<b>X axis</b>';
+ [['time','Timepoint'],['dose','Dose']].forEach(kv=>{const b=document.createElement('button');
+  b.textContent=kv[1]; b.setAttribute('aria-pressed',String(kv[0]===SIX));
+  b.onclick=()=>{SIX=kv[0];sixBtns();stageIndex();}; c.appendChild(b);});}
+
+/* ---------- 2. stage composition ---------- */
+function composition(){
+ const pw=Math.max(150,215-(TPS.length-3)*14),ph=150,padL=64,padT=34,padB=30,gapC=26,gapR=42;
+ const W=padL+TPS.length*(pw+gapC), H=DOS.length*(ph+gapR)+padT+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Stage composition'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ DOS.forEach((d,ri)=>TPS.forEach((t,ci)=>{
+  const ox=padL+ci*(pw+gapC), oy=padT+ri*(ph+gapR);
+  const bw=Math.min(46,pw/(STR.length+0.9)*0.78), slot=pw/STR.length;
+  [0,50,100].forEach(g=>{const y=oy+ph-ph*g/100;
+   svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
+   if(ci===0)svg.appendChild(E('text',{x:ox-8,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':10},[T(g)]));});
+  if(ri===0)svg.appendChild(E('text',{x:ox+pw/2,y:oy-14,'text-anchor':'middle',fill:v('--ink'),'font-size':12.5,'font-weight':700},[T(tl(t))]));
+  if(ci===0)svg.appendChild(E('text',{x:18,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink2'),'font-size':11.5,'font-weight':600,transform:'rotate(-90 18 '+(oy+ph/2)+')'},[T(dl(ri))]));
+  STR.forEach((s,si)=>{const r=get(s,ri,ci); if(!r)return;
+   const cx=ox+slot*(si+0.5), x=cx-bw/2; let acc=0;
+   STG.forEach(st=>{const c=r.n[st]||0, pct=r.pct[st]; if(!(pct>0))return;
+    const h=ph*pct/100, y=oy+ph-ph*acc/100-h;
+    const rc=E('rect',{x:x,y:y,width:bw,height:Math.max(h,.6),fill:v(GC[st]),stroke:v('--surface-1'),'stroke-width':1.2});
+    hov(rc,'<b>'+s+' · '+dl(ri)+' · '+tl(t)+'</b><br>'+st+': '+c+' animals ('+pct.toFixed(1)+'%)');
+    svg.appendChild(rc);
+    if(pct>=11)svg.appendChild(E('text',{x:cx,y:y+h/2+3.5,'text-anchor':'middle',
+      fill:inkOn(v(GC[st])),'font-size':9.5},[T(Math.round(pct))]));
+    acc+=pct;});
+   svg.appendChild(E('text',{x:cx,y:oy-3,'text-anchor':'middle',fill:v('--mut'),'font-size':8.8},[T('n='+r.pooled_total)]));
+   svg.appendChild(E('text',{x:cx,y:oy+ph+15,'text-anchor':'middle',fill:v(SC[s]),'font-size':10.5,'font-weight':600},[T(s)]));});
+  svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+ }));
+ const el=document.getElementById('comp'); el.innerHTML=''; el.appendChild(svg);
+ document.getElementById('complg').innerHTML=STG.map(s=>'<span><i style="background:'+v(GC[s])+'"></i>'+s+'</span>').join('');
+}
+
+/* ---------- 3. body size ---------- */
+function sizePanel(){
+ const card=document.getElementById('sizecard');
+ if(!D.size||!D.size.groups||!Object.keys(D.size.groups).length){card.style.display='none';return;}
+ card.style.display='';
+ const X=D.size.x, n=X.length;
+ const pw=Math.max(170,240-(TPS.length-3)*16),ph=118,padL=64,padT=40,padB=46,gapC=26,gapR=34;
+ const W=padL+TPS.length*(pw+gapC), H=DOS.length*(ph+gapR)+padT+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Body size distribution'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ const lx=Math.log(X[0]), hx=Math.log(X[n-1]);
+ const ticks=[20,30,40,60,80,120,160,240].filter(z=>z>=X[0]&&z<=X[n-1]);
+ let drawn=0;
+ DOS.forEach((d,ri)=>TPS.forEach((t,ci)=>{
+  const ox=padL+ci*(pw+gapC), oy=padT+ri*(ph+gapR);
+  const PX=z=>ox+pw*(Math.log(z)-lx)/(hx-lx), PY=y=>oy+ph-ph*y;
+  ticks.forEach(z=>{svg.appendChild(E('line',{x1:PX(z),x2:PX(z),y1:oy,y2:oy+ph,stroke:v('--grid'),'stroke-width':.8}));
+   if(ri===DOS.length-1)svg.appendChild(E('text',{x:PX(z),y:oy+ph+29,'text-anchor':'middle',fill:v('--mut'),'font-size':9.5},[T(z)]));});
+  if(ri===0)svg.appendChild(E('text',{x:ox+pw/2,y:oy-13,'text-anchor':'middle',fill:v('--ink'),'font-size':12.5,'font-weight':700},[T(tl(t))]));
+  if(ci===0)svg.appendChild(E('text',{x:18,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink2'),'font-size':11.5,'font-weight':600,transform:'rotate(-90 18 '+(oy+ph/2)+')'},[T(dl(ri))]));
+  STR.forEach((s,si)=>{const r=get(s,ri,ci); if(!r)return;
+   const g=D.size.groups[r.condition+' @ '+(TPS[ci])+'h']; if(!g||!g.y)return;
+   drawn++;
+   let dsc='M'+PX(X[0])+' '+PY(0);
+   g.y.forEach((y,i)=>{dsc+='L'+PX(X[i])+' '+PY(y);});
+   dsc+='L'+PX(X[n-1])+' '+PY(0);
+   svg.appendChild(E('path',{d:dsc+'Z',fill:v(SC[s]),opacity:.13}));
+   svg.appendChild(E('path',{d:dsc.replace(/Z$/,''),fill:'none',stroke:v(SC[s]),'stroke-width':2,
+     'stroke-linejoin':'round','stroke-linecap':'round'}));
+   const tri=E('path',{d:'M'+PX(g.p50)+' '+(oy+ph+6)+'l-4.5 7h9z',fill:v(SC[s])});
+   hov(tri,'<b>'+s+' · '+dl(ri)+' · '+tl(t)+'</b><br>median '+g.p50+' px · '+g.n+' animals'+
+       '<br>p25–p75 '+g.p25+'–'+g.p75+' px');
+   svg.appendChild(tri);
+   svg.appendChild(E('text',{x:ox+2+si*42,y:oy-4,fill:v(SC[s]),'font-size':8.6},[T('n='+g.n)]));});
+  svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+ }));
+ const el=document.getElementById('size'); el.innerHTML=''; el.appendChild(svg);
+ document.getElementById('sizelg').innerHTML=STR.map(s=>'<span><i style="background:'+v(SC[s])+'"></i>'+s+'</span>').join('')
+  +'<span style="color:var(--mut)">body size √(w·h) in px, log scale · ▲ median · '
+  +D.size.n_total.toLocaleString()+' animals · '+drawn+' curve'+(drawn===1?'':'s')
+  +' (a group needs ≥8 animals)</span>';
+}
+
+/* ---------- 4. quality control ---------- */
+const QCM={n:{k:'animals_per_plate_mean',sd:'animals_per_plate_sd',lab:'Animals detected per plate',
+              ylab:'animals / plate'},
+           pct:{k:'pct_of_control',sd:null,lab:'…as % of this strain’s own lowest dose',
+                ylab:'% of control',ref:100},
+           cv:{k:'quadrant_cv_pct_mean',sd:null,hi:'quadrant_cv_pct_max',
+               lab:'Quadrant-to-quadrant spread',ylab:'SD across quadrants (% of plate mean)'}};
+let QK='n';
+function qcPanel(){
+ const M=QCM[QK];
+ const cells=[]; DOS.forEach((d,di)=>TPS.forEach((t,ti)=>cells.push([di,ti])));
+ const pw=Math.max(360,Math.min(980,90*cells.length+140)), ph=210, padL=62,padT=22,padB=58;
+ const W=pw+padL, H=ph+padT+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Quality control'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ let hi=0;
+ cells.forEach(c=>STR.forEach(s=>{const r=qcOf(s,c[0],c[1]); if(!r)return;
+  const val=r[M.k], top=(M.hi?Math.max(val||0,r[M.hi]||0):val);
+  if(top!==null&&!isNaN(top)&&top>hi)hi=top;}));
+ if(M.ref&&M.ref>hi)hi=M.ref;
+ hi=hi*1.15||1;
+ const iw=pw-30, ox=padL, oy=padT;
+ const Y=y=>oy+ph-ph*Math.min(Math.max(y,0),hi)/hi;
+ for(let g=0;g<=4;g++){const val=hi*g/4, y=Y(val);
+  svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
+  svg.appendChild(E('text',{x:ox-8,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':10},
+    [T(val>=100?Math.round(val):val.toFixed(hi<10?1:0))]));}
+ if(M.ref){const y=Y(M.ref);
+  svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:y,y2:y,stroke:v('--crit'),'stroke-width':1.2,'stroke-dasharray':'4 3'}));
+  svg.appendChild(E('text',{x:ox+iw+2,y:y+3.5,fill:v('--crit'),'font-size':9},[T('control')]));}
+ const gw=iw/cells.length, bw=gw/(STR.length+1.3);
+ cells.forEach((c,gi)=>{const gx=ox+gi*gw;
+  STR.forEach((s,si)=>{const r=qcOf(s,c[0],c[1]); if(!r)return;
+   const val=r[M.k]; if(val===null||isNaN(val))return;
+   const x=gx+gw/2-bw*STR.length/2+si*bw, y=Y(val);
+   const rc=E('rect',{x:x+bw*.06,y:y,width:bw*.88,height:Math.max(oy+ph-y,1.2),fill:v(SC[s]),
+     stroke:v('--surface-1'),'stroke-width':1.2});
+   hov(rc,'<b>'+s+' · '+dl(c[0])+' · '+tl(TPS[c[1]])+'</b><br>'+M.lab+': '+f(val,1)+
+       '<br>'+r.n_plates+' plate'+(r.n_plates===1?'':'s')+' · '+r.n_animals_total+' animals'+
+       '<br>per plate '+r.animals_per_plate_min+'–'+r.animals_per_plate_max+
+       (r.n_image_errors?'<br><span class="flag">'+r.n_image_errors+' image error(s)</span>':''));
+   svg.appendChild(rc);
+   const lo=(M.sd?val-(r[M.sd]||0):val), up=(M.sd?val+(r[M.sd]||0):(M.hi?(r[M.hi]||val):val));
+   if(up>val||lo<val){const cx=x+bw*.5;
+    svg.appendChild(E('path',{d:'M'+cx+' '+Y(up)+'V'+Y(Math.max(lo,0))+'M'+(cx-3.5)+' '+Y(up)+'H'+(cx+3.5)+
+      'M'+(cx-3.5)+' '+Y(Math.max(lo,0))+'H'+(cx+3.5),stroke:v('--ink2'),'stroke-width':1.1,fill:'none'}));}
+  });
+  svg.appendChild(E('text',{x:gx+gw/2,y:oy+ph+16,'text-anchor':'middle',fill:v('--mut'),'font-size':9.5},
+    [T(dl(c[0]))]));
+  if(TPS.length>1)svg.appendChild(E('text',{x:gx+gw/2,y:oy+ph+29,'text-anchor':'middle',fill:v('--mut'),
+    'font-size':9},[T(tl(TPS[c[1]]))]));});
+ svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+ svg.appendChild(E('text',{x:16,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink2'),'font-size':10.5,
+   transform:'rotate(-90 16 '+(oy+ph/2)+')'},[T(M.ylab)]));
+ const el=document.getElementById('qc'); el.innerHTML=''; el.appendChild(svg);
+ document.getElementById('qclg').innerHTML=STR.map(s=>'<span><i style="background:'+v(SC[s])+'"></i>'+s+'</span>').join('')
+  +'<span style="color:var(--mut)">'+(QK==='n'?'whisker = ±1 SD across plates':
+    QK==='cv'?'whisker top = the worst plate in the condition':'dashed line = the control')+'</span>';
+ const bits=[];
+ if(D.meta.n_errors)bits.push('<span class="flag">'+D.meta.n_errors+' image(s) errored during inference</span>');
+ if(D.meta.n_unparsed)bits.push('<span class="flag">'+D.meta.n_unparsed+
+   ' image(s) carried no dose+plate token and were grouped under __unparsed__</span>');
+ if(D.meta.gaps.length)bits.push('<span class="flag">'+D.meta.gaps.length+
+   ' condition × timepoint cell(s) missing: '+D.meta.gaps.map(g=>g.condition+' at '+tl(g.timepoint_h)).join(', ')+
+   '</span>');
+ document.getElementById('qcnote').innerHTML= bits.length ? bits.join('<br>')
+   : 'No image errors, no ungrouped images and no missing condition × timepoint cells in this run.';
+}
+function qcBtns(){const c=document.getElementById('qck'); c.innerHTML='<b>Show</b>';
+ Object.keys(QCM).forEach(k=>{const b=document.createElement('button'); b.textContent=QCM[k].lab;
+  b.setAttribute('aria-pressed',String(k===QK)); b.onclick=()=>{QK=k;qcBtns();qcPanel();}; c.appendChild(b);});}
+
+/* ---------- theme + draw ---------- */
+function themeBtns(){const c=document.getElementById('theme'); c.innerHTML='<b>Theme</b>';
+ [['auto','Auto'],['light','Light'],['dark','Dark']].forEach(kv=>{const b=document.createElement('button');
+  b.textContent=kv[1]; b.setAttribute('aria-pressed',String(kv[0]===THEME));
+  b.onclick=()=>{THEME=kv[0];
+   if(THEME==='auto')delete document.documentElement.dataset.theme;
+   else document.documentElement.dataset.theme=THEME;
+   themeBtns();draw();}; c.appendChild(b);});}
+function draw(){stageIndex();composition();sizePanel();qcPanel();}
+themeBtns();sixBtns();qcBtns();draw();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>{if(THEME==='auto')draw();});
+</script></body></html>
