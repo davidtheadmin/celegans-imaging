@@ -14,6 +14,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Optional
@@ -34,6 +35,8 @@ from survival import (
     SurvivalStatus,
     default_class_conf,
     default_exclude_classes,
+    plan_reuse,
+    resolve_timepoints,
     survival_preflight,
 )
 from sync import SyncAgent, SyncStatus
@@ -49,6 +52,185 @@ _DOT_COLORS: dict[str, str] = {
 
 _POLL_MS = 2000        # main window refresh interval
 _PROGRESS_POLL_MS = 200  # progress dialog refresh interval
+
+# ---------------------------------------------------------------------------
+# Window placement
+#
+# The launcher sits hard against the left edge at full working height, and each
+# window it opens is placed immediately to its right at the same height. Two
+# windows that tile deterministically beat two windows that land wherever the
+# window manager felt like putting them — which, with a fixed-width launcher,
+# meant the Analyze dialog regularly opened on top of the thing it was about
+# to report on.
+#
+# "Full height" means the WORK AREA, not the screen: on Windows the taskbar
+# owns the bottom strip, and a window sized to the raw screen height has its
+# footer — the Start button — underneath it.
+# ---------------------------------------------------------------------------
+
+_WINDOW_GAP = 8          # px between tiled windows
+_WINDOW_MARGIN_Y = 0     # px from the top of the work area
+_WINDOW_MARGIN_BOTTOM = 8
+# How much of the work area the window frame is assumed to eat before we
+# measure it for real. A Windows title bar is ~31 px at 100% scaling and ~46 px
+# at 150%; 56 is comfortably over both, and the correction loop gives back
+# whatever was over-reserved.
+_FRAME_RESERVE = 56
+# _fit_height calls update(), which pumps the event loop and can therefore
+# re-enter through a timer or a click. One fit at a time.
+_fitting = False
+
+
+def _window_scaling(win: tk.Misc) -> float:
+    """CustomTkinter's widget-scaling factor for this window.
+
+    This matters more than it looks. CTk overrides .geometry() and multiplies
+    the width and height it is given by this factor, while every winfo_* query
+    answers in real pixels. Feed a measured pixel height straight back into
+    geometry() on a 150% display and you get a window half again too tall —
+    which is exactly how the Start button ended up below the bottom of the
+    screen.
+    """
+    try:
+        return float(ctk.ScalingTracker.get_window_scaling(win)) or 1.0
+    except Exception:
+        return 1.0
+
+
+def _work_area_win32() -> Optional[tuple[int, int]]:
+    """The Windows work area (screen minus taskbar) from the OS itself.
+
+    wm_maxsize() was the obvious source and it is not reliable: for a Toplevel
+    it can come back as the full screen, which puts the bottom of a "full
+    height" window — and the Start button pinned to it — behind the taskbar.
+    SystemParametersInfo answers the actual question.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        SPI_GETWORKAREA = 0x0030
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
+        if not ok:
+            return None
+        w = int(rect.right - rect.left)
+        h = int(rect.bottom - rect.top)
+        if w > 200 and h > 200:
+            return w, h
+    except Exception:
+        _log.debug("SPI_GETWORKAREA failed", exc_info=True)
+    return None
+
+
+def work_area(win: tk.Misc) -> tuple[int, int]:
+    """(width, height) of the usable desktop in real pixels, taskbar excluded."""
+    native = _work_area_win32()
+    if native is not None:
+        return native
+    try:
+        w, h = win.wm_maxsize()
+        if w > 200 and h > 200:
+            return int(w), int(h)
+    except tk.TclError:
+        pass
+    return win.winfo_screenwidth(), win.winfo_screenheight()
+
+
+def _fit_height(win: tk.Misc, width: int, x: int, top: int) -> None:
+    """Size `win` to the work area below `top` — conservatively, then exactly.
+
+    ``width`` is in CTk units (unscaled), matching every other geometry call in
+    this file. The height cannot be: it comes from the work area, which is real
+    pixels, so it is converted through the widget-scaling factor.
+
+    Two things about this are hard-won.
+
+    First, the WINDOW FRAME is not part of the geometry you ask for. A window
+    placed at y=0 with height H actually occupies H plus a title bar, so asking
+    for the full work-area height puts the bottom of the window — and anything
+    pinned to it — under the taskbar. We therefore ask for less than we want by
+    ``_FRAME_RESERVE`` and let the correction loop below grow it back.
+
+    Second, update_idletasks() is NOT enough to read the result back. The
+    window manager applies a geometry change asynchronously, and idle tasks do
+    not wait for the ConfigureNotify that reports it. Measuring after
+    update_idletasks() returns the size the window had BEFORE the request —
+    which on the first call is the natural requested size, so the loop sees no
+    overflow, congratulates itself and returns without ever correcting
+    anything. That is exactly what it did. update() waits.
+    """
+    global _fitting
+    if _fitting:
+        return
+    _, work_h = work_area(win)
+    limit = work_h - _WINDOW_MARGIN_BOTTOM
+    scale = _window_scaling(win)
+    # Deliberately short of the target: too small is a cosmetic gap, too tall
+    # hides a button. The loop closes the gap from the safe side.
+    h = max(300.0, (limit - top - _FRAME_RESERVE) / scale)
+    _fitting = True
+    try:
+        win.geometry(f"{width}x{round(h)}+{int(x)}+{int(top)}")
+        for _ in range(4):
+            try:
+                win.update()
+                bottom = win.winfo_rooty() + win.winfo_height()
+            except tk.TclError:
+                return
+            delta = bottom - limit
+            if abs(delta) <= 2:
+                return
+            h = max(300.0, h - delta / scale)
+            win.geometry(f"{width}x{round(h)}+{int(x)}+{int(top)}")
+    finally:
+        _fitting = False
+
+
+def place_left_full_height(win: tk.Misc, width: int) -> None:
+    """Pin `win` to the left edge, filling the work area vertically."""
+    _fit_height(win, width, 0, _WINDOW_MARGIN_Y)
+
+
+def place_beside(win: tk.Misc, parent: tk.Misc, width: Optional[int] = None,
+                 full_height: bool = True) -> None:
+    """Place `win` immediately right of `parent`, same top edge.
+
+    ``width`` is in CTk units and is only applied when ``full_height`` is set;
+    otherwise the window keeps whatever size it asked for and only moves, which
+    avoids scaling a measured pixel width back through CTk's geometry override
+    for no reason.
+
+    If it would run off the right edge of the desktop it is pushed back on
+    screen rather than opening half-invisible; if it still does not fit beside
+    the parent it overlaps, which is the least-bad option on a small display.
+    """
+    try:
+        parent.update_idletasks()
+        win.update_idletasks()
+        sw, _ = work_area(win)
+        x = parent.winfo_rootx() + parent.winfo_width() + _WINDOW_GAP
+        own_w = win.winfo_width() if width is None else width * _window_scaling(win)
+        if x + own_w > sw:
+            x = max(0, int(sw - own_w))
+        if full_height and width is not None:
+            _fit_height(win, width, x, _WINDOW_MARGIN_Y)
+        else:
+            win.geometry(f"+{int(x)}+{int(parent.winfo_rooty())}")
+    except tk.TclError:
+        pass
+
+
+# Prefixes analysis pipelines write their output folders under. Used only to
+# list recent runs on the launcher's front page — an unknown prefix simply
+# does not show up, it never breaks anything.
+_RESULT_PREFIXES = ("_development", "_survival", "_counting", "_motility",
+                    "_crawling", "_analysis")
+_RESULT_SCAN_MAX_DIRS = 4000   # hard cap so a huge mirror cannot stall the UI
+_RESULT_SCAN_DEPTH = 3
 
 # Auto-detect file-type classification for the Review dialog. Mirrors the
 # extension sets the two generator scripts accept.
@@ -163,6 +345,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self._current = settings
         self._on_save = on_save
         self._build(settings)
+        self.update_idletasks()
+        place_beside(self, parent, full_height=False)
 
     def _entry(self, parent: tk.Widget, **kw) -> ctk.CTkEntry:
         return ctk.CTkEntry(
@@ -292,6 +476,10 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
         self._flavour_idx = 0
         self._flavour_tick = 0
         self._build()
+        # Beside the launcher, not full height: this window is six lines tall
+        # and stretching it to the screen would be absurd.
+        self.update_idletasks()
+        place_beside(self, parent, full_height=False)
         self.after(_PROGRESS_POLL_MS, self._poll)
 
     def _build(self) -> None:
@@ -368,13 +556,16 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
 # ---------------------------------------------------------------------------
 
 class AnalysisDialog(ctk.CTkToplevel):
+    _WIDTH = 520
     # Segment labels are capitalised for display; _on_segment maps each back to
     # the canonical mode string the agents/_start expect.
     _MODE_LABELS = {
         "Motility": "motility",
         "Crawling": "crawling",
         "Colony Survival": "counting",
-        "Worm Survival": "survival",
+        # User-facing rename only. The canonical mode string, the agent class
+        # and the config fields all still say "survival" — see survival.py.
+        "Development": "survival",
     }
 
     def __init__(
@@ -394,7 +585,11 @@ class AnalysisDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.title("WormScan Analysis")
         self.configure(fg_color=theme.BG)
-        self.resizable(False, False)
+        # Width fixed, height ours. The options for one mode are taller than a
+        # laptop screen, so the body scrolls and the Start/Cancel footer is
+        # pinned — previously the button that runs the analysis could sit below
+        # the bottom of the display with no way to reach it.
+        self.resizable(False, True)
         self.transient(parent)
         self.grab_set()
         self._parent = parent
@@ -409,10 +604,42 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._survival_status = survival_status
         self._on_settings_update = on_settings_update
         self._build()
+        self.update_idletasks()
+        place_beside(self, parent, self._WIDTH)
+        # Re-apply once the window manager has actually mapped the window.
+        # Some WMs (and CustomTkinter's own deferred title-bar work) resize a
+        # Toplevel just after it appears, which is enough to push a pinned
+        # footer back under the taskbar.
+        self.after(150, lambda: place_beside(self, parent, self._WIDTH))
 
     def _build(self) -> None:
         pad = {"padx": 12, "pady": 6}
-        self.grid_columnconfigure(1, weight=1)
+
+        # Footer first, packed to the bottom, so it owns its strip of the window
+        # no matter how tall the options above it get.
+        footer = ctk.CTkFrame(self, fg_color=theme.BG)
+        footer.pack(side="bottom", fill="x")
+        widgets.HairlineSeparator(footer).pack(fill="x")
+        # Messages about the run appear HERE, in this window, rather than in a
+        # pop-up. Two attempts at a pop-up flashed and vanished; a frame cannot.
+        self._notice = widgets.InlineNotice(footer)
+        self._footer_buttons = ctk.CTkFrame(footer, fg_color="transparent")
+        btn_frame = self._footer_buttons
+        btn_frame.pack(fill="x", pady=(8, 12))
+        widgets.primary_button(btn_frame, "Start", self._start).pack(
+            side="right", padx=(6, 14)
+        )
+        widgets.secondary_button(btn_frame, "Cancel", self.destroy).pack(
+            side="right", padx=6
+        )
+
+        scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        scroll.pack(side="top", fill="both", expand=True)
+        form = ctk.CTkFrame(scroll, fg_color="transparent")
+        form.pack(fill="both", expand=True)
+        form.grid_columnconfigure(1, weight=1)
+        self._form = form
+
         chk_kw = dict(
             font=theme.body(), text_color=theme.TEXT,
             fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
@@ -420,12 +647,12 @@ class AnalysisDialog(ctk.CTkToplevel):
 
         # Row 0 — analysis type (segmented control; _mode keeps canonical values)
         ctk.CTkLabel(
-            self, text="Analysis type", font=theme.body(),
+            form, text="Analysis type", font=theme.body_bold(),
             text_color=theme.TEXT, anchor="w",
         ).grid(row=0, column=0, sticky="w", **pad)
         self._mode = tk.StringVar(value="motility")
         self._mode_seg = ctk.CTkSegmentedButton(
-            self, values=list(self._MODE_LABELS.keys()),
+            form, values=list(self._MODE_LABELS.keys()),
             command=self._on_segment, font=theme.body(),
             fg_color=theme.CARD, text_color=theme.TEXT,
             selected_color=theme.ACCENT, selected_hover_color=theme.ACCENT_HOVER,
@@ -435,21 +662,25 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._mode_seg.set("Motility")
         self._mode_seg.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
 
-        # Row 1 — folder picker
-        ctk.CTkLabel(
-            self, text="Video folder", font=theme.body(),
+        # Row 1 — single folder picker. Every mode but Development uses it;
+        # Development hides it and uses the folder LIST inside its own card,
+        # because one run there spans several folders (one per timepoint).
+        self._folder_label = ctk.CTkLabel(
+            form, text="Video folder", font=theme.body_bold(),
             text_color=theme.TEXT, anchor="w",
-        ).grid(row=1, column=0, sticky="w", **pad)
+        )
+        self._folder_label.grid(row=1, column=0, sticky="w", **pad)
         self._folder_var = tk.StringVar(value=self._settings.mirror_root)
-        ctk.CTkEntry(
-            self, textvariable=self._folder_var, width=300,
+        self._folder_entry = ctk.CTkEntry(
+            form, textvariable=self._folder_var, width=300,
             fg_color=theme.CARD, text_color=theme.TEXT,
             border_color=theme.HAIRLINE, border_width=1,
             corner_radius=theme.BTN_RADIUS, font=theme.body(),
-        ).grid(row=1, column=1, sticky="ew", **pad)
-        _browse_btn = widgets.secondary_button(self, "…", self._browse)
-        _browse_btn.configure(width=36)
-        _browse_btn.grid(row=1, column=2, **pad)
+        )
+        self._folder_entry.grid(row=1, column=1, sticky="ew", **pad)
+        self._browse_btn = widgets.secondary_button(form, "…", self._browse)
+        self._browse_btn.configure(width=36)
+        self._browse_btn.grid(row=1, column=2, **pad)
 
         # Min fragment length (s) is built inside the motility Card (see below)
         # so it shows/hides with that card. _start still reads _threshold_var.
@@ -460,7 +691,7 @@ class AnalysisDialog(ctk.CTkToplevel):
         # Row 4 — clear-cache checkbox
         self._clear_cache_var = tk.BooleanVar(value=False)
         self._clear_cache_check = ctk.CTkCheckBox(
-            self, text="Clear cache before run",
+            form, text="Clear cache before run",
             variable=self._clear_cache_var, **chk_kw,
         )
         self._clear_cache_check.grid(
@@ -468,7 +699,7 @@ class AnalysisDialog(ctk.CTkToplevel):
         )
 
         # Row 5 — render options (motility): unchanged motility binding
-        self._motility_render_frame = widgets.Card(self, title="Video render options")
+        self._motility_render_frame = widgets.Card(form, title="Video render options")
         render_frame = self._motility_render_frame.content
         self._want_tracked = tk.BooleanVar(value=False)
         self._want_curvature = tk.BooleanVar(value=False)
@@ -525,7 +756,7 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._threshold_help.pack(anchor="w", pady=(2, 0))
 
         # Row 5 — render options (crawling): tracking, side-by-side, path traces
-        self._crawling_render_frame = widgets.Card(self, title="Video render options")
+        self._crawling_render_frame = widgets.Card(form, title="Video render options")
         crawl_frame = self._crawling_render_frame.content
         self._crawl_tracked = tk.BooleanVar(value=False)
         self._crawl_sidebyside = tk.BooleanVar(value=False)
@@ -577,12 +808,12 @@ class AnalysisDialog(ctk.CTkToplevel):
 
         # Row 5 — counting options: the two prominent tuning knobs. Everything
         # else uses counting.py defaults.
-        self._counting_frame = widgets.Card(self, title="Colony Survival options")
+        self._counting_frame = widgets.Card(form, title="Colony Survival options")
         count_frame = self._counting_frame.content
         _split_row = ctk.CTkFrame(count_frame, fg_color="transparent")
         _split_row.pack(anchor="w", fill="x")
         ctk.CTkLabel(
-            _split_row, text="Split sensitivity", font=theme.body(),
+            _split_row, text="Split sensitivity", font=theme.body_bold(),
             text_color=theme.TEXT, anchor="w",
         ).pack(side="left")
         self._count_split = tk.StringVar(
@@ -596,7 +827,7 @@ class AnalysisDialog(ctk.CTkToplevel):
         _mincol_row = ctk.CTkFrame(count_frame, fg_color="transparent")
         _mincol_row.pack(anchor="w", fill="x", pady=(6, 0))
         ctk.CTkLabel(
-            _mincol_row, text="Min colony diameter (µm)", font=theme.body(),
+            _mincol_row, text="Min colony diameter (µm)", font=theme.body_bold(),
             text_color=theme.TEXT, anchor="w",
         ).pack(side="left")
         self._count_min_um = tk.StringVar(
@@ -606,15 +837,120 @@ class AnalysisDialog(ctk.CTkToplevel):
             _mincol_row, self._count_min_um,
             from_=0.0, to=2000.0, increment=50.0, fmt="%.0f",
         ).pack(side="left", padx=(6, 0))
-        ctk.CTkLabel(
-            count_frame,
-            text="Higher split sensitivity = fewer splits (big colonies stay whole). "
-                 "Min diameter rejects specks below this size.",
-            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
-            justify="left", wraplength=360,
-        ).pack(anchor="w", pady=(2, 0))
 
-        # Row 5 — worm-survival options: one confidence slider PER STAGE CLASS,
+        # Detection sensitivity: the automatic (Otsu) threshold adapts to each
+        # plate, but on a sparse plate it still lands above the faint colonies
+        # and only their dense centres survive. This dial scales that threshold
+        # — 5 leaves it exactly where it has always been, so an untouched
+        # install counts as it did before this slider existed.
+        _sens_row = ctk.CTkFrame(count_frame, fg_color="transparent")
+        _sens_row.pack(anchor="w", fill="x", pady=(8, 0))
+        ctk.CTkLabel(
+            _sens_row, text="Detection sensitivity", font=theme.body_bold(),
+            text_color=theme.TEXT, anchor="w",
+        ).pack(side="left")
+        self._count_sens = tk.DoubleVar(
+            value=float(getattr(self._settings, "counting_sensitivity", 5.0))
+        )
+        self._count_sens_label = ctk.CTkLabel(
+            _sens_row, text=f"{self._count_sens.get():.1f}", font=theme.body(),
+            text_color=theme.TEXT_2, width=32,
+        )
+        ctk.CTkSlider(
+            _sens_row, from_=0.0, to=10.0, number_of_steps=20,
+            variable=self._count_sens,
+            command=lambda v: self._count_sens_label.configure(
+                text=f"{float(v):.1f}"),
+            fg_color=theme.CARD, progress_color=theme.ACCENT,
+            button_color=theme.ACCENT, button_hover_color=theme.ACCENT_HOVER,
+            width=150,
+        ).pack(side="left", padx=(8, 6))
+        self._count_sens_label.pack(side="left")
+
+        # Colony smoothing: colonies that grow as loose, feathery clusters are
+        # not solid discs. Thresholding that texture at full resolution
+        # splinters one colony into dozens of fragments. Blurring the detection
+        # map first at roughly one colony-feature width puts it back together.
+        # 0 = off, which is what the pipeline did before this knob.
+        _smooth_row = ctk.CTkFrame(count_frame, fg_color="transparent")
+        _smooth_row.pack(anchor="w", fill="x", pady=(6, 0))
+        ctk.CTkLabel(
+            _smooth_row, text="Colony smoothing (µm)", font=theme.body_bold(),
+            text_color=theme.TEXT, anchor="w",
+        ).pack(side="left")
+        self._count_smooth = tk.StringVar(
+            value=f"{float(getattr(self._settings, 'counting_smooth_um', 0.0)):.0f}"
+        )
+        widgets.Spin(
+            _smooth_row, self._count_smooth,
+            from_=0.0, to=1000.0, increment=25.0, fmt="%.0f",
+        ).pack(side="left", padx=(6, 0))
+
+        # Fixed threshold. The automatic (Otsu) threshold is derived from each
+        # plate separately, which makes every plate its own reference — fine for
+        # reading one image, wrong for a dose-response, where the entire question
+        # is how plates compare. Ticking this applies ONE optical-density level
+        # to every plate in the run, so the numbers are comparable across
+        # conditions. Off by default: existing runs keep their behaviour.
+        self._count_fixed = tk.BooleanVar(
+            value=(getattr(self._settings, "counting_threshold_mode", "otsu")
+                   == "fixed")
+        )
+        ctk.CTkCheckBox(
+            count_frame,
+            text="Same threshold for every plate (for dose series)",
+            variable=self._count_fixed, command=lambda: self._sync_counting_mode(),
+            **chk_kw,
+        ).pack(anchor="w", pady=(8, 0))
+
+        self._count_od_row = ctk.CTkFrame(count_frame, fg_color="transparent")
+        self._count_od_row.pack(anchor="w", fill="x", pady=(4, 0))
+        ctk.CTkLabel(
+            self._count_od_row, text="Stain threshold (OD)", font=theme.body_bold(),
+            text_color=theme.TEXT, anchor="w",
+        ).pack(side="left")
+        self._count_od = tk.StringVar(
+            value=f"{float(getattr(self._settings, 'counting_od_threshold', 0.05)):.3f}"
+        )
+        widgets.Spin(
+            self._count_od_row, self._count_od,
+            from_=0.005, to=1.0, increment=0.01, fmt="%.3f",
+        ).pack(side="left", padx=(6, 0))
+
+        widgets.HairlineSeparator(count_frame).pack(fill="x", pady=(10, 8))
+        widgets.HelpBlock(count_frame, [
+            ("Split sensitivity",
+             "How eagerly a touching clump is cut into separate colonies. "
+             "HIGHER = fewer splits, so big colonies stay whole. Lower it if "
+             "one colony is being counted as several."),
+            ("Min colony diameter",
+             "Anything smaller than this is treated as a speck and not "
+             "counted. Raise it if dust and scratches are appearing as "
+             "colonies."),
+            ("Detection sensitivity",
+             "5 leaves the automatic threshold exactly where it has always "
+             "been. Raise it when a sparse or faint plate comes out empty, or "
+             "when only the dense centres of colonies get outlined. It has no "
+             "effect at all when \"Same threshold for every plate\" is ticked."),
+            ("Colony smoothing",
+             "Blurs the detection map before thresholding, so a feathery, "
+             "loose colony counts as one object instead of dozens of "
+             "fragments. 0 is off; try about 100 µm for loose mammalian "
+             "colonies."),
+            ("Same threshold for every plate",
+             "Tick this whenever you are COMPARING conditions. The automatic "
+             "threshold is computed per plate, which makes every plate its own "
+             "reference — fine for reading one image, wrong for a dose series, "
+             "because a sparse plate and a dense one are then measured against "
+             "different cuts and their numbers do not compare."),
+            (None,
+             "After any run, open overlays/ and check that what was outlined "
+             "is what you would have counted."),
+        ], wraplength=440).pack(anchor="w", fill="x")
+        self._sync_counting_mode()
+
+        # Row 5 — Development options: the folder list, one confidence
+        # slider PER STAGE CLASS, the class-confidence correction,
         # plus save-previews. Staging inference runs in the vision venv; no
         # cache/render/threshold.
         #
@@ -627,9 +963,41 @@ class AnalysisDialog(ctk.CTkToplevel):
         # infer_stage.py reads when nothing is passed — so these sliders start
         # on the values the "Analyze on laptop" button already uses. The class
         # list comes from that file too (this venv cannot load the model).
-        self._survival_frame = widgets.Card(self, title="Worm Survival options")
+        self._survival_frame = widgets.Card(form, title="Development options")
         surv_frame = self._survival_frame.content
+        _WRAP = 440
 
+        # --- folder list (one folder per timepoint) ------------------------
+        ctk.CTkLabel(
+            surv_frame, text="Image folders — one per timepoint",
+            font=theme.body_bold(), text_color=theme.TEXT, anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        self._surv_folders = widgets.FolderTimeList(surv_frame, max_rows=4)
+        self._surv_folders.pack(fill="x", pady=(0, 4))
+        _fbtns = ctk.CTkFrame(surv_frame, fg_color="transparent")
+        _fbtns.pack(anchor="w", fill="x", pady=(0, 2))
+        widgets.secondary_button(
+            _fbtns, "Add folder…", self._surv_add_folder).pack(side="left")
+        widgets.secondary_button(
+            _fbtns, "Remove selected", self._surv_remove_folder,
+        ).pack(side="left", padx=(8, 0))
+        widgets.HelpBlock(surv_frame, [
+            ("Timepoint (h)",
+             "Type the elapsed hours beside a folder, or leave it blank to "
+             "read the capture times out of the image filenames. A folder "
+             "with neither stops the run rather than quietly landing at 0 h."),
+            (None,
+             "One folder is a list of one. Results are written into the FIRST "
+             "folder in the list."),
+        ], wraplength=_WRAP).pack(anchor="w", fill="x", pady=(2, 6))
+
+        widgets.HairlineSeparator(surv_frame).pack(fill="x", pady=(4, 6))
+
+        # --- per-stage confidence, folded away by default ------------------
+        #
+        # Six sliders is the tallest block in this dialog and the one people
+        # touch least; open it when you mean to, not every time you open the
+        # window.
         self._surv_defaults = default_class_conf()
         saved = dict(getattr(self._settings, "survival_class_conf", None) or {})
         self._surv_conf_vars: dict[str, tk.DoubleVar] = {}
@@ -645,16 +1013,32 @@ class AnalysisDialog(ctk.CTkToplevel):
                      "(launcher/vision/stage_conf.json missing or unreadable). "
                      "The run will use the inference script's built-in default.",
                 font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
-                justify="left", wraplength=360,
+                justify="left", wraplength=_WRAP,
             ).pack(anchor="w")
         else:
-            ctk.CTkLabel(
-                surv_frame, text="Confidence per stage", font=theme.body(),
-                text_color=theme.TEXT, anchor="w",
-            ).pack(anchor="w", pady=(0, 4))
+            n = len(self._surv_defaults)
+            self._surv_conf_section = widgets.Collapsible(
+                surv_frame, "Confidence per stage",
+                subtitle=f"{n} slider{'' if n == 1 else 's'} · defaults are "
+                         "usually right",
+                expanded=False,
+            )
+            self._surv_conf_section.pack(anchor="w", fill="x")
+            sliders = self._surv_conf_section.content
+
+            widgets.HelpBlock(sliders, [
+                (None,
+                 "The minimum score a detection of that stage needs before it "
+                 "is counted at all. Raising one drops its uncertain calls "
+                 "from the counts ENTIRELY — it does not reassign them to a "
+                 "neighbouring stage. Defaults come from "
+                 "vision/stage_conf.json, the same file the \"Analyze on "
+                 "laptop\" button uses, so leaving them alone keeps the two "
+                 "paths identical."),
+            ], wraplength=_WRAP - 20).pack(anchor="w", fill="x", pady=(2, 6))
 
             for stage, default in self._surv_defaults.items():
-                row = ctk.CTkFrame(surv_frame, fg_color="transparent")
+                row = ctk.CTkFrame(sliders, fg_color="transparent")
                 row.pack(anchor="w", fill="x", pady=1)
                 ctk.CTkLabel(
                     row, text=stage, font=theme.body(), text_color=theme.TEXT,
@@ -682,57 +1066,116 @@ class AnalysisDialog(ctk.CTkToplevel):
                 self._surv_conf_labels[stage] = val_label
 
             widgets.secondary_button(
-                surv_frame, "Reset to defaults", self._reset_survival_conf,
-            ).pack(anchor="w", pady=(6, 0))
+                sliders, "Reset to defaults", self._reset_survival_conf,
+            ).pack(anchor="w", pady=(6, 2))
+
+        widgets.HairlineSeparator(surv_frame).pack(fill="x", pady=(8, 6))
+
+        # --- the three switches --------------------------------------------
+        #
+        # Class-confidence correction is a SWITCH, not a value: ticked passes no
+        # alpha, so vision/stage_conf.json's number applies; unticked forces 0,
+        # an exact no-op. Nothing here knows what the alpha is, which is what
+        # keeps that file the single source of truth.
+        self._surv_rescore = tk.BooleanVar(
+            value=bool(getattr(self._settings, "survival_rescore", True))
+        )
+        ctk.CTkCheckBox(
+            surv_frame,
+            text="Correct for uneven class confidence  (recommended)",
+            variable=self._surv_rescore, **chk_kw,
+        ).pack(anchor="w", pady=(0, 0))
 
         # Eggs off by default: a plate is almost never a question about worms
-        # AND eggs at once. Eggs sit outside the survival denominator either
-        # way (SURVIVAL_CONFIG), so this changes the egg column and the box
-        # clutter, never the survival percentage.
+        # AND eggs at once, and eggs carry no developmental stage either way.
         self._surv_count_eggs = tk.BooleanVar(
             value=bool(getattr(self._settings, "survival_count_eggs", False))
         )
         ctk.CTkCheckBox(
-            surv_frame, text="Count eggs (for egg survival / bleached-egg drops)",
+            surv_frame, text="Count eggs",
             variable=self._surv_count_eggs, **chk_kw,
-        ).pack(anchor="w", pady=(8, 0))
-        ctk.CTkLabel(
-            surv_frame,
-            text="Off: eggs are not detected at all, and the report says "
-                 "\"not counted\" rather than 0.",
-            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
-            justify="left", wraplength=360,
-        ).pack(anchor="w", pady=(0, 2))
+        ).pack(anchor="w", pady=(6, 0))
 
         self._surv_save_preview = tk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            surv_frame, text="Save preview PNGs (boxes drawn per image)",
+            surv_frame, text="Save preview PNGs",
             variable=self._surv_save_preview, **chk_kw,
-        ).pack(anchor="w", pady=(8, 0))
-        ctk.CTkLabel(
-            surv_frame,
-            text="Detects developmental stage per worm (tiled), then scores "
-                 "survival by plate and condition. Raising a stage's threshold "
-                 "drops its uncertain calls from BOTH the numerator and the "
-                 "denominator — it does not reassign them. Previews are for "
-                 "spot-checking and slow the run.",
-            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
-            justify="left", wraplength=360,
-        ).pack(anchor="w", pady=(2, 0))
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Off by default. Reuse is the normal path — it is what makes analysing
+        # each timepoint as it arrives and combining them later cheap — and the
+        # cache invalidates itself whenever a setting that changes the
+        # detections changes. This is the escape hatch.
+        self._surv_force = tk.BooleanVar(
+            value=bool(getattr(self._settings, "survival_force_reanalyze", False))
+        )
+        ctk.CTkCheckBox(
+            surv_frame, text="Re-analyse images even if results already exist",
+            variable=self._surv_force, **chk_kw,
+        ).pack(anchor="w", pady=(6, 0))
+
+        widgets.HelpBlock(surv_frame, [
+            ("Correct for uneven class confidence",
+             "The stage classes are not scored on a common scale — the L2 "
+             "detector almost never reports a high number even when it is "
+             "right. This rebalances them before the final call. It RELABELS "
+             "animals; it never changes how many were found."),
+            ("Count eggs",
+             "Off, eggs are not detected at all and the report says \"not "
+             "counted\" rather than 0. Tick it for an egg-survival or "
+             "bleached-egg experiment. Eggs never enter the stage index."),
+            ("Save preview PNGs",
+             "One image per frame with the boxes drawn on, for spot-checking. "
+             "Useful once, slow every time. Ticking this also forces every "
+             "image to be analysed again, because the previews are drawn "
+             "during inference."),
+            ("Re-analyse images even if results already exist",
+             "Normally an image that a previous run already analysed is not "
+             "sent through the model again — its detections are read back from "
+             "that run. So you can analyse each timepoint as it comes off the "
+             "microscope and then run them all together for the figures, and "
+             "the combining run does almost no work. Tick this only to force a "
+             "clean re-run."),
+        ], wraplength=_WRAP).pack(anchor="w", fill="x", pady=(8, 0))
+
+        widgets.HairlineSeparator(surv_frame).pack(fill="x", pady=(10, 6))
+        widgets.HelpBlock(surv_frame, [
+            ("Reusing earlier work",
+             "Reuse is decided image by image, and it is dropped automatically "
+             "whenever anything that changes which animals get detected "
+             "changes — the per-stage confidences, the egg setting, the model "
+             "file. The class-confidence correction is the exception: it can "
+             "be switched on or off without re-analysing, because it only "
+             "relabels detections that are already saved. The log says exactly "
+             "what was reused and what was not."),
+            ("What this run produces",
+             "explorer.html (interactive, self-contained), four figures as "
+             "PNGs, development_results.xlsx, and soft_stage_scores.csv — "
+             "written into a _development_<timestamp> folder inside the first "
+             "image folder."),
+            ("What it measures",
+             "Developmental stage per worm, tiled across the frame, reported "
+             "as mean stage index, stage composition and body size per plate "
+             "and condition. Survival % is in the workbook but in none of the "
+             "figures — its denominator collapses in a dose experiment."),
+        ], wraplength=_WRAP).pack(anchor="w", fill="x")
 
         # Show the render frame matching the selected analysis type.
         self._mode.trace_add("write", self._on_mode_change)
         self._on_mode_change()
 
-        # Buttons
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=6, column=0, columnspan=3, pady=(4, 12))
-        widgets.primary_button(btn_frame, "Start", self._start).pack(
-            side="left", padx=6
-        )
-        widgets.secondary_button(btn_frame, "Cancel", self.destroy).pack(
-            side="left", padx=6
-        )
+
+    def _sync_counting_mode(self) -> None:
+        """Show the OD box only when the fixed-threshold checkbox is ticked.
+
+        Leaving a greyed-out absolute threshold on screen while the run is
+        actually using a per-plate one is how someone ends up believing two
+        plates were measured the same way when they were not.
+        """
+        if self._count_fixed.get():
+            self._count_od_row.pack(anchor="w", fill="x", pady=(4, 0))
+        else:
+            self._count_od_row.pack_forget()
 
     def _reset_survival_conf(self) -> None:
         """Put every per-stage slider back to the shared stage_conf.json value.
@@ -762,6 +1205,32 @@ class AnalysisDialog(ctk.CTkToplevel):
         if path:
             self._folder_var.set(path)
 
+    # -- Development folder list -------------------------------------------
+    def _surv_add_folder(self) -> None:
+        """One askdirectory() per Add: Tk has no multi-directory picker."""
+        existing = self._surv_folders.folders()
+        initial = existing[-1] if existing else (
+            self._folder_var.get() or self._settings.mirror_root)
+        path = filedialog.askdirectory(initialdir=initial, parent=self)
+        if not path:
+            return
+        if path in existing:
+            messagebox.showinfo(
+                "Already added",
+                "That folder is already in the list.", parent=self)
+            return
+        self._surv_folders.add(path)
+
+    def _surv_remove_folder(self) -> None:
+        idx = self._surv_folders.selected_index()
+        if idx is None:
+            messagebox.showinfo(
+                "Nothing selected",
+                "Click a folder in the list first, then Remove selected.",
+                parent=self)
+            return
+        self._surv_folders.remove(idx)
+
     def _on_mode_change(self, *_args) -> None:
         """Show the controls matching the selected analysis type.
 
@@ -787,11 +1256,20 @@ class AnalysisDialog(ctk.CTkToplevel):
 
         if mode == "survival":
             self._clear_cache_check.grid_remove()
+            # The single folder row is meaningless here — Development takes a
+            # LIST, and leaving a second, ignored folder box on screen is how
+            # someone ends up running the wrong data.
+            self._folder_label.grid_remove()
+            self._folder_entry.grid_remove()
+            self._browse_btn.grid_remove()
             self._survival_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
             return
 
+        self._folder_label.grid(row=1, column=0, sticky="w", padx=12, pady=6)
+        self._folder_entry.grid(row=1, column=1, sticky="ew", padx=12, pady=6)
+        self._browse_btn.grid(row=1, column=2, padx=12, pady=6)
         self._clear_cache_check.grid()
         if mode == "crawling":
             self._crawling_render_frame.grid(
@@ -801,6 +1279,154 @@ class AnalysisDialog(ctk.CTkToplevel):
             self._motility_render_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
+
+    def _show_notice(self, *args, **kw) -> None:
+        """Put a message in this window's footer and keep it there."""
+        self._notice.show(*args, wraplength=self._WIDTH - 90, **kw)
+        self._notice.pack(fill="x", padx=14, pady=(8, 0),
+                          before=self._footer_buttons)
+
+    def _clear_notice(self) -> None:
+        self._notice.hide()
+
+    def _start_development(self) -> None:
+        """Validate, then either launch or explain what would happen first.
+
+        Two gates, in this order, because the second is the expensive one:
+        folders must exist and hold images (survival_preflight), and every
+        folder must have a timepoint we can defend (resolve_timepoints). A
+        folder with neither a typed value nor a capture stamp is a hard stop —
+        guessing would put a wrong x-axis on every figure and nothing in the
+        output would reveal it.
+        """
+        self._clear_notice()
+        entries = self._surv_folders.entries()
+        folders = [Path(p) for p, _ in entries]
+
+        errors = survival_preflight(folders)
+        if errors:
+            self._show_notice(
+                "Cannot start", "\n\n".join(errors), accent=theme.DESTRUCTIVE,
+                dismiss="OK")
+            return
+
+        plans = resolve_timepoints([(Path(p), t) for p, t in entries])
+        tp_errors = [p.error for p in plans if p.error]
+        if tp_errors:
+            self._show_notice(
+                "Every folder needs a timepoint",
+                "\n\n".join(tp_errors), accent=theme.DESTRUCTIVE,
+                dismiss="OK")
+            return
+
+        # Round to the slider's own resolution so config.json holds 0.30,
+        # not 0.30000000000000004 from the DoubleVar.
+        class_conf = {
+            stage: round(float(var.get()), 2)
+            for stage, var in self._surv_conf_vars.items()
+        }
+        save_previews = bool(self._surv_save_preview.get())
+        count_eggs = bool(self._surv_count_eggs.get())
+        rescore = bool(self._surv_rescore.get())
+        force_reanalyze = bool(self._surv_force.get())
+        # Resolve to an explicit list here so the checkbox always wins over
+        # the stage_conf.json default, in both directions.
+        exclude_classes = (
+            [] if count_eggs else (default_exclude_classes() or ["egg"])
+        )
+        def launch(n_fresh: int = -1) -> None:
+            self._launch_development(
+                plans, class_conf=class_conf, save_previews=save_previews,
+                exclude_classes=exclude_classes, count_eggs=count_eggs,
+                rescore=rescore, force_reanalyze=force_reanalyze,
+                n_fresh=n_fresh)
+
+        # What would this run actually do? Say so before doing it — a run that
+        # reuses everything finishes in seconds and is otherwise
+        # indistinguishable from one that did nothing at all.
+        try:
+            reuse = plan_reuse(
+                plans, class_conf, exclude_classes=exclude_classes,
+                save_previews=save_previews, force_reanalyze=force_reanalyze)
+        except Exception as exc:
+            _log.warning("reuse preview failed", exc_info=True)
+            self._show_notice(
+                "Could not check for earlier results", str(exc),
+                confirm="Analyse everything", on_confirm=launch,
+                dismiss="Cancel", accent=theme.DESTRUCTIVE)
+            return
+
+        _log.info("development: %d image(s), %d reusable, %d to analyse",
+                  reuse.n_images, reuse.n_reused, reuse.n_fresh)
+        if not reuse.any_cached:
+            launch(reuse.n_fresh)
+            return
+
+        n = len(plans)
+        detail = "\n".join(reuse.folder_lines())
+        if reuse.all_cached:
+            self._show_notice(
+                "Already analysed — nothing to re-run",
+                f"All {reuse.n_images} image(s) in "
+                f"{'this folder' if n == 1 else f'these {n} folders'} were "
+                "analysed by an earlier run, so the model will not run again. "
+                "The figures, the workbook and the explorer will still be "
+                "rebuilt"
+                + (" — combined across every folder in the list —" if n > 1
+                   else "")
+                + " from the saved detections, which takes a few seconds.",
+                detail=detail, confirm="Build them now",
+                on_confirm=lambda: launch(0), dismiss="Cancel")
+        else:
+            self._show_notice(
+                f"{reuse.n_reused} of {reuse.n_images} images are already "
+                "analysed",
+                f"They will be reused; the other {reuse.n_fresh} still need "
+                "analysing.",
+                detail=detail, confirm="Start",
+                on_confirm=lambda: launch(reuse.n_fresh), dismiss="Cancel")
+
+    def _launch_development(self, plans, *, class_conf, save_previews,
+                            exclude_classes, count_eggs, rescore,
+                            force_reanalyze, n_fresh: int = -1) -> None:
+        """Persist the settings and hand the run to the agent.
+
+        ``n_fresh`` is how many images actually need the model. When it is zero
+        NO progress window is opened: the run finishes in a couple of seconds,
+        and a window that appears and closes again on its own is exactly what
+        "the message just pops up briefly" turned out to be. The main window
+        carries a notice instead, which stays put.
+        """
+        self._on_settings_update(replace(
+            self._settings,
+            survival_class_conf=class_conf,
+            survival_count_eggs=count_eggs,
+            survival_rescore=rescore,
+            survival_force_reanalyze=force_reanalyze,
+        ))
+        if n_fresh != 0:
+            AnalysisProgressDialog(
+                self._parent, self._survival_agent, self._survival_status,
+                title="WormScan Development Analysis", noun="plate",
+            )
+        else:
+            notify = getattr(self._parent, "show_run_notice", None)
+            if notify is not None:
+                notify(
+                    "Rebuilding results",
+                    "No images need analysing. Building the figures, the "
+                    "workbook and the explorer from the saved detections — "
+                    "this takes a few seconds.",
+                )
+        _log.info("development: launching (%s)",
+                  "no inference needed" if n_fresh == 0
+                  else f"{n_fresh} image(s) to analyse")
+        self._survival_agent.start_analysis(
+            plans, class_conf=class_conf, save_previews=save_previews,
+            exclude_classes=exclude_classes, rescore=rescore,
+            force_reanalyze=force_reanalyze,
+        )
+        self.destroy()
 
     def _start(self) -> None:
         # Select the pipeline agent/status based on the chosen analysis type.
@@ -821,6 +1447,14 @@ class AnalysisDialog(ctk.CTkToplevel):
                 "An analysis is already in progress.",
                 parent=self,
             )
+            return
+
+        # Development: staging inference in the vision venv (subprocess),
+        # aggregation / workbook / figures / explorer on this side. It takes a
+        # LIST of folders, so it is handled before the single-folder check that
+        # every other mode needs.
+        if self._mode.get() == "survival":
+            self._start_development()
             return
 
         folder = Path(self._folder_var.get().strip())
@@ -856,6 +1490,33 @@ class AnalysisDialog(ctk.CTkToplevel):
                 )
                 return
 
+            sensitivity = round(float(self._count_sens.get()), 1)
+            threshold_mode = "fixed" if self._count_fixed.get() else "otsu"
+            try:
+                od_threshold = float(self._count_od.get())
+                if not (0.0 < od_threshold <= 1.0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid stain threshold",
+                    "Stain threshold must be a number between 0.005 and 1.0 "
+                    "optical density.",
+                    parent=self,
+                )
+                return
+            try:
+                smooth_um = float(self._count_smooth.get())
+                if not (0.0 <= smooth_um <= 1000.0):
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid colony smoothing",
+                    "Colony smoothing must be a number between 0 and 1000 µm "
+                    "(0 = off).",
+                    parent=self,
+                )
+                return
+
             errors = counting_preflight(folder)
             if errors:
                 messagebox.showerror(
@@ -869,6 +1530,10 @@ class AnalysisDialog(ctk.CTkToplevel):
                 self._settings,
                 counting_split_sensitivity=split_sensitivity,
                 counting_min_colony_um=min_colony_um,
+                counting_sensitivity=sensitivity,
+                counting_smooth_um=smooth_um,
+                counting_threshold_mode=threshold_mode,
+                counting_od_threshold=od_threshold,
             ))
 
             AnalysisProgressDialog(
@@ -879,50 +1544,10 @@ class AnalysisDialog(ctk.CTkToplevel):
                 folder,
                 split_sensitivity=split_sensitivity,
                 min_colony_um=min_colony_um,
-            )
-            self.destroy()
-            return
-
-        # Worm Survival: staging inference in the vision venv (subprocess),
-        # aggregation/Excel on this side. No Docker/ffmpeg/threshold.
-        if self._mode.get() == "survival":
-            # Round to the slider's own resolution so config.json holds 0.30,
-            # not 0.30000000000000004 from the DoubleVar.
-            class_conf = {
-                stage: round(float(var.get()), 2)
-                for stage, var in self._surv_conf_vars.items()
-            }
-            save_previews = bool(self._surv_save_preview.get())
-            count_eggs = bool(self._surv_count_eggs.get())
-            # Resolve to an explicit list here so the checkbox always wins over
-            # the stage_conf.json default, in both directions.
-            exclude_classes = (
-                [] if count_eggs
-                else (default_exclude_classes() or ["egg"])
-            )
-
-            errors = survival_preflight(folder)
-            if errors:
-                messagebox.showerror(
-                    "Pre-flight checks failed",
-                    "\n\n".join(errors),
-                    parent=self,
-                )
-                return
-
-            self._on_settings_update(replace(
-                self._settings,
-                survival_class_conf=class_conf,
-                survival_count_eggs=count_eggs,
-            ))
-
-            AnalysisProgressDialog(
-                self._parent, self._survival_agent, self._survival_status,
-                title="WormScan Worm-Survival Analysis", noun="plate",
-            )
-            self._survival_agent.start_analysis(
-                folder, class_conf=class_conf, save_previews=save_previews,
-                exclude_classes=exclude_classes,
+                sensitivity=sensitivity,
+                smooth_um=smooth_um,
+                threshold_mode=threshold_mode,
+                od_threshold=od_threshold,
             )
             self.destroy()
             return
@@ -1059,6 +1684,8 @@ class _ReviewProgressDialog(ctk.CTkToplevel):
         self._on_done = on_done
         self._cancelled = False
         self._build()
+        self.update_idletasks()
+        place_beside(self, parent, full_height=False)
         self.after(_PROGRESS_POLL_MS, self._poll)
 
     def _build(self) -> None:
@@ -1159,6 +1786,8 @@ class ReviewDialog(ctk.CTkToplevel):
         self._settings = settings
         self._on_settings_update = on_settings_update
         self._build()
+        self.update_idletasks()
+        place_beside(self, parent, full_height=False)
 
     def _build(self) -> None:
         self.configure(fg_color=theme.BG)
@@ -1424,7 +2053,12 @@ class ReviewDialog(ctk.CTkToplevel):
 class MainWindow(ctk.CTk):
     # Fixed window width — the window must NEVER resize to content (stretch-bug
     # fix). Variable status/info strings pass through middle_truncate so a long
-    # line can't push the width; the full text lives in a hover Tooltip.
+    # line can't push the width; the full text lives in a hover Tooltip AND,
+    # since truncation with no way back is just a different bug, behind a click
+    # on the status row (see _show_status_detail).
+    #
+    # Height is the full work area, pinned once at start-up. The window is
+    # resizable vertically only; horizontally it stays nailed down.
     _WIDTH = 460
     _STATUS_MAX = 28   # chars on the status line (BODY font); fits the card column
     _INFO_MAX = 34     # chars on the info line (CAPTION font); fits the card column
@@ -1442,6 +2076,7 @@ class MainWindow(ctk.CTk):
         counting_status: CountingStatus,
         survival_agent: SurvivalAgent,
         survival_status: SurvivalStatus,
+        analyze_status: object = None,
     ) -> None:
         theme.init()
         super().__init__()
@@ -1456,18 +2091,30 @@ class MainWindow(ctk.CTk):
         self._counting_status = counting_status
         self._survival_agent = survival_agent
         self._survival_status = survival_status
+        # Optional so main.py keeps working if it is not passed. When it is, the
+        # "Analyze on laptop" button gets visible feedback instead of the empty
+        # console window Windows used to allocate for the subprocess.
+        self._analyze_status = analyze_status
+        self._analyze_toast = None
+        self._analyze_was_busy = False
         self._button_waiting = False
 
         self.title("WormScan Launcher")
         self.configure(fg_color=theme.BG)
-        self.resizable(False, False)
+        # Width nailed shut (the stretch bug); height is ours to set, and the
+        # user may still drag it if they want something shorter.
+        self.resizable(False, True)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._build()
-        # Pin the width; height fits content once, then never tracks it again.
+        # Left edge, full working height. Content that does not fill it lives in
+        # the recent-runs card, which expands to take up the slack.
         self.update_idletasks()
-        self.geometry(f"{self._WIDTH}x{self.winfo_reqheight()}")
+        place_left_full_height(self, self._WIDTH)
+        self.after(150, lambda: place_left_full_height(self, self._WIDTH))
 
+        self._refresh_recent()
+        self._analyze_toast = widgets.Toast(self)
         self._poll()
 
     def _build(self) -> None:
@@ -1486,41 +2133,78 @@ class MainWindow(ctk.CTk):
 
         widgets.HairlineSeparator(self).pack(fill="x", padx=16, pady=(0, 8))
 
-        # --- Status card: dot + (status over info) + Sync Now ---
+        # --- Status card: dot + (status over info) + the two sync buttons ---
+        #
+        # Packed, not gridded. The buttons are the tallest thing in this card,
+        # so they set its height; the card's own 12 px padding then sits equally
+        # above and below them, and the text column is centred against them
+        # rather than pinned to the top.
         card = widgets.Card(self)
         card.pack(fill="x", padx=16, pady=(0, 10))
         row = card.content
-        row.grid_columnconfigure(1, weight=1)
 
-        self._dot = widgets.StatusDot(row, size=14)
-        self._dot.grid(row=0, column=0, rowspan=2, padx=(0, 8))
-
-        self._status_lbl = ctk.CTkLabel(
-            row, text="Starting…", font=theme.body(), text_color=theme.TEXT,
-            anchor="w",
-        )
-        self._status_lbl.grid(row=0, column=1, sticky="w")
-        self._info_lbl = ctk.CTkLabel(
-            row, text="", font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
-        )
-        self._info_lbl.grid(row=1, column=1, sticky="w")
-        self._status_tip = widgets.Tooltip(self._status_lbl, "")
-        self._info_tip = widgets.Tooltip(self._info_lbl, "")
+        buttons = ctk.CTkFrame(row, fg_color="transparent")
+        buttons.pack(side="right", padx=(10, 0))
 
         self._sync_btn = widgets.IconButton(
-            row, "Sync Now", self._on_sync_now, widgets.GLYPH_REFRESH,
+            buttons, "Sync Now", self._on_sync_now, widgets.GLYPH_REFRESH,
             variant="primary",
         )
-        self._sync_btn.grid(row=0, column=2, rowspan=2, padx=(8, 0))
+        self._sync_btn.pack(fill="x")
         widgets.Tooltip(self._sync_btn, "Pull new files from the Pi now")
+
+        # Mirror Folder lives directly under Sync Now: it is what you press
+        # straight after a sync, to go and look at what arrived. fill="x" inside
+        # this frame makes both buttons the width of the wider one.
+        mirror_btn = widgets.IconButton(
+            buttons, "Mirror Folder", self._open_mirror, widgets.GLYPH_FOLDER,
+            variant="secondary",
+        )
+        mirror_btn.pack(fill="x", pady=(6, 0))
+        widgets.Tooltip(mirror_btn, "Open the local folder where Pi data is synced")
+
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left", fill="both", expand=True)
+
+        self._dot = widgets.StatusDot(left, size=14)
+        self._dot.pack(side="left", padx=(0, 8))
+
+        text_col = ctk.CTkFrame(left, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        # expand with no vertical fill = vertically centred against the buttons.
+        text_inner = ctk.CTkFrame(text_col, fg_color="transparent")
+        text_inner.pack(fill="x", expand=True)
+
+        # The status strings are variable-length and some of them are long
+        # (a full image path mid-analysis). They are middle-truncated so they
+        # can never push the window width — and the row is clickable, so the
+        # full text is one click away instead of lost.
+        self._status_full = "Starting…"
+        self._info_full = ""
+        self._status_lbl = ctk.CTkLabel(
+            text_inner, text="Starting…", font=theme.body(),
+            text_color=theme.TEXT, anchor="w", cursor="hand2",
+        )
+        self._status_lbl.pack(fill="x", anchor="w")
+        self._info_lbl = ctk.CTkLabel(
+            text_inner, text="", font=theme.caption(), text_color=theme.TEXT_2,
+            anchor="w", cursor="hand2",
+        )
+        self._info_lbl.pack(fill="x", anchor="w")
+        self._status_tip = widgets.Tooltip(self._status_lbl, "")
+        self._info_tip = widgets.Tooltip(self._info_lbl, "")
+        for lbl in (self._status_lbl, self._info_lbl, self._dot):
+            lbl.bind("<Button-1>", self._show_status_detail, add="+")
 
         # --- Action stack ---
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.pack(fill="x", padx=16, pady=(0, 2))
 
+        # Green: the one button that starts something on the hardware rather
+        # than working on data already on this machine.
         imaging_btn = widgets.IconButton(
             actions, "Imaging", self._open_imaging, widgets.GLYPH_CAMERA,
-            variant="secondary",
+            variant="success",
         )
         imaging_btn.pack(fill="x", pady=3)
         widgets.Tooltip(imaging_btn, "Open the Pi camera interface in your browser")
@@ -1532,7 +2216,7 @@ class MainWindow(ctk.CTk):
         self._analysis_btn.pack(fill="x", pady=3)
         widgets.Tooltip(
             self._analysis_btn,
-            "Run motility, crawling, colony survival, or worm survival",
+            "Run motility, crawling, colony survival, or development",
         )
 
         review_btn = widgets.IconButton(
@@ -1542,46 +2226,280 @@ class MainWindow(ctk.CTk):
         review_btn.pack(fill="x", pady=3)
         widgets.Tooltip(review_btn, "Build a side-by-side grid viewer of your plates")
 
-        mirror_btn = widgets.IconButton(
-            actions, "Mirror Folder", self._open_mirror, widgets.GLYPH_FOLDER,
-            variant="secondary",
-        )
-        mirror_btn.pack(fill="x", pady=3)
-        widgets.Tooltip(mirror_btn, "Open the local folder where Pi data is synced")
-
-        widgets.HairlineSeparator(self).pack(fill="x", padx=16, pady=(8, 8))
-
+        # --- Footer, packed to the BOTTOM before the expanding card below it.
+        #
+        # pack() hands out space in the order it is called, so a widget packed
+        # after an expand=True sibling gets whatever is left — which, on a
+        # full-height window, was nothing: Shut Down Pi came out half off the
+        # bottom edge. Reserving its strip first fixes that for good, whatever
+        # the window height turns out to be.
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(side="bottom", fill="x")
+        widgets.HairlineSeparator(footer).pack(fill="x", padx=16, pady=(0, 8))
         shutdown_btn = widgets.IconButton(
-            self, "Shut Down Pi", self._shutdown_pi, widgets.GLYPH_POWER,
+            footer, "Shut Down Pi", self._shutdown_pi, widgets.GLYPH_POWER,
             variant="destructive",
         )
         shutdown_btn.pack(fill="x", padx=16, pady=(0, 14))
         widgets.Tooltip(shutdown_btn, "Safely power off the Raspberry Pi")
+
+        # --- Recent results ---
+        #
+        # What the empty space at the bottom is for. Every pipeline writes a
+        # timestamped folder into the data tree and then the launcher forgets
+        # about it; finding last Tuesday's run meant going digging. This lists
+        # the most recent ones, newest first, and opens them on click.
+        # Run messages land here and STAY until dismissed. They used to be a
+        # message box, which on this machine appeared for a frame and vanished;
+        # a frame inside the window cannot do that.
+        self._notice = widgets.InlineNotice(self)
+
+        recent = widgets.Card(self, title="Recent results")
+        self._recent_card = recent
+        recent.pack(fill="both", expand=True, padx=16, pady=(8, 8))
+        rc = recent.content
+        rc.grid_columnconfigure(0, weight=1)
+        rc.grid_rowconfigure(0, weight=1)
+        self._recent_list = ctk.CTkScrollableFrame(rc, fg_color="transparent")
+        self._recent_list.grid(row=0, column=0, sticky="nsew")
+        recent_bar = ctk.CTkFrame(rc, fg_color="transparent")
+        recent_bar.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        widgets.secondary_button(
+            recent_bar, "Refresh", self._refresh_recent).pack(side="left")
+        self._recent_note = ctk.CTkLabel(
+            recent_bar, text="", font=theme.caption(),
+            text_color=theme.TEXT_2, anchor="e",
+        )
+        self._recent_note.pack(side="right")
+
+
+    # ------------------------------------------------------------------
+    # "Analyze on laptop" — feedback for a button pressed in the browser
+    # ------------------------------------------------------------------
+
+    def _poll_analyze_button(self) -> None:
+        """Show a corner toast while a single-frame analysis is running.
+
+        The button is on the Pi's web UI, so the user is looking at a browser,
+        not at this window — hence a small always-on-top card rather than a
+        notice in the launcher. The result also lands in the launcher's own
+        notice band, so it is still there when they come back to it.
+        """
+        st = self._analyze_status
+        if st is None or self._analyze_toast is None:
+            return
+        try:
+            snap = st.snapshot()
+            if snap.busy:
+                if not self._analyze_was_busy:
+                    # A new press. If the user closed the card during the last
+                    # one, that dismissal was about the last one.
+                    self._analyze_toast.reset()
+                self._analyze_toast.show(
+                    "Analyzing the plate…",
+                    snap.label or "Running the staging model on this laptop.")
+            else:
+                self._analyze_toast.hide()
+            self._analyze_was_busy = snap.busy
+
+            done = st.pop_finished()
+            if done:
+                run_dir = done.get("run_dir")
+                if done.get("ok"):
+                    self._show_notice(
+                        "Plate analysed",
+                        "The annotated image and the counts have been opened.",
+                        detail=(widgets.middle_truncate(str(run_dir), 52)
+                                if run_dir else ""),
+                        confirm="Open the folder" if run_dir else "",
+                        on_confirm=((lambda p=run_dir: self._open_folder(p))
+                                    if run_dir else None),
+                        dismiss="Dismiss", accent=theme.SUCCESS)
+                else:
+                    self._show_notice(
+                        "Plate analysis failed",
+                        done.get("error") or "Unknown error.",
+                        detail=(widgets.middle_truncate(str(run_dir), 52)
+                                if run_dir else ""),
+                        dismiss="Dismiss", accent=theme.DESTRUCTIVE)
+        except Exception:
+            # Feedback must never take the launcher's poll loop down with it.
+            _log.warning("analyze-button poll failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Notices — messages that stay put
+    # ------------------------------------------------------------------
+
+    def show_run_notice(self, title: str, message: str) -> None:
+        """Public: a dialog-free 'this is happening' message from a child window."""
+        self._show_notice(title, message, dismiss="", accent=theme.ACCENT)
+
+    def _show_notice(self, *args, **kw) -> None:
+        self._notice.show(*args, wraplength=self._WIDTH - 80, **kw)
+        self._notice.pack(fill="x", padx=16, pady=(0, 8),
+                          before=self._recent_card)
+
+    def _clear_notice(self) -> None:
+        self._notice.hide()
+
+    # ------------------------------------------------------------------
+    # Status detail — the way back from a truncated line
+    # ------------------------------------------------------------------
+
+    def _show_status_detail(self, _event=None) -> None:
+        """The full status text, in the window rather than over it."""
+        self._show_notice(
+            "Status", self._status_full,
+            detail=self._info_full, dismiss="Close", accent=theme.ACCENT)
+
+    # ------------------------------------------------------------------
+    # Recent results
+    # ------------------------------------------------------------------
+
+    def _find_recent_results(self, limit: int = 12) -> list[Path]:
+        """Newest analysis output folders under the mirror root.
+
+        Bounded on purpose: three levels deep and a hard cap on directories
+        visited, because this runs on the UI thread and a mirror with tens of
+        thousands of plate folders would otherwise freeze the window. Hitting
+        the cap means the list is incomplete, not that it is wrong.
+        """
+        root = Path(self._settings.mirror_root)
+        found: list[Path] = []
+        visited = 0
+        self._recent_truncated = False
+
+        def walk(d: Path, depth: int) -> None:
+            nonlocal visited
+            if depth > _RESULT_SCAN_DEPTH or visited >= _RESULT_SCAN_MAX_DIRS:
+                return
+            try:
+                children = list(d.iterdir())
+            except OSError:
+                return
+            for child in children:
+                if visited >= _RESULT_SCAN_MAX_DIRS:
+                    self._recent_truncated = True
+                    return
+                if not child.is_dir():
+                    continue
+                visited += 1
+                if child.name.startswith(_RESULT_PREFIXES):
+                    found.append(child)
+                    continue          # results folders hold no results folders
+                if child.name.startswith((".", "_")):
+                    continue
+                walk(child, depth + 1)
+
+        try:
+            if root.is_dir():
+                walk(root, 1)
+        except Exception:
+            _log.warning("recent-results scan failed", exc_info=True)
+            return []
+        found.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0,
+                   reverse=True)
+        return found[:limit]
+
+    def _refresh_recent(self) -> None:
+        for child in self._recent_list.winfo_children():
+            child.destroy()
+        try:
+            runs = self._find_recent_results()
+        except Exception:
+            runs = []
+        if not runs:
+            ctk.CTkLabel(
+                self._recent_list,
+                text="No analysis runs found yet.\nThey appear here once you "
+                     "run one — newest first.",
+                font=theme.caption(), text_color=theme.TEXT_2,
+                anchor="w", justify="left",
+            ).pack(anchor="w", pady=2)
+            self._recent_note.configure(text="")
+            return
+
+        # Folder NAME only. The names are already timestamped and prefixed with
+        # the pipeline that wrote them, so they identify a run on their own; the
+        # path is supporting detail and belongs in the tooltip, on a delay, so
+        # running the mouse down the list does not set off a strobe of tips.
+        for path in runs:
+            stamp = datetime.fromtimestamp(path.stat().st_mtime)
+            row = ctk.CTkFrame(self._recent_list, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            btn = ctk.CTkButton(
+                row, text=widgets.middle_truncate(path.name, 44), anchor="w",
+                command=lambda p=path: self._open_folder(p),
+                fg_color="transparent", hover_color=theme.BG,
+                text_color=theme.TEXT, corner_radius=theme.BTN_RADIUS,
+                font=theme.body(), height=24,
+            )
+            btn.pack(fill="x")
+            widgets.Tooltip(
+                btn, f"{path}\n{stamp:%Y-%m-%d %H:%M}  ·  click to open",
+                delay_ms=600,
+            )
+        note = f"{len(runs)} shown"
+        if getattr(self, "_recent_truncated", False):
+            note += " · search capped"
+        self._recent_note.configure(text=note)
+
+    def _open_folder(self, path: Path) -> None:
+        try:
+            os.startfile(str(path))
+        except OSError as exc:
+            messagebox.showerror("Could not open folder", str(exc), parent=self)
 
     # ------------------------------------------------------------------
     # UI poll — runs on the main thread via root.after()
     # ------------------------------------------------------------------
 
     def _poll(self) -> None:
+        self._poll_analyze_button()
+
         # --- Check analysis completion and surface result dialog ---
         for kind, st, noun in (
             ("Motility", self._motility_status, "video"),
             ("Crawling", self._crawling_status, "video"),
             ("Counting", self._counting_status, "plate"),
-            ("Worm Survival", self._survival_status, "plate"),
+            ("Development", self._survival_status, "plate"),
         ):
             result = st.pop_completed()
             if result:
                 n_ok = result["n_ok"]
                 n_fail = result["n_fail"]
-                out_dir = result["out_dir"]
-                msg = (
-                    f"{kind} analysis complete:\n"
-                    f"  {n_ok} {noun}s processed, {n_fail} failed.\n\n"
-                    f"Open results folder?"
+                out_dir = result.get("out_dir")
+                self._refresh_recent()
+                if result.get("failed"):
+                    # A crash used to produce no message at all, which is
+                    # indistinguishable from a run that did nothing. Now it
+                    # says what broke and where the log is.
+                    self._show_notice(
+                        f"{kind} analysis failed",
+                        str(result.get("error") or "Unknown error.")
+                        + ("\n\nlog.txt in the run folder has the full "
+                           "traceback." if out_dir else ""),
+                        detail=(widgets.middle_truncate(str(out_dir), 52)
+                                if out_dir else ""),
+                        confirm="Open run folder" if out_dir else "",
+                        on_confirm=((lambda p=out_dir: self._open_folder(p))
+                                    if out_dir else None),
+                        dismiss="Dismiss",
+                        accent=theme.DESTRUCTIVE,
+                    )
+                    continue
+                note = result.get("note") or ""
+                msg = f"{n_ok} {noun}s processed, {n_fail} failed."
+                if note:
+                    msg += "\n\n" + note
+                self._show_notice(
+                    f"{kind} analysis complete", msg,
+                    detail=widgets.middle_truncate(str(out_dir), 52),
+                    confirm="Open results folder",
+                    on_confirm=lambda p=out_dir: self._open_folder(p),
+                    dismiss="Dismiss",
+                    accent=theme.SUCCESS,
                 )
-                if messagebox.askyesno("Analysis Complete", msg):
-                    os.startfile(str(out_dir))
 
         # --- Status row: a running analysis takes priority ---
         motility_snap = self._motility_status.snapshot()
@@ -1605,10 +2523,14 @@ class MainWindow(ctk.CTk):
             display_label = clock_msg if clock_msg else s_label
 
         self._dot.set_color(theme.DOT_COLORS.get(display_color, theme.DOT_GRAY))
+        self._status_full = display_label
+        truncated = len(display_label) > self._STATUS_MAX
         self._status_lbl.configure(
             text=widgets.middle_truncate(display_label, self._STATUS_MAX)
         )
-        self._status_tip.set_text(display_label)
+        self._status_tip.set_text(
+            display_label + ("\n(click for the full message)" if truncated else "")
+        )
 
         # Sync button lockout resolves on sync color, not display color
         if self._button_waiting and s_color == "green":
@@ -1620,6 +2542,7 @@ class MainWindow(ctk.CTk):
             parts.append(f"Last sync: {last_sync}")
         parts.append(f"{files} files mirrored · {_fmt_bytes(nbytes)}")
         info_full = "  ".join(parts)
+        self._info_full = info_full
         self._info_lbl.configure(text=widgets.middle_truncate(info_full, self._INFO_MAX))
         self._info_tip.set_text(info_full)
 

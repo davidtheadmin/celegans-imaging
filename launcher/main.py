@@ -12,7 +12,7 @@ import logging
 import config
 import sync as sync_mod
 import ui as ui_mod
-from analyze_worker import AnalyzeWorker
+from analyze_worker import AnalyzeStatus, AnalyzeWorker
 from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
 from analysis.counting_agent import CountingAgent, CountingStatus
@@ -46,8 +46,12 @@ def main() -> None:
     survival_agent = SurvivalAgent(settings, survival_status)
     survival_agent.start()
 
-    # "Analyze on laptop" long-poll worker (no UI; opens its outputs directly).
-    analyze_agent = AnalyzeWorker(settings)
+    # "Analyze on laptop" long-poll worker. It opens its own outputs, but it
+    # now also reports through a status object so the UI can show a toast while
+    # the model loads — the button used to give no sign of life beyond the
+    # console window Windows allocated for the subprocess.
+    analyze_status = AnalyzeStatus()
+    analyze_agent = AnalyzeWorker(settings, analyze_status)
     analyze_agent.start()
 
     win = ui_mod.MainWindow(
@@ -56,6 +60,7 @@ def main() -> None:
         crawling_agent, crawling_status,
         counting_agent, counting_status,
         survival_agent, survival_status,
+        analyze_status=analyze_status,
     )
     win.mainloop()
 

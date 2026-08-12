@@ -17,8 +17,11 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import requests
 
@@ -44,6 +47,67 @@ _KEEP_RUNS = 10           # prune older run dirs on each press
 _NEXT_TIMEOUT_S = 30      # server long-polls 25s; give the client a little slack
 _RECONNECT_SLEEP_S = 2    # backoff after a connection error / non-200
 
+# The launcher runs under pythonw.exe, which has no console of its own. Spawning
+# python.exe without this makes Windows allocate one, so pressing "Analyze on
+# laptop" in the browser popped an empty black terminal on the laptop for the
+# length of the run. stdout and stderr are already captured below, so that
+# console never had anything in it to read.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
+
+# ---------------------------------------------------------------------------
+# Status — the same worker-writes / UI-reads contract as the other agents
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AnalyzeSnapshot:
+    busy: bool
+    label: str
+
+
+class AnalyzeStatus:
+    """Shared state between the analyze worker and the UI thread.
+
+    Write contract — worker thread ONLY: start_job() / finish_job().
+    Read contract  — UI thread ONLY:     snapshot() / pop_finished().
+
+    This worker used to have no status object at all, which is why the only
+    sign that the button had done anything was a console window appearing. The
+    UI now has something to show instead.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._busy = False
+        self._label = ""
+        self._finished: Optional[dict] = None
+
+    def start_job(self, label: str) -> None:
+        with self._lock:
+            self._busy = True
+            self._label = label
+
+    def set_label(self, label: str) -> None:
+        with self._lock:
+            self._label = label
+
+    def finish_job(self, ok: bool, run_dir: Optional[Path] = None,
+                   error: str = "") -> None:
+        with self._lock:
+            self._busy = False
+            self._label = ""
+            self._finished = {"ok": ok, "run_dir": run_dir, "error": error}
+
+    def snapshot(self) -> AnalyzeSnapshot:
+        with self._lock:
+            return AnalyzeSnapshot(busy=self._busy, label=self._label)
+
+    def pop_finished(self) -> Optional[dict]:
+        with self._lock:
+            out = self._finished
+            self._finished = None
+            return out
+
 
 def _prune_runs(root: Path, keep: int) -> None:
     """Keep the `keep` most recent run dirs, delete the rest. Names are
@@ -58,7 +122,8 @@ def _prune_runs(root: Path, keep: int) -> None:
 
 def _run_inference(frame_path: Path, run_dir: Path,
                    class_conf: dict | None = None,
-                   count_eggs: bool | None = None) -> None:
+                   count_eggs: bool | None = None) -> tuple[bool, str]:
+    """Run the staging model over one frame. Returns (ok, error_text)."""
     annotated = run_dir / "annotated.png"
     counts = run_dir / "counts.txt"
     cmd = [str(_VENV_PY), str(_INFER), str(frame_path),
@@ -78,15 +143,21 @@ def _run_inference(frame_path: Path, run_dir: Path,
     if class_conf:
         cmd += ["--class-conf", json.dumps(class_conf)]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       creationflags=_NO_WINDOW)
     except subprocess.CalledProcessError as exc:
         log.error("infer_stage failed (rc=%s):\n%s", exc.returncode, exc.stderr)
-        return
+        tail = (exc.stderr or "").strip().splitlines()
+        return False, (tail[-1] if tail else f"inference exited {exc.returncode}")
+    except OSError as exc:
+        log.error("could not start infer_stage: %s", exc)
+        return False, str(exc)
     for out in (annotated, counts):
         try:
             os.startfile(str(out))  # Windows: open in the default app
         except OSError as exc:
             log.error("could not open %s: %s", out, exc)
+    return True, ""
 
 
 class AnalyzeWorker(threading.Thread):
@@ -94,9 +165,12 @@ class AnalyzeWorker(threading.Thread):
     model over each. Idle-blocks in the poll between presses. Started once at
     launch; stop()/join() in the shutdown block like the other agents."""
 
-    def __init__(self, settings: object) -> None:
+    def __init__(self, settings: object,
+                 status: Optional[AnalyzeStatus] = None) -> None:
         super().__init__(daemon=True, name="AnalyzeWorker")
         self._settings = settings
+        # Optional so an older call site still constructs; the UI passes one.
+        self.status = status or AnalyzeStatus()
         self._stop = threading.Event()
 
     def stop(self) -> None:
@@ -136,7 +210,14 @@ class AnalyzeWorker(threading.Thread):
         # Missing header -> None -> stage_conf.json default (see _run_inference).
         raw = resp.headers.get("X-Count-Eggs")
         count_eggs = None if raw is None else (raw == "1")
-        _run_inference(frame, run_dir, self._class_conf(), count_eggs)
+        self.status.start_job("Loading the staging model…")
+        try:
+            ok, err = _run_inference(frame, run_dir, self._class_conf(),
+                                     count_eggs)
+        except Exception as exc:                     # never kill the poll loop
+            log.exception("analyze job %s crashed", job_id)
+            ok, err = False, f"{type(exc).__name__}: {exc}"
+        self.status.finish_job(ok, run_dir, err)
 
     def _class_conf(self) -> dict | None:
         """Per-class thresholds for this frame, or None for the shared defaults.

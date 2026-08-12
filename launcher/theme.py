@@ -24,6 +24,11 @@ TEXT = "#1D1D1F"         # primary text
 TEXT_2 = "#6E6E73"       # secondary / caption text
 ACCENT = "#007AFF"       # primary action
 ACCENT_HOVER = "#0063CC"
+# Green action. Deliberately deeper than the status-dot green below: the dot is
+# a 14 px disc on white and can be bright, a full-width button carries white
+# text and needs the contrast.
+SUCCESS = "#248A3D"
+SUCCESS_HOVER = "#1C6F31"
 DESTRUCTIVE = "#FF3B30"  # destructive action tint
 
 # Status-dot colours, keyed by the agents' emitted colour strings.
@@ -55,7 +60,9 @@ BTN_RADIUS = 8
 FONT_FAMILY = "Segoe UI"
 TITLE = (15, "bold")
 BODY = (13, "normal")
+BODY_BOLD = (13, "bold")
 CAPTION = (11, "normal")
+CAPTION_BOLD = (11, "bold")
 
 
 def _font(spec: tuple[int, str]) -> ctk.CTkFont:
@@ -73,9 +80,19 @@ def body() -> ctk.CTkFont:
     return _font(BODY)
 
 
+def body_bold() -> ctk.CTkFont:
+    """13 semibold — control labels, and the term in a help line."""
+    return _font(BODY_BOLD)
+
+
 def caption() -> ctk.CTkFont:
     """11 regular — secondary captions / help text."""
     return _font(CAPTION)
+
+
+def caption_bold() -> ctk.CTkFont:
+    """11 semibold — the term at the head of a help line."""
+    return _font(CAPTION_BOLD)
 
 
 # ---------------------------------------------------------------------------
