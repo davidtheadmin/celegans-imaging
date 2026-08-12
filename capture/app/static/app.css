@@ -123,6 +123,20 @@ textarea:focus {
   background: var(--surface);
 }
 input[type="number"] { font-family: var(--mono); }
+/* Compact numeric field (replicate counts and the like).  [replicate-field-v2]
+   Everything is border-box, so the original 44px-wide number input spent 22px
+   on side padding, 2px on the border and ~17px on the browser's spinner,
+   leaving about three pixels for the digits — the value was there, just
+   invisible.
+   flex: 0 0 auto matters as much as the width: these live inside a
+   flex-direction:row label ("x [n] replicates"), and a flex item shrinks below
+   its stated width by default, so width alone was not enough. */
+input[type="number"].num-sm {
+  flex: 0 0 auto;
+  width: 92px; min-width: 92px;
+  padding: 8px 6px 8px 10px;
+  text-align: right;
+}
 input[type="radio"], input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
 
 .field-label {

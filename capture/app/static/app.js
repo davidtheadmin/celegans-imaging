@@ -1028,7 +1028,7 @@ function renderSessionSidebar() {
           <input class="ac-name" type="text" placeholder="Name (e.g. WT)" required>
           <input class="ac-cond" type="text" placeholder="Condition ID (e.g. 10J)" required>
           <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0">
-            ×<input class="ac-rep mono" type="number" value="1" min="1" max="50" style="width:44px"> replicates
+            ×<input class="ac-rep mono num-sm" type="number" value="1" min="1" max="50"> replicates
           </label>
           <div class="ac-preview" style="font-size:10px;color:var(--text-dim);font-family:var(--mono);min-height:13px"></div>
           <p class="ac-error form-error" hidden></p>
@@ -1081,7 +1081,7 @@ function renderSessionSidebar() {
             <textarea class="bulk-treatments" rows="2" placeholder="0J 10J 50J"></textarea>
           </label>
           <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;text-transform:none;letter-spacing:0">
-            ×<input class="bulk-rep mono" type="number" value="5" min="1" max="50" style="width:44px"> replicates per condition
+            ×<input class="bulk-rep mono num-sm" type="number" value="5" min="1" max="50"> replicates per condition
           </label>
           <div class="bulk-preview" style="font-size:10px;color:var(--text-dim);font-family:var(--mono);min-height:13px"></div>
           <p class="bulk-error form-error" hidden></p>
