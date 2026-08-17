@@ -21,6 +21,8 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+
+import paths
 from typing import Optional
 
 import requests
@@ -32,7 +34,9 @@ log = logging.getLogger(__name__)
 # Vision venv + CLI live next to this file under launcher/vision/. Derived from
 # __file__ so the worker follows the repo wherever it is checked out.
 _VISION_DIR = Path(__file__).parent / "vision"
-_VENV_PY = _VISION_DIR / ".venv-vision" / "Scripts" / "python.exe"
+# Resolved rather than hardcoded -- an installed copy keeps this venv under
+# the install root to stay inside Windows MAX_PATH. See launcher/paths.py.
+_VENV_PY = paths.vision_python()
 _INFER = _VISION_DIR / "infer_stage.py"
 
 # Fixed output root; each press writes a fresh timestamped run dir. Never a

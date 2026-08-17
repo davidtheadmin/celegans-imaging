@@ -30,6 +30,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import paths
+from analysis import engine as engine_mod
+
 log = logging.getLogger(__name__)
 
 _ANALYSIS_PREFIX = "_crawling_analysis"
@@ -124,7 +127,7 @@ def _run_tierpsy_instrumented(
     json_file: Path,
     image: str,
     output_dir: Path,
-    docker_cmd: str = "docker",
+    engine: object = None,
     timeout_s: int = _TIERPSY_TIMEOUT_S,
     tag: str = "",
 ) -> tuple[str, str]:
@@ -144,19 +147,13 @@ def _run_tierpsy_instrumented(
     We mount the video's parent as /data and pass the basename as the pattern
     so only this one file is processed.
     """
-    parent_posix = video_avi.parent.as_posix()
-    cmd = [
-        docker_cmd, "run", "--rm",
-        "-v", f"{parent_posix}:/data",
-        image,
-        "tierpsy_process",
-        "--video_dir_root",   "/data",
-        "--mask_dir_root",    "/data/MaskedVideos",
-        "--results_dir_root", "/data/Results",
-        "--pattern_include",  video_avi.name,
-        "--json_file",        f"/data/{json_file.name}",
-        "--max_num_process",  "1",
-    ]
+    # One definition of the Tierpsy invocation, shared with
+    # docker_utils.run_tierpsy. It used to be duplicated here, which meant
+    # every engine fix had to be made twice and the copies drifted.
+    if engine is None:
+        engine = engine_mod.Engine(
+            command="docker", kind="docker", version="(not detected)")
+    cmd = engine_mod.build_tierpsy_cmd(engine, video_avi, json_file, image)
 
     cpfx = f"[{tag}] " if tag else "[crawling] "
     print(cpfx + "=" * 60, flush=True)
@@ -225,7 +222,7 @@ def _process_one_video_crawling(
     folder: Path,
     *,
     image: str,
-    docker_cmd: str,
+    engine: object,
     timeout_s: int,
     params_template: dict,
     head_angle_prominence: float,
@@ -316,7 +313,7 @@ def _process_one_video_crawling(
                 avi, json_file,
                 image=image,
                 output_dir=cache_dir,
-                docker_cmd=docker_cmd,
+                engine=engine,
                 timeout_s=timeout_s,
                 tag=video.stem,
             )
@@ -562,7 +559,7 @@ class CrawlingAgent(threading.Thread):
         self._load_params()
 
     def _load_params(self) -> None:
-        params_path = Path(__file__).parent.parent / "crawling_params.json"
+        params_path = paths.crawling_params()
         try:
             self._params_template = json.loads(params_path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -704,19 +701,26 @@ class CrawlingAgent(threading.Thread):
                 current_stage="Discovering videos…",
             )
 
-            image = f"{s.tierpsy_image}:{s.tierpsy_image_tag}"
+            from analysis.docker_utils import resolve_engine, resolve_image
+            engine = resolve_engine(s) or engine_mod.Engine(
+                command=getattr(s, "docker_command", "docker"),
+                kind="docker", version="(not detected)")
+            image = resolve_image(s)
+            write_log(f"Container engine: {engine}")
+            write_log(f"Tierpsy image: {image}")
+            write_log(paths.describe())
             head_angle_prominence = float(self._params_template.get("head_angle_prominence", 0.30))
             all_worm_rows: list[dict] = []
             n_ok = 0
             n_fail = 0
 
             workers, cpus, mem_gb = resolve_workers(
-                getattr(s, "concurrent_videos", "auto"), s.docker_command
+                getattr(s, "concurrent_videos", "auto"), engine
             )
             ff_threads = ffmpeg_threads_per_worker(workers)
             write_log(
                 f"Concurrency: {workers} worker(s) "
-                f"(docker sees {cpus} cpu, {mem_gb:.1f} GB; setting="
+                f"({engine.kind} sees {cpus} cpu, {mem_gb:.1f} GB; setting="
                 f"{getattr(s, 'concurrent_videos', 'auto')}); "
                 f"ffmpeg threads/worker={ff_threads}"
             )
@@ -748,7 +752,7 @@ class CrawlingAgent(threading.Thread):
                             _process_one_video_crawling,
                             video, folder,
                             image=image,
-                            docker_cmd=s.docker_command,
+                            engine=engine,
                             timeout_s=_TIERPSY_TIMEOUT_S,
                             params_template=self._params_template,
                             head_angle_prominence=head_angle_prominence,

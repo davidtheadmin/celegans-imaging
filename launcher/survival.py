@@ -70,6 +70,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+import paths
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -92,10 +94,22 @@ _MAX_DEPTH = 3
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 _VISION_DIR = Path(__file__).parent / "vision"
-_VISION_PY = _VISION_DIR / ".venv-vision" / "Scripts" / "python.exe"
+# Resolved rather than hardcoded: an installed copy keeps this venv directly
+# under the install root, because nesting it here overruns Windows MAX_PATH
+# while pip is unpacking torch. See launcher/paths.py.
+_VISION_PY = paths.vision_python()
 _INFER_SCRIPT = _VISION_DIR / "infer_stage.py"
-_MODEL_PATH = _VISION_DIR / "models" / "staging.pt"
-_STAGE_CONF = _VISION_DIR / "stage_conf.json"
+
+# The model and the threshold file are TUNABLES: %APPDATA%\\WormScan wins
+# over the copy this install shipped, so a retrained model or a
+# recalibrated stage_conf.json can be handed over as a file instead of a
+# new installer. Nothing is seeded into that folder automatically, so a
+# stock install always reads what it shipped. See launcher/paths.py.
+#
+# Resolved once at import, deliberately: a run must not change model
+# half-way through because someone dropped a file in mid-analysis.
+_MODEL_PATH = paths.staging_model()
+_STAGE_CONF = paths.stage_conf()
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +667,10 @@ def run_inference(
         str(_VISION_PY), str(_INFER_SCRIPT),
         "--batch", "--stdin",
         "--model", str(_MODEL_PATH),
+        # Passed explicitly so both ends read the SAME file. Without it
+        # infer_stage.py resolves stage_conf.json relative to itself and
+        # would silently ignore an override in %APPDATA%\\WormScan.
+        "--stage-conf", str(_STAGE_CONF),
         "--no-boxes",  # stats never need per-box lists; previews drawn in-proc
     ]
     if class_conf:

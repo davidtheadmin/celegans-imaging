@@ -1,0 +1,28 @@
+# Staging-inference dependencies — the vision venv ONLY.
+#
+# This venv is deliberately separate from launcher/requirements.txt. Two
+# reasons, and only one of them used to be the version:
+#
+#   1. Licence isolation. ultralytics is AGPL-3.0. Keeping it in one detachable
+#      folder that the launcher only ever talks to by subprocess keeps the
+#      boundary obvious and easy to swap (e.g. for an ONNX runtime).
+#   2. Weight. torch is ~250 MB. The launcher does not need it to start.
+#
+# The *version* split is gone: both venvs are now Python 3.13. torch 2.13 and
+# ultralytics 8.4 both support it, so the old 3.12 pin was obsolete. Pins are
+# exact because a staging model's behaviour is a function of the inference
+# stack, and "it worked last month" is not a reproducibility story.
+#
+# After changing anything here, re-run a known plate set and diff the counts
+# before trusting the result.
+
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.103
+numpy==2.4.6
+
+# opencv is NOT pinned here on purpose. ultralytics declares a dependency on
+# opencv-python, and adding the headless variant alongside it installs two
+# distributions into the same cv2/ package directory -- whichever pip writes
+# last wins, which is a nondeterministic import for 39 MB of extra payload.
+# Let ultralytics pull the one it wants.

@@ -1,109 +1,112 @@
 """
 Autosizer for parallel video analysis.
 
-Both the motility and crawling pipelines process videos through Docker
-(Tierpsy) containers. The per-video work is independent and mostly idle-CPU,
-so several videos can run concurrently. This module decides how many.
+Both the motility and crawling pipelines process videos through Tierpsy
+containers. The per-video work is independent and mostly idle-CPU, so several
+videos can run concurrently. This module decides how many.
 
-Worker count is derived from Docker's view of available resources (so it
-respects the Docker Desktop VM limits on Windows/macOS, which is what actually
-bounds the containers), with a hard cap of 8.
+Worker count is derived from the *engine's* view of available resources — not
+the host's — because on Windows the engine runs in a VM whose CPU and memory
+limits are what actually bound the containers.
+
+Reading those numbers is engine-specific (Docker and Podman expose them under
+different template keys), so the query itself lives in analysis/engine.py.
+This module only does the arithmetic.
 """
 import logging
 import os
-import subprocess
 import sys
+
+from analysis import engine as engine_mod
+from analysis.engine import Engine
 
 log = logging.getLogger(__name__)
 
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-
-# Fallback when docker info is unavailable or unparseable.
+# Fallback when the engine is unavailable or its output is unparseable.
 _FALLBACK_CPUS = 2
 _FALLBACK_MEM_GB = 4.0
 
 _MAX_WORKERS = 8
 
 
-def docker_resources(docker_cmd: str = "docker") -> tuple[int, float]:
+def _as_engine(engine_or_cmd: object) -> Engine | None:
     """
-    Return (cpus, mem_gb) as seen by the Docker engine.
+    Accept either an Engine or the legacy docker-command string.
 
-    Runs `docker info --format "{{.NCPU}} {{.MemTotal}}"` and parses it.
-    On ANY failure (docker down, parse error, timeout) returns the
-    conservative fallback (2, 4.0) and logs a warning.
+    The string form is what the pipelines used to pass. Rather than assume it
+    speaks Docker's dialect — the mistake that made a Podman install silently
+    fall back to two workers — we probe it, so the right `info` template gets
+    used whatever it turns out to be.
     """
-    try:
-        result = subprocess.run(
-            [docker_cmd, "info", "--format", "{{.NCPU}} {{.MemTotal}}"],
-            capture_output=True, text=True, timeout=20,
-            creationflags=_NO_WINDOW,
-        )
-        if result.returncode != 0:
-            log.warning(
-                "docker info failed (rc=%s): %s; using fallback (%d cpu, %.1f GB)",
-                result.returncode, result.stderr.strip()[-200:],
-                _FALLBACK_CPUS, _FALLBACK_MEM_GB,
-            )
-            return _FALLBACK_CPUS, _FALLBACK_MEM_GB
-        parts = result.stdout.split()
-        ncpu = int(parts[0])
-        mem_bytes = int(parts[1])
-        mem_gb = mem_bytes / (1024 ** 3)
-        if ncpu < 1 or mem_gb <= 0:
-            raise ValueError(f"implausible values: cpus={ncpu} mem_gb={mem_gb}")
-        return ncpu, mem_gb
-    except Exception as exc:
+    if isinstance(engine_or_cmd, Engine):
+        return engine_or_cmd
+    if isinstance(engine_or_cmd, str) and engine_or_cmd.strip():
+        return engine_mod.probe(engine_or_cmd.strip())
+    return None
+
+
+def engine_resources(engine_or_cmd: object = "docker") -> tuple[int, float]:
+    """
+    Return (cpus, mem_gb) as seen by the container engine.
+
+    On ANY failure returns the conservative fallback (2, 4.0) and logs why.
+    """
+    engine = _as_engine(engine_or_cmd)
+    if engine is None:
         log.warning(
-            "docker_resources failed (%s); using fallback (%d cpu, %.1f GB)",
-            exc, _FALLBACK_CPUS, _FALLBACK_MEM_GB,
+            "no usable container engine for resource query; "
+            "using fallback (%d cpu, %.1f GB)", _FALLBACK_CPUS, _FALLBACK_MEM_GB,
         )
         return _FALLBACK_CPUS, _FALLBACK_MEM_GB
+    return engine_mod.resources(engine, fallback=(_FALLBACK_CPUS, _FALLBACK_MEM_GB))
 
 
-def auto_workers(docker_cmd: str = "docker") -> tuple[int, int, float]:
+# Old name, kept so nothing outside this package breaks.
+docker_resources = engine_resources
+
+
+def _from_resources(cpus: int, mem_gb: float) -> int:
+    """workers = max(1, min(cpus // 2, (mem_gb - 1.5) // 2, 8))"""
+    by_cpu = max(1, cpus // 2)
+    by_ram = max(1, int((mem_gb - 1.5) // 2))
+    return max(1, min(by_cpu, by_ram, _MAX_WORKERS))
+
+
+def auto_workers(engine_or_cmd: object = "docker") -> tuple[int, int, float]:
     """
     Return (workers, cpus, mem_gb).
-
-    workers = max(1, min(cpus // 2, (mem_gb - 1.5) // 2, 8))
 
     Each Tierpsy container is single-process (--max_num_process 1) and peaks
     around 1-2 GB, so we leave ~1.5 GB headroom and budget ~2 GB per worker.
     The caller logs the (cpus, mem_gb) alongside the chosen worker count.
     """
-    cpus, mem_gb = docker_resources(docker_cmd)
-    by_cpu = max(1, cpus // 2)
-    by_ram = max(1, int((mem_gb - 1.5) // 2))
-    workers = max(1, min(by_cpu, by_ram, _MAX_WORKERS))
-    return workers, cpus, mem_gb
+    cpus, mem_gb = engine_resources(engine_or_cmd)
+    return _from_resources(cpus, mem_gb), cpus, mem_gb
 
 
-def resolve_workers(concurrent_videos: object, docker_cmd: str = "docker") -> tuple[int, int, float]:
+def resolve_workers(
+    concurrent_videos: object,
+    engine_or_cmd: object = "docker",
+) -> tuple[int, int, float]:
     """
     Resolve the configured `concurrent_videos` setting to a worker count.
 
-    "auto" (or any non-int) -> auto_workers().
+    "auto" (or any non-int) -> derived from engine resources.
     An int (or int-like string) -> that value, clamped to [1, _MAX_WORKERS].
 
     Returns (workers, cpus, mem_gb) so the caller can log how the count was
-    derived. For an explicit override, cpus/mem_gb are still reported from
-    docker_resources() for the log line.
+    derived. For an explicit override, cpus/mem_gb are still reported for the
+    log line.
     """
-    cpus, mem_gb = docker_resources(docker_cmd)
+    cpus, mem_gb = engine_resources(engine_or_cmd)
+
     if isinstance(concurrent_videos, str) and concurrent_videos.strip().lower() == "auto":
-        by_cpu = max(1, cpus // 2)
-        by_ram = max(1, int((mem_gb - 1.5) // 2))
-        workers = max(1, min(by_cpu, by_ram, _MAX_WORKERS))
-        return workers, cpus, mem_gb
+        return _from_resources(cpus, mem_gb), cpus, mem_gb
     try:
-        workers = int(concurrent_videos)
-        workers = max(1, min(workers, _MAX_WORKERS))
+        workers = max(1, min(int(concurrent_videos), _MAX_WORKERS))
         return workers, cpus, mem_gb
     except (TypeError, ValueError):
-        by_cpu = max(1, cpus // 2)
-        by_ram = max(1, int((mem_gb - 1.5) // 2))
-        workers = max(1, min(by_cpu, by_ram, _MAX_WORKERS))
-        return workers, cpus, mem_gb
+        return _from_resources(cpus, mem_gb), cpus, mem_gb
 
 
 def ffmpeg_threads_per_worker(workers: int) -> int:

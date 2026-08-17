@@ -22,7 +22,9 @@ from typing import Callable, Optional
 import customtkinter as ctk
 
 import config as cfg
+import paths
 import theme
+import update_check
 import widgets
 from analysis.docker_utils import run_preflight
 from analysis.motility import MotilityAgent, MotilityStatus
@@ -403,6 +405,16 @@ class SettingsDialog(ctk.CTkToplevel):
             self._poll, "Seconds between automatic sync checks (minimum 10)"
         )
 
+        # Check for updates
+        self._check_updates = tk.BooleanVar(value=bool(
+            getattr(s, "check_for_updates", True)))
+        ctk.CTkCheckBox(
+            body, text="Check for updates on startup",
+            variable=self._check_updates,
+            font=theme.body(), text_color=theme.TEXT,
+            fg_color=theme.ACCENT, hover_color=theme.ACCENT_HOVER,
+        ).pack(anchor="w", pady=(0, 10))
+
         # Read-only log-path caption
         log_path = cfg.APP_DATA / "launcher.log"
         ctk.CTkLabel(
@@ -440,6 +452,7 @@ class SettingsDialog(ctk.CTkToplevel):
             token=self._token.get(),
             mirror_root=self._mirror.get(),
             poll_interval_s=poll,
+            check_for_updates=bool(self._check_updates.get()),
         )
         self._on_save(new)
         self.destroy()
@@ -2077,6 +2090,7 @@ class MainWindow(ctk.CTk):
         survival_agent: SurvivalAgent,
         survival_status: SurvivalStatus,
         analyze_status: object = None,
+        update_status: object = None,
     ) -> None:
         theme.init()
         super().__init__()
@@ -2095,11 +2109,18 @@ class MainWindow(ctk.CTk):
         # "Analyze on laptop" button gets visible feedback instead of the empty
         # console window Windows used to allocate for the subprocess.
         self._analyze_status = analyze_status
+        # Optional for the same reason as analyze_status above: main.py keeps
+        # working without it. Holds an UpdateInfo once a newer release is seen.
+        self._update_status = update_status
+        self._update_shown = False
+        self._update_info = None
         self._analyze_toast = None
         self._analyze_was_busy = False
         self._button_waiting = False
 
-        self.title("WormScan Launcher")
+        # The version in the title makes a screenshot self-identifying, the
+        # same way the log header does. Reads "dev" from a source checkout.
+        self.title(f"WormScan Launcher  {paths.version_string()}")
         self.configure(fg_color=theme.BG)
         # Width nailed shut (the stretch bug); height is ours to set, and the
         # user may still drag it if they want something shorter.
@@ -2133,6 +2154,24 @@ class MainWindow(ctk.CTk):
 
         widgets.HairlineSeparator(self).pack(fill="x", padx=16, pady=(0, 8))
 
+        # --- Update notice: created now, packed only if there is ever one ---
+        #
+        # Built as a bare label on the window, NOT inside a placeholder frame.
+        # An empty CTkFrame is not zero-height: CTkFrame defaults to
+        # height=200, and pack(fill="x") stretches only the width, so a frame
+        # held in reserve for a notice reserves 200 px of blank space above the
+        # status card forever. (It did exactly that.)
+        #
+        # Position is handled at pack time with `before=self._status_card`
+        # instead, which inserts into the pack order rather than appending, so
+        # the notice lands above the status card and nothing is reserved while
+        # there is nothing to say.
+        self._update_lbl = ctk.CTkLabel(
+            self, text="", font=theme.body(),
+            text_color=theme.ACCENT, anchor="w", cursor="hand2",
+        )
+        self._update_lbl.bind("<Button-1>", lambda _e: self._open_release_page())
+
         # --- Status card: dot + (status over info) + the two sync buttons ---
         #
         # Packed, not gridded. The buttons are the tallest thing in this card,
@@ -2141,6 +2180,8 @@ class MainWindow(ctk.CTk):
         # rather than pinned to the top.
         card = widgets.Card(self)
         card.pack(fill="x", padx=16, pady=(0, 10))
+        # Referenced by _poll_update, which packs the update notice `before` it.
+        self._status_card = card
         row = card.content
 
         buttons = ctk.CTkFrame(row, fg_color="transparent")
@@ -2546,7 +2587,34 @@ class MainWindow(ctk.CTk):
         self._info_lbl.configure(text=widgets.middle_truncate(info_full, self._INFO_MAX))
         self._info_tip.set_text(info_full)
 
+        self._poll_update()
+
         self.after(_POLL_MS, self._poll)
+
+    def _poll_update(self) -> None:
+        """Show the update notice once, if the background check found one."""
+        if self._update_shown or self._update_status is None:
+            return
+        info = self._update_status.snapshot()
+        if info is None:
+            return
+        self._update_shown = True
+        self._update_info = info
+        self._update_lbl.configure(
+            text=f"Update available: {info.latest}  -  click to download"
+        )
+        self._update_lbl.pack(
+            fill="x", padx=16, pady=(0, 8), before=self._status_card)
+        widgets.Tooltip(
+            self._update_lbl,
+            f"You are running {info.current}.\n"
+            f"Opens the release page in your browser. Nothing is downloaded "
+            f"or installed automatically.",
+        )
+
+    def _open_release_page(self) -> None:
+        if self._update_info is not None:
+            webbrowser.open_new_tab(self._update_info.url)
 
     # ------------------------------------------------------------------
     # Button handlers — all run on the main thread

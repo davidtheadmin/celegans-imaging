@@ -20,8 +20,19 @@ class Settings:
     mirror_root: str = str(_DEFAULT_MIRROR)
     poll_interval_s: int = 120
     # Analysis
-    tierpsy_image: str = "tierpsy/tierpsy-tracker"
+    # Fully qualified on purpose. Podman refuses to resolve a short image
+    # name when it cannot prompt ("short-name resolution enforced but
+    # cannot prompt without a TTY") and every call we make is a captured
+    # subprocess with no TTY. Docker and nerdctl accept the qualified form,
+    # so one value works on all three engines.
+    tierpsy_image: str = "docker.io/tierpsy/tierpsy-tracker"
     tierpsy_image_tag: str = "latest"
+    # Which container engine runs Tierpsy. "auto" probes docker, podman and
+    # nerdctl in that order and takes the first that answers `info`.
+    # Set explicitly ("podman") to pin one. docker_command below is the
+    # pre-engine setting, still honoured when it has been customised, so an
+    # existing config.json keeps working untouched.
+    container_engine: str = "auto"
     docker_command: str = "docker"
     analysis_video_timeout_s: int = 600
     motility_long_threshold_s: float = 5.0
@@ -81,6 +92,12 @@ class Settings:
     survival_soft_scores: bool = False
     survival_conf: float = 0.25   # legacy, unused
     # Review (grid viewer) — last-used content type and video loop length.
+    # Ask GitHub once a day whether a newer release exists, and show a line in
+    # the launcher if so. Never downloads or installs anything; failures are
+    # silent. Off means no outbound request is made at all, which is the reason
+    # this is a setting rather than a constant - some managed machines would
+    # rather nothing phoned home.
+    check_for_updates: bool = True
     review_type: str = "auto"
     review_loop_s: float = 3.0
     # Number of videos to analyse concurrently. "auto" derives it from

@@ -10,6 +10,7 @@ Python adds launcher/ to sys.path[0] automatically, so sibling modules
 import logging
 
 import config
+import paths
 import sync as sync_mod
 import ui as ui_mod
 from analyze_worker import AnalyzeStatus, AnalyzeWorker
@@ -17,12 +18,21 @@ from analysis.motility import MotilityAgent, MotilityStatus
 from analysis.crawling import CrawlingAgent, CrawlingStatus
 from analysis.counting_agent import CountingAgent, CountingStatus
 from survival import SurvivalAgent, SurvivalStatus
+from update_check import UpdateChecker, UpdateStatus
 
 
 def main() -> None:
     config.setup_logging()
     log = logging.getLogger(__name__)
-    log.info("WormScan Launcher starting")
+    log.info("WormScan Launcher starting — build %s", paths.version_string())
+
+    # Installed builds ship their own ffmpeg/ffprobe. Putting that directory on
+    # PATH here reaches every subprocess in the app at once, because they all
+    # inherit this environment — so no ffmpeg call site needed changing, and a
+    # dev checkout (where the directory does not exist) is untouched.
+    if paths.ensure_bundled_tools_on_path():
+        log.info("using bundled ffmpeg/ffprobe from %s", paths.bundled_tools_dir())
+    log.info(paths.describe())
 
     settings = config.load()
 
@@ -54,6 +64,14 @@ def main() -> None:
     analyze_agent = AnalyzeWorker(settings, analyze_status)
     analyze_agent.start()
 
+    # One-shot release check. Runs five seconds after start-up, reports through
+    # a status object like everything else, and is silent about every failure.
+    # It exits on its own once done; stop() only matters if the user closes the
+    # window inside those first five seconds.
+    update_status = UpdateStatus()
+    update_agent = UpdateChecker(settings, update_status)
+    update_agent.start()
+
     win = ui_mod.MainWindow(
         settings, agent, status,
         motility_agent, motility_status,
@@ -61,6 +79,7 @@ def main() -> None:
         counting_agent, counting_status,
         survival_agent, survival_status,
         analyze_status=analyze_status,
+        update_status=update_status,
     )
     win.mainloop()
 
@@ -76,6 +95,8 @@ def main() -> None:
     survival_agent.join(timeout=5)
     analyze_agent.stop()
     analyze_agent.join(timeout=5)
+    update_agent.stop()
+    update_agent.join(timeout=5)
     log.info("WormScan Launcher stopped")
 
 

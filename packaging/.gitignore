@@ -1,0 +1,6 @@
+# Build scaffolding — hundreds of MB of downloaded wheels, interpreters and
+# ffmpeg, all reproducible by running build_installer.ps1.
+_build/
+
+# The installers themselves. Ship these from GitHub Releases, not git history.
+dist/

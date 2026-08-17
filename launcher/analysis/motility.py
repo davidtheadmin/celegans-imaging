@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import paths
+
 log = logging.getLogger(__name__)
 
 _ANALYSIS_PREFIX = "_analysis"
@@ -86,7 +88,7 @@ def _process_one_video_motility(
     folder: Path,
     *,
     image: str,
-    docker_cmd: str,
+    engine: object,
     timeout_s: int,
     params_template: dict,
     head_angle_prominence: float,
@@ -181,7 +183,7 @@ def _process_one_video_motility(
             stdout, stderr = run_tierpsy(
                 avi, json_file,
                 image=image,
-                docker_cmd=docker_cmd,
+                engine=engine,
                 timeout_s=timeout_s,
             )
             plog(f"Tierpsy stdout:\n{stdout}")
@@ -431,7 +433,7 @@ class MotilityAgent(threading.Thread):
         self._load_params()
 
     def _load_params(self) -> None:
-        params_path = Path(__file__).parent.parent / "motility_params.json"
+        params_path = paths.motility_params()
         try:
             self._params_template = json.loads(params_path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -572,18 +574,26 @@ class MotilityAgent(threading.Thread):
                 current_stage="Discovering videos…",
             )
 
-            image = f"{s.tierpsy_image}:{s.tierpsy_image_tag}"
+            from analysis.docker_utils import resolve_engine, resolve_image
+            from analysis.engine import Engine as _Engine
+            engine = resolve_engine(s) or _Engine(
+                command=getattr(s, "docker_command", "docker"),
+                kind="docker", version="(not detected)")
+            image = resolve_image(s)
+            write_log(f"Container engine: {engine}")
+            write_log(f"Tierpsy image: {image}")
+            write_log(paths.describe())
             head_angle_prominence = float(self._params_template.get("head_angle_prominence", 0.30))
             all_fragment_rows: list[dict] = []
             summary_rows: list[dict] = []
 
             workers, cpus, mem_gb = resolve_workers(
-                getattr(s, "concurrent_videos", "auto"), s.docker_command
+                getattr(s, "concurrent_videos", "auto"), engine
             )
             ff_threads = ffmpeg_threads_per_worker(workers)
             write_log(
                 f"Concurrency: {workers} worker(s) "
-                f"(docker sees {cpus} cpu, {mem_gb:.1f} GB; setting="
+                f"({engine.kind} sees {cpus} cpu, {mem_gb:.1f} GB; setting="
                 f"{getattr(s, 'concurrent_videos', 'auto')}); "
                 f"ffmpeg threads/worker={ff_threads}"
             )
@@ -615,7 +625,7 @@ class MotilityAgent(threading.Thread):
                             _process_one_video_motility,
                             video, folder,
                             image=image,
-                            docker_cmd=s.docker_command,
+                            engine=engine,
                             timeout_s=s.analysis_video_timeout_s,
                             params_template=self._params_template,
                             head_angle_prominence=head_angle_prominence,

@@ -22,3 +22,8 @@ launcher/vision/.venv-vision/
 
 # Generated diagnostic outputs (archived in docs/calibration/ when finalised)
 launcher/worm_diagnostics/
+
+# Installer build scaffolding and output (see packaging/README.md)
+packaging/_build/
+packaging/dist/
+.wsstage/

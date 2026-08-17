@@ -158,3 +158,21 @@ Shared bearer token. Pass as `X-Auth-Token` header or `?token=` query param. Onl
 | 5a | Done | SHA256 manifest, ack endpoints, clock sync, AE shutter cap |
 | 6 | Done | Windows launcher (CustomTkinter): sync agent plus motility, crawling, and counting (colony-survival) analysis pipelines |
 | Next | — | `microns_per_pixel` calibration to unlock real-unit speed/length (analysis outputs are currently in pixels) |
+
+---
+
+## Licence
+
+WormScan is licensed under the **GNU Affero General Public License v3.0** —
+see [`LICENSE`](LICENSE).
+
+That choice is not arbitrary. The staging pipeline links `ultralytics`, which
+is AGPL-3.0, and the installer ships it, so the combined work has to be offered
+on the same terms. [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) lists
+everything redistributed here and under what licence — including the bundled
+ffmpeg, which is a **GPL** build because `render_video.py` encodes with
+libx264.
+
+Copyright (C) 2026 David Haeckes.
+> If this work is owned by your institution rather than by you personally,
+> replace that line with the correct holder before distributing.
