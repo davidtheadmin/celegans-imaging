@@ -369,7 +369,25 @@ class SyncAgent(threading.Thread):
             )
             resp.raise_for_status()
             manifest = resp.json()
+        except requests.HTTPError as exc:
+            # A reply that says "no" is not the same as no reply. The Pi
+            # answers 401 for a bad token (capture/app/auth.py), and reporting
+            # that as "Pi unreachable" sends someone to check cables over a
+            # mistyped character. Distinguish the two.
+            code = exc.response.status_code if exc.response is not None else None
+            if code == 401:
+                log.warning("Manifest fetch rejected: 401 Unauthorized (token mismatch)")
+                self.status.update(color="red", label="Bad token - check Settings")
+            else:
+                log.warning("Manifest fetch failed: %s", exc)
+                self.status.update(
+                    color="red",
+                    label=f"Pi error {code}" if code else "Pi unreachable",
+                )
+            return
         except Exception as exc:
+            # Connection refused, DNS, timeout, malformed JSON: the Pi really
+            # is out of reach or not answering sensibly.
             log.warning("Manifest fetch failed: %s", exc)
             self.status.update(color="red", label="Pi unreachable")
             return

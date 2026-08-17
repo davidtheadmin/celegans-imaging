@@ -80,15 +80,34 @@ The dot in the corner will be **red**, because it does not yet know where the
 imaging Pi is. To fix that:
 
 1. Click **Settings** (bottom right)
-2. Fill in the two values David gives you:
-   - **Pi URL** — the address of the imaging Pi, e.g. `http://192.168.50.2:8000`
-   - **Token** — the access code. Treat it like a password.
+2. **Paste the connection link David sends you** into the **Pi URL** box.
+
+   It looks like this:
+
+   ```
+   http://192.168.50.2:8000/?token=xxxxxxxx
+   ```
+
+   Both fields fill in by themselves — the address goes in the top box and the
+   access code drops into the Token box below it. Nothing to retype.
+
+   If you were given the two values separately instead, type them in by hand:
+   **Pi URL** (e.g. `http://192.168.50.2:8000`) and **Token**.
 3. **Mirror folder** is where synced images will land on your laptop. It
    defaults to `Documents\WormScan`, which is usually what you want.
 4. Click **Save**
 
-Within a minute the dot should turn **green**, as long as your laptop is
-connected to the Pi by ethernet and the Pi is switched on.
+Within a minute the dot should turn **green**, as long as the ethernet cable to
+the Pi is plugged in and the Pi is switched on. **You do not need to configure
+anything about the network** — the Pi gives your computer an address by itself.
+
+If the dot stays red, the message under it tells you which problem it is:
+
+| Message | Meaning |
+|---|---|
+| **Bad token - check Settings** | The Pi answered but rejected the code. Re-paste the link. |
+| **Pi unreachable** | Nothing answered. Check the cable and that the Pi is on. |
+| **Pi error 500** | The Pi answered with a fault. Send David the number. |
 
 **You can now use Colony Survival and Worm Survival.** Nothing further is needed
 for those.

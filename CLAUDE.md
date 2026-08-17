@@ -13,7 +13,15 @@ Raspberry Pi 5–based automated imaging system for C. elegans assays (motility 
 
 - **Laptop**: Windows 11, edits code locally. Dependencies like `picamera2` only exist on the Pi — import errors locally are expected.
 - **Pi IP**: `192.168.50.2` (static, direct ethernet cable, no router)
-- **Laptop IP**: `192.168.50.1`
+- **Laptop IP**: `192.168.50.1` (hand-set static; ignores DHCP)
+- **Other machines get an address automatically.** `eth0` uses NetworkManager
+  `ipv4.method shared`, so the Pi is a DHCP server on the direct cable
+  (`192.168.50.11`–`.254`). Options in
+  `/etc/NetworkManager/dnsmasq-shared.d/celegans.conf` suppress the gateway and
+  DNS advertisements, so a client does not try to route the internet down a
+  cable that goes nowhere. Do NOT set `ipv4.method shared` without also setting
+  `ipv4.addresses 192.168.50.2/24` in the same command — alone it picks
+  `10.42.0.1/24` and breaks every hardcoded address. Details in `README.md`.
 - **SSH alias**: `ssh celegans` connects as user `pi` with key-based auth. Always use this alias — never `celegans.local`.
 - **Pi user/home**: `pi` / `/home/pi/`
 - **Repo on Pi**: `/home/pi/celegans-imaging/`

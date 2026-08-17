@@ -4,6 +4,25 @@ Automated imaging and motility analysis system for *C. elegans* assays, built on
 
 ---
 
+## Start here
+
+**Using WormScan?** Two documents, in order:
+
+1. **[Installing WormScan](launcher/INSTALL.md)** - download one file,
+   double-click it, paste one connection link. No Python, no administrator
+   rights, nothing to configure about the network.
+2. **[User guide](docs/USER-GUIDE.md)** - running an experiment end to end, and
+   **what the numbers mean and which of them to trust.** Read the
+   [Reading the output](docs/USER-GUIDE.md#reading-the-output) section before
+   putting any of these figures in a figure: motility distances are in pixels
+   rather than microns, and the worm-staging counts are provisional in a
+   specific, known way.
+
+Everything below this point is for developing and maintaining the system, not
+for using it.
+
+---
+
 ## Hardware
 
 | Component | Details |
@@ -77,6 +96,12 @@ docs/calibration/            # Archived bend-counting calibration receipts
 
 - **Laptop**: Windows 11. Edits code locally — `picamera2` import errors are expected.
 - **Pi IP**: `192.168.50.2` (static, direct ethernet, no router)
+- **The Pi hands out addresses.** `eth0` runs NetworkManager's `shared` mode, so
+  the Pi is a DHCP server on the direct cable: plug any machine in and it gets
+  `192.168.50.11`–`.254` automatically. No static IP to configure per machine,
+  and no administrator rights needed on the client — which is the whole point,
+  because setting a static address on Windows requires admin and a new user
+  usually does not have it. See [Pi network](#pi-network) below.
 - **SSH alias**: `ssh celegans` (user `pi`, key-based auth — use this, never `celegans.local`)
 - **Pi repo**: `/home/pi/celegans-imaging/`
 - **Pi venv**: `/home/pi/celegans-imaging/.venv/` (created with `--system-site-packages`)
@@ -114,6 +139,58 @@ sudo journalctl -u celegans-capture -f
 ```
 
 The web UI is served at `http://192.168.50.2:8000`. Authenticate with the bearer token from `capture/.env`.
+
+> Note the service binds `0.0.0.0`, so it also answers on `wlan0` when the Pi is
+> on Wi-Fi. Anyone on that network who has the token can reach it. There is one
+> shared token for everyone; treat it accordingly.
+
+<a name="pi-network"></a>
+### Pi network
+
+`eth0` is configured by the NetworkManager profile **`direct-laptop`**:
+
+```
+ipv4.method     shared
+ipv4.addresses  192.168.50.2/24
+ipv4.gateway    --
+```
+
+`shared` keeps the manual address *and* starts a DHCP server on that interface
+(using the `dnsmasq` binary from `dnsmasq-base`, already present — the `dnsmasq`
+package itself is not installed and is not needed).
+
+Extra DHCP options live in `/etc/NetworkManager/dnsmasq-shared.d/celegans.conf`:
+
+```
+dhcp-option=3    # advertise NO default gateway
+dhcp-option=6    # advertise NO DNS server
+dhcp-range=192.168.50.10,192.168.50.50,255.255.255.0,12h
+```
+
+The first two matter. Without them, `shared` mode advertises the Pi as the
+client's default route, and a Windows machine would try to reach the internet
+down a cable that goes nowhere — breaking its normal networking. NetworkManager
+overrides the range with its own `.11`–`.254`, which is harmless.
+
+To reproduce on a fresh Pi:
+
+```bash
+sudo mkdir -p /etc/NetworkManager/dnsmasq-shared.d
+sudo tee /etc/NetworkManager/dnsmasq-shared.d/celegans.conf > /dev/null <<'EOF'
+dhcp-option=3
+dhcp-option=6
+dhcp-range=192.168.50.10,192.168.50.50,255.255.255.0,12h
+EOF
+sudo nmcli connection modify direct-laptop ipv4.addresses 192.168.50.2/24 ipv4.method shared
+sudo nmcli connection up direct-laptop
+```
+
+Set the address and the method in one command: `shared` on its own picks
+`10.42.0.1/24` and every hardcoded reference to `192.168.50.2` breaks.
+
+The laptop keeps its hand-set static `192.168.50.1` and ignores DHCP. There is
+also an inactive `netplan-eth0` profile; `direct-laptop` wins on boot, which is
+worth re-checking after any network change.
 
 ---
 
@@ -173,6 +250,24 @@ everything redistributed here and under what licence — including the bundled
 ffmpeg, which is a **GPL** build because `render_video.py` encodes with
 libx264.
 
-Copyright (C) 2026 David Haeckes.
-> If this work is owned by your institution rather than by you personally,
-> replace that line with the correct holder before distributing.
+Copyright (C) 2026 The WormScan authors.
+
+> **The copyright holder is not yet settled, and it matters.** Under Dutch
+> copyright law (Auteurswet art. 7) copyright in work created by an employee in
+> the course of their employment vests in the **employer** by default, and PhD
+> candidates at Dutch universities are normally employees. If the institution
+> holds the copyright then only the institution can choose the licence - so the
+> AGPL-3.0 release above needs their agreement, not just the maintainer's.
+>
+> "The WormScan authors" is used deliberately in the meantime: it asserts
+> nothing false. Two questions to settle with whoever handles research software
+> or IP at the institution:
+>
+> 1. May this be released under AGPL-3.0? (Note that `ultralytics`, which the
+>    staging pipeline links, is AGPL-3.0, so a permissive licence is not
+>    available while it ships - see
+>    [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).)
+> 2. Whose name belongs on the notice - and the exact legal entity name?
+>
+> Also worth confirming that every contributor agrees, since each holds rights
+> in their own contribution.

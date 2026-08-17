@@ -5,6 +5,10 @@ licence, reproduced or linked here as those licences require. Nothing in this
 file changes WormScan's own licence, which is the GNU Affero General Public
 License v3.0 — see [`LICENSE`](LICENSE).
 
+WormScan itself is Copyright (C) 2026 The WormScan authors. See the licence note
+in [`README.md`](README.md) — the copyright holder is not yet settled, and under
+Dutch law it may be the institution rather than any individual.
+
 Two entries decide WormScan's own licence, and are the reason this project is
 AGPL rather than something more permissive:
 

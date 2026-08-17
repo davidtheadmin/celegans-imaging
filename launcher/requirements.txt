@@ -1,14 +1,42 @@
-requests>=2.31.0
-pandas>=2.0.0
-matplotlib>=3.7.0
-tables>=3.8.0
-h5py>=3.9.0
-numpy>=1.24.0
-openpyxl>=3.1.0
-opencv-python>=4.8.0
-imageio-ffmpeg>=0.5.0
-scipy>=1.11.0
-scikit-image>=0.24.0
-tifffile>=2024.7.2
-imagecodecs>=2024.6.1
-customtkinter>=5.2.0
+# Launcher dependencies - the app itself, NOT the staging-inference stack
+# (that is launcher/vision/requirements.txt, deliberately a separate venv).
+#
+# EXACT PINS, ON PURPOSE.
+#
+# These were `>=` until 2026-08-17, which meant every installer build resolved
+# whatever happened to be newest that day. Two builds a month apart could ship
+# different libraries while both claiming to be the same version of WormScan -
+# which is not a defensible position for software that produces figures.
+#
+# The versions below are the set the 2026.08.17 installer shipped and that was
+# exercised end to end on a clean machine. Bumping one is now a deliberate act
+# with a commit attached, which is the whole point.
+#
+# To upgrade: change a pin, rebuild, re-run a known plate set, and diff the
+# Excel against the previous run before believing it. `pip list --outdated`
+# inside launcher/.venv shows what has moved.
+#
+# Note this pins only the top level. Transitive dependencies still float -
+# `tables` alone pulls in blosc2, pydantic, httpx and rich. Every build records
+# the COMPLETE resolved set in _wheels-manifest.txt inside the installation, so
+# any build remains forensically traceable even where a transitive version is
+# not fixed here.
+
+requests==2.34.2
+pandas==3.0.5
+matplotlib==3.11.1
+tables==3.11.1
+h5py==3.16.0
+numpy==2.5.2
+openpyxl==3.1.5
+opencv-python==5.0.0.93
+imageio-ffmpeg==0.6.0
+scipy==1.18.0
+scikit-image==0.26.0
+tifffile==2026.7.31
+imagecodecs==2026.6.26
+
+# UI toolkit. Version 6 is a major bump from the 5.2.2 that development ran on
+# until this pin; it affects presentation only and cannot change an analysis
+# number. Pinned so dev and installed render identically.
+customtkinter==6.0.0

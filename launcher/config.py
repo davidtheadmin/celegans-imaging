@@ -105,6 +105,49 @@ class Settings:
     concurrent_videos: str = "auto"
 
 
+def parse_connection(text: str) -> tuple[str, str | None]:
+    """
+    Split a pasted connection string into (pi_url, token).
+
+    Accepts either a bare base URL or the full link the launcher's "Open
+    Imaging UI" button already produces:
+
+        http://192.168.50.2:8000/?token=abc123
+        -> ("http://192.168.50.2:8000", "abc123")
+
+    This exists so onboarding is one value instead of two. A token is a long
+    random string; asking someone to retype it into a second box is how you
+    get a support message that says "it does not work" when one character is
+    wrong. Pasting one link cannot go wrong that way.
+
+    A missing scheme is assumed to be http, because "192.168.50.2:8000" is
+    what people actually type. Returns (url, None) when there is no token in
+    the string, so the caller keeps whatever is already in the token field.
+    """
+    from urllib.parse import urlsplit, parse_qs
+
+    raw = (text or "").strip()
+    if not raw:
+        return "", None
+    if "://" not in raw:
+        raw = "http://" + raw
+
+    try:
+        parts = urlsplit(raw)
+    except ValueError:
+        return text.strip(), None
+
+    token = None
+    if parts.query:
+        values = parse_qs(parts.query).get("token")
+        if values and values[0].strip():
+            token = values[0].strip()
+
+    path = parts.path.rstrip("/")
+    base = f"{parts.scheme}://{parts.netloc}{path}"
+    return base.rstrip("/"), token
+
+
 _FIELD_NAMES = {f.name for f in fields(Settings)}
 
 

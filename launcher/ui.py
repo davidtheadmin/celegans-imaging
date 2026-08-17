@@ -14,6 +14,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from dataclasses import replace
+from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -372,9 +373,14 @@ class SettingsDialog(ctk.CTkToplevel):
         self._pi_url = self._entry(body)
         self._pi_url.insert(0, s.pi_url)
         self._pi_url.pack(fill="x", pady=(0, 10))
+        # Paste a full connection link here and both fields fill in. Handled on
+        # FocusOut as well as on Save so the split is visible immediately -- a
+        # silent transformation at save time looks like the paste was ignored.
+        self._pi_url.bind("<FocusOut>", lambda _e: self._absorb_link())
         widgets.Tooltip(
             self._pi_url,
-            "Base URL of the Pi capture service, e.g. http://192.168.50.2:8000",
+            "Base URL of the Pi capture service, e.g. http://192.168.50.2:8000\n"
+            "You can also paste a full connection link containing the token.",
         )
 
         # Token (masked)
@@ -429,6 +435,53 @@ class SettingsDialog(ctk.CTkToplevel):
             side="right", padx=(8, 0)
         )
         widgets.secondary_button(footer, "Cancel", self.destroy).pack(side="right")
+        copy_btn = widgets.secondary_button(footer, "Copy link", self._copy_link)
+        copy_btn.pack(side="left")
+        widgets.Tooltip(
+            copy_btn,
+            "Copy a single link containing the Pi address AND the token.\n"
+            "Send it to someone setting up WormScan: they paste it into the\n"
+            "Pi URL box and both fields fill in. Treat it like a password.",
+        )
+
+    def _absorb_link(self) -> None:
+        """If the Pi URL box holds a full link, split it across both fields."""
+        url, token = cfg.parse_connection(self._pi_url.get())
+        if not url:
+            return
+        if url != self._pi_url.get().strip():
+            self._pi_url.delete(0, tk.END)
+            self._pi_url.insert(0, url)
+        if token:
+            self._token.delete(0, tk.END)
+            self._token.insert(0, token)
+
+    def _copy_link(self) -> None:
+        """Put a one-string connection link on the clipboard."""
+        url, token_in_url = cfg.parse_connection(self._pi_url.get())
+        token = (token_in_url or self._token.get()).strip()
+        if not url or not token:
+            messagebox.showinfo(
+                "Nothing to copy",
+                "Fill in the Pi URL and the token first.",
+                parent=self,
+            )
+            return
+        # quote(): a token is a random string and may contain '+', '/' or '='
+        # (base64 alphabet). Unencoded, '+' decodes back as a SPACE, so the
+        # link would hand over a subtly different token and auth would fail
+        # with no clue why.
+        self.clipboard_clear()
+        self.clipboard_append(f"{url}/?token={quote(token, safe='')}")
+        self.update()
+        messagebox.showinfo(
+            "Connection link copied",
+            "Send this link to whoever is setting up WormScan. They paste it "
+            "into the Pi URL box in Settings and both fields fill in.\n\n"
+            "It contains the access token, so treat it like a password - "
+            "anyone holding it has full access to the imaging station.",
+            parent=self,
+        )
 
     def _browse(self) -> None:
         path = filedialog.askdirectory(initialdir=self._mirror.get() or "~")
@@ -446,10 +499,13 @@ class SettingsDialog(ctk.CTkToplevel):
                 "Invalid input", "Poll interval must be an integer ≥ 10.", parent=self
             )
             return
+        # Parse again here: the user may paste and click Save without the
+        # field ever losing focus, in which case _absorb_link never ran.
+        pi_url, token_in_url = cfg.parse_connection(self._pi_url.get())
         new = replace(
             self._current,
-            pi_url=self._pi_url.get().rstrip("/"),
-            token=self._token.get(),
+            pi_url=pi_url or self._pi_url.get().rstrip("/"),
+            token=(token_in_url or self._token.get()).strip(),
             mirror_root=self._mirror.get(),
             poll_interval_s=poll,
             check_for_updates=bool(self._check_updates.get()),
@@ -2621,7 +2677,9 @@ class MainWindow(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _open_imaging(self) -> None:
-        url = f"{self._settings.pi_url}/?token={self._settings.token}"
+        # Pre-existing: the token was interpolated raw, so a token containing
+        # '+' arrived at the Pi as a space and the imaging UI rejected it.
+        url = f"{self._settings.pi_url}/?token={quote(self._settings.token, safe='')}"
         webbrowser.open_new_tab(url)
 
     def _open_analysis(self) -> None:
