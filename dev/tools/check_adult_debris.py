@@ -67,9 +67,15 @@ except ImportError:
 # Reading
 # --------------------------------------------------------------------------
 
-def read_rows(csv_path: Path, target: str) -> tuple[list[dict], dict]:
-    """Return (rows of the target class, {class: count} for everything)."""
-    rows, per_class = [], defaultdict(int)
+def read_rows(csv_path: Path, target: str) -> tuple[list[dict], dict, dict]:
+    """Return (rows of the target class, {class: count}, {class: [sizes]}).
+
+    The per-class sizes matter: the bounds in stage_conf.json were measured on a
+    DIFFERENT plate set, and box size in pixels is magnification-bound. Using
+    this run's own L4 median as the plausibility boundary, rather than a number
+    imported from elsewhere, is the whole point.
+    """
+    rows, per_class, sizes = [], defaultdict(int), defaultdict(list)
     with open(csv_path, newline="", encoding="utf-8") as fh:
         rd = csv.DictReader(fh)
         needed = {"size_px", "hard_call", "image", "x1", "y1", "x2", "y2"}
@@ -82,30 +88,54 @@ def read_rows(csv_path: Path, target: str) -> tuple[list[dict], dict]:
             if not call:
                 continue
             per_class[call] += 1
+            try:
+                sz = float(r["size_px"])
+            except (TypeError, ValueError):
+                continue
+            sizes[call].append(sz)
             if call.lower() == target.lower():
-                try:
-                    r["_size"] = float(r["size_px"])
-                except (TypeError, ValueError):
-                    continue
+                r["_size"] = sz
                 try:
                     r["_score"] = float(r.get("hard_score") or "nan")
                 except ValueError:
                     r["_score"] = float("nan")
                 rows.append(r)
-    return rows, dict(per_class)
+    return rows, dict(per_class), {k: np.array(v) for k, v in sizes.items()}
 
 
 def find_images(root: Path) -> dict:
-    """basename -> path. Later duplicates are recorded so we can warn."""
-    index, dupes = {}, set()
+    """basename -> [paths]. Kept as a list because basenames are NOT unique.
+
+    A capture timestamp can repeat across experiment folders, and training-set
+    copies of the same plate are common. Picking the first match would crop
+    from the wrong image and quietly invalidate the whole visual test, so
+    resolve_image() disambiguates using the folder recorded in the CSV.
+    """
+    index, dupes = defaultdict(list), set()
     exts = {".tif", ".tiff", ".png", ".jpg", ".jpeg"}
     for p in root.rglob("*"):
         if p.suffix.lower() in exts and p.is_file():
             if p.name in index:
                 dupes.add(p.name)
-            else:
-                index[p.name] = p
-    return index, dupes
+            index[p.name].append(p)
+    return dict(index), dupes
+
+
+def resolve_image(index: dict, row: dict):
+    """(path, ambiguous) for a CSV row, preferring the row's own folder."""
+    cands = index.get(row["image"])
+    if not cands:
+        return None, False
+    if len(cands) == 1:
+        return cands[0], False
+    folder = (row.get("folder") or "").strip()
+    if folder:
+        scoped = [p for p in cands if folder in p.parts]
+        if len(scoped) == 1:
+            return scoped[0], False
+        if scoped:
+            return scoped[0], True
+    return cands[0], True
 
 
 def load_image(path: Path):
@@ -140,7 +170,10 @@ def pct(n, d):
     return f"{100.0 * n / d:.1f}%" if d else "n/a"
 
 
-def part_a(rows, per_class, target, lo, hi):
+_ORDER = ["egg", "L1", "L2", "L3", "L4", "young adult", "adult"]
+
+
+def part_a(rows, per_class, sizes, target, lo, hi):
     print("=" * 72)
     print(f"PART A - where the '{target}' detections actually sit")
     print("=" * 72)
@@ -149,6 +182,22 @@ def part_a(rows, per_class, target, lo, hi):
     print(f"\n{total} detections in this run:")
     for c, n in sorted(per_class.items(), key=lambda kv: -kv[1]):
         print(f"    {c:14} {n:7}  {pct(n, total)}")
+
+    print("\nMedian size per class, THIS run (px). Stage is a size readout, so")
+    print("these should rise monotonically; where they do not, the model is not")
+    print("separating those stages by size and gating them is not safe:")
+    known = [c for c in _ORDER if c in sizes] + \
+            [c for c in sorted(sizes) if c not in _ORDER]
+    prev, ok = None, True
+    for c in known:
+        med = float(np.median(sizes[c]))
+        flag = ""
+        if prev is not None and med < prev:
+            flag, ok = "   <-- DOES NOT RISE", False
+        print(f"    {c:14} {med:7.1f}   (n={len(sizes[c])}){flag}")
+        prev = med
+    if ok:
+        print("    -> monotonic, so size is a usable signal on this data.")
 
     if not rows:
         print(f"\nNo '{target}' detections. Nothing to decide.")
@@ -258,19 +307,36 @@ def part_b(bands, index, dupes, out_dir, target, n_each, seed):
     if not disputed:
         print("\nNothing in the disputed band. No sheets written.")
         return
-    pick_d = rng.sample(disputed, min(n_each, len(disputed)))
-    pick_c = rng.sample(control, min(n_each, len(control)))
+    # Sampling boxes at random means ~one 12 MP TIFF decode per box, which is
+    # minutes. Prefer the images that carry the MOST disputed boxes instead:
+    # same number of crops, a fraction of the decodes, and no bias that matters
+    # here (we are asking what these objects look like, not estimating a rate).
+    def cluster(pool, n):
+        by_img = defaultdict(list)
+        for r in pool:
+            by_img[r["image"]].append(r)
+        out = []
+        for _img, group in sorted(by_img.items(), key=lambda kv: -len(kv[1])):
+            rng.shuffle(group)
+            out.extend(group[:max(1, n // 3)])
+            if len(out) >= n:
+                break
+        return out[:n]
+
+    pick_d = cluster(disputed, n_each)
+    pick_c = cluster(control, n_each)
     print(f"\nSampling {len(pick_d)} disputed and {len(pick_c)} known-good "
           f"'{target}' boxes as a control.")
-    if dupes:
-        print(f"WARNING: {len(dupes)} image basename(s) appear more than once "
-              "under --images; crops for those may come from the wrong copy.")
 
-    cache, items = {}, []
+    cache, items, unresolved, n_ambig = {}, [], defaultdict(int), 0
     for r, tag in [(r, "disputed") for r in pick_d] + [(r, "control") for r in pick_c]:
-        name = r["image"]
-        p = index.get(name)
+        p, ambiguous = resolve_image(index, r)
+        n_ambig += 1 if ambiguous else 0
         if p is None:
+            # A Development run can span several folders (one per timepoint),
+            # and --images is often pointed at just one of them. Record which,
+            # so the failure names itself instead of being a shrug.
+            unresolved[r.get("folder") or "?"] += 1
             continue
         if p not in cache:
             cache[p] = load_image(p)
@@ -282,15 +348,31 @@ def part_b(bands, index, dupes, out_dir, target, n_each, seed):
         t = crop(img, r)
         if t is not None:
             items.append({"tile": t, "tag": tag, "size": r["_size"],
-                          "score": r["_score"], "image": name,
+                          "score": r["_score"], "image": r["image"],
                           "det": r.get("det_index", "")})
+    if unresolved:
+        tot = sum(unresolved.values())
+        print(f"\n{tot} sampled box(es) could not be matched to an image under "
+              f"--images. By the run folder they came from:")
+        for f, n in sorted(unresolved.items(), key=lambda kv: -kv[1]):
+            print(f"    {f:32} {n}")
+        print("  A Development run can span several folders, one per timepoint.")
+        print("  Point --images at the folder that CONTAINS all of them (e.g.")
+        print("  ...\\Documents\\WormScan\\experiments) rather than at one of them.")
     if not items:
-        print("\nCould not crop anything. Is --images pointing at the folder "
-              "that holds the original images?")
+        print("\nCould not crop anything, so Part B has nothing to show.")
         return
 
     got_d = sum(1 for i in items if i["tag"] == "disputed")
     print(f"Cropped {len(items)} boxes ({got_d} disputed).")
+    if n_ambig:
+        print(f"WARNING: {n_ambig} box(es) had an ambiguous filename that the "
+              "run folder did not disambiguate; those crops may come from the "
+              "wrong copy of the image. Narrow --images if this is more than a "
+              "couple.")
+    elif dupes:
+        print(f"({len(dupes)} basename(s) are duplicated under --images, all "
+              "resolved by the run folder recorded in the CSV.)")
 
     labelled = sorted(items, key=lambda i: i["size"])
     sheet([i["tile"] for i in labelled],
@@ -337,9 +419,12 @@ def main():
     ap.add_argument("--class", dest="target", default="adult")
     ap.add_argument("--floor", type=float, default=43.0,
                     help="shipped class_size_px lower bound (default 43)")
-    ap.add_argument("--plausible", type=float, default=71.0,
-                    help="size below which an 'adult' is implausible; the L4 "
-                         "median (default 71)")
+    ap.add_argument("--plausible", type=float, default=None,
+                    help="size below which an 'adult' is implausible. Defaults "
+                         "to THIS run's own L4 median, which is the right "
+                         "reference because box size in px is magnification-"
+                         "bound and stage_conf.json's numbers came from a "
+                         "different plate set")
     ap.add_argument("--sample", type=int, default=24,
                     help="boxes per group on the contact sheets")
     ap.add_argument("--seed", type=int, default=0)
@@ -347,8 +432,22 @@ def main():
 
     if not a.csv.is_file():
         sys.exit(f"not found: {a.csv}")
-    rows, per_class = read_rows(a.csv, a.target)
-    bands = part_a(rows, per_class, a.target, a.floor, a.plausible)
+    rows, per_class, sizes = read_rows(a.csv, a.target)
+
+    # Default the plausibility boundary to THIS run's own L4 median rather than
+    # a number measured on another plate set at another magnification.
+    if a.plausible is None:
+        ref = sizes.get("L4")
+        if ref is not None and len(ref):
+            a.plausible = round(float(np.median(ref)), 1)
+            print(f"[plausibility boundary = {a.plausible} px, this run's own "
+                  f"L4 median (n={len(ref)}). Override with --plausible.]")
+        else:
+            a.plausible = 71.0
+            print("[no L4 detections to measure; falling back to 71 px, the "
+                  "value recorded in stage_conf.json from another plate set.]")
+
+    bands = part_a(rows, per_class, sizes, a.target, a.floor, a.plausible)
     if bands is None:
         return
     if not a.images:

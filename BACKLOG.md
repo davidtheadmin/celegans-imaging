@@ -382,14 +382,22 @@ ordered egg < L1 < L2 < L3 < L4 < young adult < adult, and a small glob labelled
 Seam-truncated boxes are exempt (a clipped worm is legitimately undersized and
 gating it would delete a real worm).
 
-**UPDATE 2026-08-18: no longer empty.** `class_size_px` was measured and
-populated on 2026-08-05 and now gates five classes. **But the `adult` lower
-bound is still wrong for the purpose**: it sits well below the median size of an
-L4, so the small debris this gate was built to catch still passes. The block's
-own README explains why that happened — percentiles cut from the model's own
-detections let the debris set its own lower bound — and the instruction below to
-set the adult floor by hand from L4's median has not been carried out. Original
-note:
+**UPDATE 2026-08-18: no longer empty, and the adult bound is now CHECKED —
+leave it alone.** `class_size_px` was measured and populated on 2026-08-05 and
+gates five classes. The `adult` lower bound of 43 px sits below an L4 median,
+which looked wrong, so it was measured rather than assumed
+(`dev/tools/check_adult_debris.py`, on the Populationrescue 5-timepoint run):
+the floor removes zero of 1,168 adults, the 101 adults below the L4 median are
+**all worms** on inspection, and their median long side (90 px) matches an L4's
+(94 px). They are L4-sized animals labelled adult — a stage-boundary error, not
+debris. Both are survivors, so correcting all 101 would move survival % by 0.000
+and mean stage index by 0.013.
+
+**So the instruction below — set the adult floor by hand from L4's median — is
+withdrawn.** Acting on it would delete 101 real worms from both sides of every
+ratio to buy a 0.013 correction. The gate stays as a guard against gross
+regression. Re-run the script if globs reappear; the original debris report came
+from a different plate set. Original note:
 
 **Shipped empty, i.e. off.** The pixel size of a stage depends on the
 magnification, so there is no honest default; a guessed bound silently deletes
