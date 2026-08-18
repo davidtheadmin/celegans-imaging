@@ -2552,6 +2552,20 @@ class MainWindow(ctk.CTk):
     # ------------------------------------------------------------------
 
     def _poll(self) -> None:
+        # Everything below runs inside a Tk `after` callback. An exception here
+        # skips the re-arm at the end of the method, which silently kills the
+        # whole polling loop: no sync status, no completion notices, no update
+        # notice and no toasts for the rest of the session, with the window
+        # still responsive so nothing looks wrong. The re-arm is in `finally`
+        # and the body is guarded so one bad frame cannot end the loop.
+        try:
+            self._poll_body()
+        except Exception:
+            log.exception("UI poll failed")
+        finally:
+            self.after(_POLL_MS, self._poll)
+
+    def _poll_body(self) -> None:
         self._poll_analyze_button()
 
         # --- Check analysis completion and surface result dialog ---
@@ -2644,8 +2658,6 @@ class MainWindow(ctk.CTk):
         self._info_tip.set_text(info_full)
 
         self._poll_update()
-
-        self.after(_POLL_MS, self._poll)
 
     def _poll_update(self) -> None:
         """Show the update notice once, if the background check found one."""

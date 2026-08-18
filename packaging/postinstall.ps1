@@ -274,7 +274,7 @@ sys.exit(0)
 # so a missing one surfaces here rather than as a traceback the user sees.
 $checks = @(
     @{ Py = $launcherPy; Label = 'launcher'
-       Mods = 'customtkinter,pandas,numpy,cv2,skimage,tables,h5py,matplotlib,openpyxl,scipy,tifffile,imagecodecs,requests' },
+       Mods = 'customtkinter,pandas,numpy,cv2,skimage,tables,h5py,matplotlib,openpyxl,scipy,tifffile,imagecodecs,requests,PIL' },
     @{ Py = $visionPy;   Label = 'vision'
        Mods = 'torch,torchvision,ultralytics,numpy,cv2' }
 )

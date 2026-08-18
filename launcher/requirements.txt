@@ -36,6 +36,12 @@ scikit-image==0.26.0
 tifffile==2026.7.31
 imagecodecs==2026.6.26
 
+# Imported directly at module scope by widgets.py (icon rendering), so it is a
+# start-up requirement, not an optional extra. It would arrive anyway as a
+# transitive dependency of matplotlib and scikit-image - declared explicitly so
+# that stays true by intent rather than by luck.
+pillow==12.3.0
+
 # UI toolkit. Version 6 is a major bump from the 5.2.2 that development ran on
 # until this pin; it affects presentation only and cannot change an analysis
 # number. Pinned so dev and installed render identically.

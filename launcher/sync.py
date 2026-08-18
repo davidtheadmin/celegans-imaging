@@ -353,7 +353,18 @@ class SyncAgent(threading.Thread):
         self._do_clock_sync(s)
         while not self._stop.is_set():
             s = self._get_settings()
-            self._tick(s)
+            try:
+                self._tick(s)
+            except Exception:
+                # _tick guards its HTTP call but nothing below it: a mirror on a
+                # network share that drops, or a file held open by another
+                # process, raised OSError straight out of the loop and killed
+                # this thread. Under pythonw.exe the traceback goes nowhere and
+                # the status object keeps its last value, so the UI showed a
+                # GREEN dot and "Synced" forever while nothing was mirrored.
+                log.exception("Sync tick failed")
+                self.status.update(color="red",
+                                   label="Sync error - see launcher.log")
             self._wake.wait(s.poll_interval_s)
             self._wake.clear()
 

@@ -157,7 +157,22 @@ def load() -> Settings:
             data = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
             return Settings(**{k: v for k, v in data.items() if k in _FIELD_NAMES})
         except Exception:
-            pass
+            # Do not fail silently. Returning defaults here means the next
+            # save() overwrites the file, so a truncated config.json (power cut
+            # mid-write - save() is not atomic) would permanently destroy the
+            # token, the mirror path and every tuned threshold, with nothing in
+            # the log to explain why the settings "reset themselves".
+            backup = _CONFIG_FILE.with_suffix(".bad")
+            try:
+                backup.write_bytes(_CONFIG_FILE.read_bytes())
+                where = f" A copy was kept at {backup}."
+            except OSError:
+                where = " The unreadable file could not be backed up."
+            logging.getLogger(__name__).error(
+                "Could not read %s, so WormScan started with default settings. "
+                "Anything you had configured is in that file, not lost.%s",
+                _CONFIG_FILE, where, exc_info=True,
+            )
     return Settings()
 
 

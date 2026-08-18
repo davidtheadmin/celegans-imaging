@@ -172,8 +172,14 @@ def make_overview_png(
     fig.suptitle(title)
 
     if len(conditions) <= 1:
+        # Drop plates with no median BPM. When EVERY plate is None (a video set
+        # where no worm survives the observation/debris gates) pandas infers
+        # object dtype and ax.bar raises TypeError - after the xlsx and csv have
+        # already been written, so the run looks like a crash when the data is
+        # fine. The multi-condition branch below has always done this.
+        ok = ok[ok["bpm_median_long"].notna()]
         plates = ok["plate"].tolist()
-        bpms = ok["bpm_median_long"].tolist()
+        bpms = pd.to_numeric(ok["bpm_median_long"], errors="coerce").tolist()
         ax.bar(range(len(plates)), bpms, color="#4caf50", alpha=0.8)
         ax.set_xticks(range(len(plates)))
         ax.set_xticklabels(plates, rotation=45, ha="right")

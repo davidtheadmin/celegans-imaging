@@ -372,9 +372,18 @@ class CountingAgent(threading.Thread):
                     current_basename=path.name,
                     current_stage=f"{i + 1}/{total} done",
                 )
-                colony_rows, plate_row = process_image(
-                    path, folder, opts, out_dir, write_log
-                )
+                try:
+                    colony_rows, plate_row = process_image(
+                        path, folder, opts, out_dir, write_log
+                    )
+                except Exception as exc:
+                    # One corrupt TIFF used to escape the loop, escape
+                    # _run_analysis, and abort the run before write_outputs -
+                    # so a bad plate 19 of 24 threw away the 18 good ones and
+                    # wrote no xlsx at all. Skip the image, keep the batch.
+                    log.exception("Counting failed on %s", path.name)
+                    write_log(f"ERROR {path.name}: {exc}  (skipped)")
+                    continue
                 all_colony_rows.extend(colony_rows)
                 if plate_row is not None:
                     plate_rows.append(plate_row)
