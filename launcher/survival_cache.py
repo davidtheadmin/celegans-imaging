@@ -97,12 +97,20 @@ def settings_digest(stage_conf: dict, class_conf: dict,
     keeps serving results produced without it. Hashing the file means a new
     parameter invalidates the cache by construction — the safe direction.
 
-    The rescore block is excluded on purpose: alpha is recomputable from the
-    cached score vectors, so changing it must not force a re-run.
+    Of the rescore block, only ``alpha`` is excluded: it is recomputable from
+    the cached score vectors, so changing it must not force a re-run. ``refs``
+    ARE hashed. They are not recomputable — relabelling divides by ref**alpha,
+    so different refs give different labels from the same vectors — and
+    stage_conf.json tells you to re-measure them after a retrain. Leaving them
+    out meant that supported workflow silently served the previous refs' counts
+    while run_info reported the new ones.
     """
+    rescore = (stage_conf or {}).get("rescore") or {}
     payload = {
         "stage_conf": _strip_private(
             {k: v for k, v in (stage_conf or {}).items() if k != "rescore"}),
+        "rescore_refs": {str(k): round(float(v), 6)
+                         for k, v in sorted((rescore.get("refs") or {}).items())},
         "class_conf": {str(k): round(float(v), 4)
                        for k, v in sorted((class_conf or {}).items())},
         "exclude_classes": sorted(str(c).strip().lower()
@@ -158,6 +166,18 @@ def write_manifest(out_dir: Path, *, digest: str, meta: dict,
             # detection attributed to the wrong plate is worse than a re-run.
             reusable = False
             reason = "two or more images share a filename inside this folder"
+        # Which images this run actually produced a record for. An image that
+        # was analysed and found nothing IS covered (empty counts is a real
+        # result); an image the run never reached is not. Without this the
+        # manifest records intent rather than outcome, and a run that died at
+        # image 3 of 32 makes the next run report 29 plates as zero animals.
+        covered = set(f.get("covered") or [])
+        unseen = [n for n in names if n not in covered]
+        if unseen and reusable:
+            reusable = False
+            reason = (f"the run produced no record for {len(unseen)} of "
+                      f"{len(names)} image(s) — it did not finish, so those "
+                      "images were never actually analysed")
         key = (folder.name, f"{float(f['timepoint_h']):g}")
         if key in seen_keys:
             reusable = False
@@ -172,6 +192,7 @@ def write_manifest(out_dir: Path, *, digest: str, meta: dict,
             "reason": reason,
             "images": fps,
             "errors": sorted(set(f.get("errors") or [])),
+            "covered": sorted(covered),
             "n_rows": int(f.get("n_rows") or 0),
         })
 
@@ -301,6 +322,16 @@ def plan_folder(folder: Path, images: list[Path], manifests: list[dict],
             reasons.append(f"{Path(man['_run_dir']).name}: "
                            + (entry.get("reason") or "marked not reusable"))
             continue
+        if "covered" not in entry:
+            # Written before the manifest recorded which images a run actually
+            # analysed. A partial run cannot be told from a complete one, and
+            # the failure is silent (missing rows read as zero animals), so the
+            # only safe answer is to analyse the folder again. One-time cost.
+            reasons.append(f"{Path(man['_run_dir']).name}: predates the "
+                           "completeness record, so a partial run cannot be "
+                           "told from a complete one")
+            continue
+        covered = set(entry.get("covered") or [])
         csv_path = Path(man["_run_dir"]) / man.get("soft_csv",
                                                    "soft_stage_scores.csv")
         if not csv_path.is_file():
@@ -321,6 +352,7 @@ def plan_folder(folder: Path, images: list[Path], manifests: list[dict],
             # transient, they are few, and a retry that succeeds is strictly
             # better than inheriting a failure.
             if (cached is not None and p.name not in errored
+                    and p.name in covered
                     and _same_file(cached, _stat_of(p))):
                 reused.append(p)
             else:

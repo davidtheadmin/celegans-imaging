@@ -2,12 +2,21 @@
 
 Small items deferred from main work. Pick up when convenient.
 
+> **Swept 2026-08-18.** Items verified as already shipped are marked
+> **DONE** with the evidence rather than deleted, so the record survives.
+> Several staging values quoted below were superseded by the 2026-08-05
+> measurement — `launcher/vision/stage_conf.json` is authoritative for those,
+> not this file.
+
 ## Storage (done 2026-05-28)
 
 - `.trash` no longer leaks: reclamation deletes acked files directly (not move-to-trash), the recycle bin auto-purges after `CELEGANS_RETENTION_TRASH_MAX_AGE_DAYS`, and capture refuses on a full card with HTTP 507.
 
 ## UI
 
+- **DONE (verified 2026-08-18).** ~~Soft-deleted thumbnails don't vanish from
+  timeline.~~ Implemented: the tile fades and is removed on `transitionend`
+  (`capture/app/static/app.js`). Original note:
 - **Soft-deleted thumbnails don't vanish from timeline.** When a file is
   deleted in the timeline, the thumbnail is correctly marked "deleted" but
   remains visible. Should fade out / be removed from the strip after delete.
@@ -18,7 +27,14 @@ Small items deferred from main work. Pick up when convenient.
   Check both the frontend labels and any session.json schema fields that
   surface to the user.
 
-## Launcher mirror folder structure
+## Launcher mirror folder structure — MOSTLY DONE (verified 2026-08-18)
+
+`launcher/sync.py` already mirrors to
+`experiments/<experiment name>/<condition name>/<plate label>/<file>` using the
+user-given names, with collision-safe suffixing, and `freecapture` is already
+split into `pictures/` and `videos/`. Only two cosmetic items remain: the
+literal folder name "Free captures", and dropping the top-level `experiments/`
+segment. Original note:
 
 Current mirror layout uses Pi-internal names that are fine for code but
 unfriendly when browsing in Explorer:
@@ -62,7 +78,11 @@ allowing the launcher to detect renames and move the folder.
 
 - On rename, offer to clean orphaned mirror folders from the launcher side (currently they stay).
 
-## UI: delete sessions and conditions, not just plates
+## UI: delete sessions and conditions, not just plates — DONE (verified 2026-08-18)
+
+Implemented: `DELETE /sessions/{id}` and `DELETE /sessions/{id}/conditions/{cid}`
+in `capture/app/main.py`, soft-deleting to `.trash/` with confirmation dialogs,
+exactly as specified below. Original note kept for the record:
 
 Currently the timeline only supports deleting individual plates (and free
 captures). Need bulk-delete operations:
@@ -90,18 +110,81 @@ per-plate delete so retention can clean up later.
 ## Crawling & analysis
 
 - **Crawling under-count — Tierpsy segmentation fragmentation.** Worms visible
-  all 180s are tracked by Tierpsy in only ~16–60s pieces, even at gap25/dist30.
-  Diagnosed (this session) as Tierpsy-level: detection sees ~8 blobs/frame but
-  the linker breaks IDs on brief dropouts; post-processing levers
-  (`traj_max_frames_gap`, grouping distance, run-gap-bridge) are exhausted. The
-  engine drops almost nothing (5 too_short, 0 debris/flicker). The 30s gate is
-  the current pragmatic baseline (7 kept on 601 0J day-0). Deferred work: sweep
-  segmentation params (`mask_min_area`, `thresh_C`, `thresh_block_size`,
-  `worm_bw_thresh_factor`) on one video to hold worms tracked continuously — the
-  only root-cause lever left. Note: raising `traj_max_allowed_dist` to 175
-  REGRESSED (119 fragments) — looser link distance worsens associations, don't
-  retry that. Smaller worms in newer crawling videos may be near the
-  `mask_min_area=500` floor — prime sweep candidate.
+  all 180s are tracked by Tierpsy in only ~16–60s pieces. The 30s gate is the
+  current pragmatic baseline (7 kept on 601 0J day-0 — note no denominator was
+  recorded).
+
+  **Re-assessed 2026-08-18. Two claims in the previous version of this note were
+  wrong and are corrected here.**
+
+  1. *"Post-processing levers are exhausted"* — true, but it does not mean what
+     it was taken to mean. Our linker already allows 150 px over 5 s against
+     Tierpsy's own 30 px over 0.83 s, so it is doing nearly all the joining work
+     and has little left to give. More importantly it runs **after** SKE_FILT, so
+     rejoining fragments recovers span and coverage (which is why the worm then
+     passes the gate) but recovers **no features**. Only joining earlier, inside
+     Tierpsy, helps.
+  2. *"Sweep segmentation params — the only root-cause lever left, deferred"* —
+     that sweep **ran and won**. `dev/tools/tierpsy_param_sweep.py` records Phase
+     3c: `worm_bw_thresh_factor` 1.0 → 0.95 cut fragments **45 → 16**, and 0.92
+     is committed in `crawling_params.json` along with `thresh_C=5` and
+     `thresh_block_size=31`.
+
+  **Still open, and directly indicted by our own diagnostic:** `mask_min_area` is
+  still 500 while the sweep harness records *"36 of 40 mid-video trajectory
+  breaks happen with the worm's measured area in [500, 600]; p1 = 504, median =
+  612"* — the floor sits inside the signal. And **`traj_min_area` = 500 is a
+  second, independent floor at TRAJ_CREATE that has never been in any sweep
+  grid**, so lowering `mask_min_area` alone will have the same cut re-imposed.
+  Sweep them together.
+
+  Also open: `traj_max_frames_gap` = 25 is **0.83 s at 30 fps**, against the ~1 s
+  dropout it exists to bridge. It must be swept jointly with
+  `traj_max_allowed_dist`, because a longer gap needs a longer allowed distance
+  (the worm keeps moving while unseen).
+
+- **"Raising `traj_max_allowed_dist` to 175 REGRESSED (119 fragments)" — treat as
+  untrusted, not as a closed finding.** Three reasons: it was measured in the
+  same session in which the cache bug was discovered, and nothing records that
+  Clear cache was ticked; 30 → 175 is a 5.8× jump with 40–70 unexplored; and
+  mechanically it raised link distance without raising `traj_max_frames_gap`,
+  which loosens same-frame association (more ID swaps → more fragments, which is
+  what 119 shows) without helping gap-crossing at all. Re-run it properly before
+  believing it.
+
+- **Check the sweep harness timeout before trusting any sweep result.**
+  `tierpsy_param_sweep.py` takes its timeout from `analysis_video_timeout_s`
+  (600 s) while the production crawling pipeline needed 3600 s. On timeout the
+  harness writes NaN metrics and the summary plot renders a missing point — a
+  silent gap indistinguishable from a bad parameter value. This biases the
+  `mask_min_area` arm specifically: lower floors admit more blobs and run
+  slower, so the runs most likely to help are the most likely to time out. The
+  `error` column in `comparison.csv` records what actually happened.
+
+- **Before any of the above, read the `per_worm` sheet you already have.** It
+  retains every worm with `track_duration_s`, `skeleton_coverage` and
+  `passed_filter`. One cross-tab of span ≥ 30 against coverage ≥ 0.70 says which
+  half of the gate is binding, at zero compute cost, and reorders everything
+  else here. Note `SKELETON_COVERAGE_MIN = 0.70` is a module constant with no UI
+  and no config field, so unlike `min_span_s` it cannot be re-tuned at
+  aggregation.
+
+- **The crawling log line is not evidence.** `_linker_log` hardcodes
+  `worms_dropped: {"total": 0, "by_reason": {}}`, so every run prints
+  `dropped_total=0 by_reason={}` regardless of what happened, and it omits
+  `ambiguity_skips` (which *is* written to `per_video/*_analysis_log.json`). The
+  note that once read "the engine drops almost nothing (5 too_short, 0
+  debris/flicker)" described the **motility** engine, not this one. Fix the log
+  line; it has already misled once.
+
+- **DONE 2026-08-18: analysis cache now invalidates on param change** — and on
+  pipeline change, which was an unrecorded second failure mode: motility and
+  crawling share `_wormscan_cache/<stem>/`, so running one then the other on the
+  same folder made the second silently reuse the first's tracking, with the
+  answer depending on which order you ran them in. A stamp file now records both
+  the parameter fingerprint and the pipeline; anything unstamped or mismatched is
+  re-run. Note the parameter files are still read once at agent construction, so
+  editing them still requires a launcher restart. Original note:
 
 - **Analysis cache doesn't invalidate on param change.** `_wormscan_cache` hits
   on the existence of `Results/<stem>_featuresN.hdf5`, ignoring whether the
@@ -157,11 +240,20 @@ error here poisons the training set:
 Per-class thresholds now exist end to end. `launcher/vision/stage_conf.json` is
 the single source of truth: `infer_stage.py` reads it whenever no threshold flag
 overrides it, and the launcher reads the same file to seed the seven per-stage
-sliders in the Worm Survival card (and to power their *Reset to defaults*). The
+sliders in the Development card (and to power their *Reset to defaults*). The
 *Analyze on laptop* button inherits it by passing no `--conf` at all, so the
 button and the batch pipeline cannot silently disagree. Values are applied to
 every raw tile detection **before** any NMS, and persisted as
 `survival_class_conf`.
+
+**UPDATE 2026-08-18: the numbers below are superseded.** The thresholds were
+re-measured on 2026-08-05 from 7,265 detections and are no longer the values
+quoted here; `stage_conf.json` records what they are and how they were derived.
+The count-vs-threshold curve was found to have **no flat region**, so the
+"set it where the curve flattens" instruction below cannot be followed — that
+was measured and refuted, and the resolution taken was a uniform floor with one
+data-driven exception. What remains genuinely open is the **cross-check against
+hand-labelled animals**, which has not been done.
 
 **What is still open — the actual calibration.** The shipped numbers
 (`_default` 0.25; egg/L1/L2/L3/young adult 0.30; adult 0.35) were **chosen, not
@@ -186,7 +278,8 @@ To close this out:
       that the remaining ratio is still meaningful.
 
 Until that is done the "Analyze on laptop" annotated counts (CURRENT_STATE §2.6 /
-§6.18) and the Worm Survival Excel are eyeballing aids only.
+§6.18 of the archived docs/history/CURRENT_STATE.md) and the Development
+workbook are eyeballing aids only.
 
 ## Staging — duplicate boxes on one worm (fixed 2026-07-27, wants field checking)
 
@@ -247,7 +340,7 @@ time. The only time you want egg counts is an egg survival, or when you put a
 drop of eggs from bleaching."
 
 `exclude_classes` in `stage_conf.json` ships as `["egg"]`. A **"Count eggs"**
-checkbox appears in the launcher's Worm Survival card (persisted as
+checkbox appears in the launcher's Development card (persisted as
 `survival_count_eggs`) and beside the capture UI's *Analyze on laptop* button;
 the web-UI flag rides to the laptop as an `X-Count-Eggs` response header on
 `/analyze/next`, with the Pi acting purely as a relay so future options need no
@@ -288,6 +381,23 @@ ordered egg < L1 < L2 < L3 < L4 < young adult < adult, and a small glob labelled
 `sqrt(w × h)` in full-frame px, applied to raw detections before any NMS.
 Seam-truncated boxes are exempt (a clipped worm is legitimately undersized and
 gating it would delete a real worm).
+
+**UPDATE 2026-08-18: no longer empty, and the adult bound is now CHECKED —
+leave it alone.** `class_size_px` was measured and populated on 2026-08-05 and
+gates five classes. The `adult` lower bound of 43 px sits below an L4 median,
+which looked wrong, so it was measured rather than assumed
+(`dev/tools/check_adult_debris.py`, on the Populationrescue 5-timepoint run):
+the floor removes zero of 1,168 adults, the 101 adults below the L4 median are
+**all worms** on inspection, and their median long side (90 px) matches an L4's
+(94 px). They are L4-sized animals labelled adult — a stage-boundary error, not
+debris. Both are survivors, so correcting all 101 would move survival % by 0.000
+and mean stage index by 0.013.
+
+**So the instruction below — set the adult floor by hand from L4's median — is
+withdrawn.** Acting on it would delete 101 real worms from both sides of every
+ratio to buy a 0.013 correction. The gate stays as a guard against gross
+regression. Re-run the script if globs reappear; the original debris report came
+from a different plate set. Original note:
 
 **Shipped empty, i.e. off.** The pixel size of a stage depends on the
 magnification, so there is no honest default; a guessed bound silently deletes

@@ -4,9 +4,10 @@
     Build WormScan's two Python environments from the bundled wheels.
 
 .DESCRIPTION
-    Run by the installer immediately after the files are copied. Never run by
-    hand, though running it again is harmless - it rebuilds both environments
-    from scratch.
+    Run by the installer immediately after the files are copied. Do NOT run it
+    by hand: the bundled wheels it installs from are deleted at the end of a
+    successful install, so a second run fails with "wheel directory missing".
+    Re-run the installer instead.
 
     Why the environments are built here rather than shipped ready-made: a
     virtual environment records absolute paths to its own interpreter. One

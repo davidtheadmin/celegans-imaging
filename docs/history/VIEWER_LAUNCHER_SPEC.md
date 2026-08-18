@@ -1,3 +1,11 @@
+> **HISTORICAL — archived 2026-08-18.** A pre-build implementation spec. The
+> feature shipped, including the parts marked optional (settings persistence);
+> only the stdout-streaming progress nicety was skipped, and that is still an
+> open backlog item. Written in the imperative future tense, so read it as an
+> intent document. One factual error worth noting: it states Pillow is already in
+> `launcher/requirements.txt`. It is not — it arrives only transitively via
+> matplotlib and scikit-image, despite being imported directly by `widgets.py`.
+
 # Spec: "Review" viewers in the WormScan launcher
 
 Wire two existing, tested generator scripts into the launcher as a single new

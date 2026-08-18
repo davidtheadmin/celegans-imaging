@@ -1,3 +1,25 @@
+> **HISTORICAL — archived 2026-08-18. Do not trust this document.**
+>
+> This was a hand-regenerated snapshot of the code, last refreshed 2026-07-27
+> against commit `c7045bd`. It was archived 36 commits and roughly +18,500 lines
+> later, and large parts of it are now wrong. Most importantly, its longest
+> section (§4d) describes a "Worm Survival" pipeline that has since been renamed
+> to **Development**, whose output folder, workbook and sheet list all changed,
+> and whose headline metric — survival % — was deliberately retired from every
+> figure because the shrinking denominator produced an inverted dose response.
+>
+> Its original header instructed the reader to *"trust this document over
+> `CLAUDE.md`, `README.md`, and your own memory"*. That instruction is void.
+>
+> It is kept because its reasoning is often still useful — the merge-order
+> analysis, the concurrency history, and the known-deviations list in particular.
+> Read it as a record of what was believed in July 2026, not as a description of
+> the code.
+>
+> **For the current system, read `ARCHITECTURE.md`.** For values that change
+> (thresholds, parameters, class lists), read the code and the `_README` blocks
+> in `launcher/vision/stage_conf.json`.
+
 # CURRENT_STATE.md
 
 **Ground-truth snapshot of how the code actually works — regenerated 2026-07-09 from live `HEAD` (`c7045bd`).**

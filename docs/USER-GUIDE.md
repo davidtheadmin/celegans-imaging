@@ -50,7 +50,7 @@ curves, and a condition that does not match it lands in a visible
 | Mode | Produces | For |
 |---|---|---|
 | `motility` | 30 s H.264 video, 2028×1520 @ 30 fps | Motility, Crawling |
-| `survival` | full-resolution TIFF still, 4056×3040 | Worm Survival, Colony Survival |
+| `survival` | full-resolution TIFF still, 4056×3040 | Development, Colony Survival |
 
 ### Before the first capture of a session
 
@@ -110,7 +110,14 @@ should be the level *above* your condition folders — usually
 beginning with `_` or `.`, so previous output folders are never re-analysed.
 
 Every mode writes a **new timestamped folder** and never overwrites a previous
-run. Re-running is always safe.
+run, so you can never lose an earlier result by re-running.
+
+**One caveat, for Motility and Crawling only.** Tierpsy's tracking is cached per
+video so a re-run does not repeat the slow step. The cache records which
+parameters and which pipeline produced it, and is ignored automatically when
+either has changed — but if you edit `motility_params.json` or
+`crawling_params.json` while the launcher is open, **restart the launcher**: the
+parameter file is read once at startup.
 
 ### Motility — swimming, from video
 
@@ -119,6 +126,10 @@ for tracking and skeletonisation, then WormScan's own bend counting.
 
 **Options:** minimum fragment length (default 5 s), clear cache, and optional
 video renders (tracked, curvature, side-by-side, per-worm traces).
+
+Note the minimum-fragment dial only bites above 10 s: worms observed for less
+than 10 s are always dropped by a fixed internal gate, so any setting at or
+below 10 s gives the same result.
 
 **Output** in `_analysis_<timestamp>\`:
 
@@ -139,6 +150,13 @@ two pipelines are deliberately not interchangeable.
 
 **Options:** minimum track span (default 30 s), renders.
 
+**There is a second filter you cannot see.** A worm must *also* carry a skeleton
+on at least 70% of the frames it was tracked in. That threshold is fixed in the
+code and is not on the dialog, so a worm visible for the whole video can still
+be excluded on skeleton quality alone. If your worm counts look low, this is the
+first thing to check — `per_worm` keeps every worm with a `passed_filter` column
+and both inputs, so you can see which of the two rejected it.
+
 **Output** in `_crawling_analysis_<timestamp>\`: `crawling_results.xlsx`
 (`per_worm` and `per_condition` sheets), `crawling_summary.csv`,
 `overview.png`, optional renders.
@@ -146,14 +164,37 @@ two pipelines are deliberately not interchangeable.
 Gives speed, reversals, path tortuosity, activity fractions, and body-length-
 normalised versions of the distance metrics.
 
+Three things to know before reading those numbers:
+
+- **`overview.png` plots only the pixel-based columns.** The body-length-
+  normalised ones — the columns that exist precisely to cancel out
+  magnification — are in the spreadsheet only. Worm length per condition drifts
+  substantially between imaging days, so **do not compare conditions across days
+  from the overview figure**; use the `_bls` columns.
+- **Path length and tortuosity are biased by tracking quality.** Path length
+  sums only consecutive tracked frames, while net displacement spans the whole
+  track including gaps. A badly tracked worm therefore reports a shorter path
+  and a lower tortuosity than it should, and tracking quality can correlate with
+  treatment.
+- **Worms that Tierpsy tracked but never measured are reported blank, not
+  zero.** They still appear in `per_worm` and still count toward
+  `n_worms_total`, but their speed, reversal and bend columns are empty and they
+  are excluded from the condition means.
+
 ### Colony Survival — clonogenic assay, from stills
 
 **No container engine needed.** Pure image analysis of crystal-violet stained
 single wells: finds the well circle, flattens illumination, thresholds, splits
 touching colonies with a watershed, filters by real colony diameter.
 
-**Options:** split sensitivity (default 3.0) and minimum colony size in µm
-(default 200).
+**Options:** split sensitivity (default 3.0), minimum colony size in µm
+(default 200), detection sensitivity, colony smoothing, and a **same threshold
+for every plate** tickbox that reveals an absolute stain threshold.
+
+That last one is meant for dose series, where a per-plate automatic threshold
+can make plates incomparable. Be aware it is not a perfect fix: illumination
+flattening still runs per plate, so a plate whose colonies have merged into
+large sheets is treated differently from a sparse one.
 
 **Output** in `_counting_analysis_<timestamp>\`: `counting_results.xlsx`
 (`per_colony`, `per_plate`, `per_condition`), `counting_summary.csv`,
@@ -162,13 +203,21 @@ touching colonies with a watershed, filters by real colony diameter.
 **Always look at the overlays.** They show exactly what was counted as a
 colony. It is the only way to catch a systematically wrong threshold.
 
-### Worm Survival — developmental staging, from stills
+### Development — developmental staging, from stills
 
 **No container engine needed** (it uses the bundled model, not Tierpsy). Each
-image is tiled, every tile goes through a YOLO model that classifies worms into
-seven stages, and the boxes are merged back together.
+image is tiled, every tile goes through a YOLO model that classifies worms by
+stage, and the boxes are merged back together.
 
-Survival is then a ratio of stages:
+**The headline readout is the mean stage index** — where each animal sits on the
+L1 → adult scale — together with stage composition and body size.
+
+**A survival percentage is still computed and written to the workbook, but it is
+deliberately absent from every figure.** In a full dose experiment the
+denominator collapses at high dose: one strain lost most of its animals, so the
+percentage was computed over a handful of survivors and *rose* with dose — an
+inverted dose response that was an artefact of the shrinking denominator, not
+biology. The definition, if you need it:
 
 | Category | Stages | In the denominator? |
 |---|---|---|
@@ -178,21 +227,45 @@ Survival is then a ratio of stages:
 
 **survival % = survivors / (survivors + non-survivors) × 100**
 
-**Options:** a confidence slider per stage, *Reset to defaults*, a **Count
-eggs** tickbox (off by default), and save-previews.
+Prefer the body-size distribution. It uses no class labels at all, so it is
+unaffected by the stage-calling problems below.
+
+**Options:** a list of folders with an optional timepoint for each (one run can
+span several timepoints — leave the hours blank to derive them from capture
+times), a confidence slider per stage with *Reset to defaults*, **Correct for
+uneven class confidence** (on by default — see below), **Count eggs** (off by
+default), **Re-analyse images even if results already exist**, and
+save-previews.
+
+**"Correct for uneven class confidence" matters more than it sounds.** The model
+scores some stages far lower than others, and this option rescales each class's
+score before deciding the label. It changes stage assignments — substantially,
+for the classes the model is least confident about. It is on by default because
+the uncorrected labels are worse, but it is a considered setting rather than a
+calibrated one, and the reasoning is recorded in
+`launcher/vision/stage_conf.json`.
+
+**Images already analysed are reused.** Before a run starts, the dialog tells
+you how many images it can take from previous runs and how many it has to
+analyse. Reuse is invalidated automatically whenever a setting that changes the
+result changes. Tick **Re-analyse images** to force a fresh pass.
 
 **Grouping is automatic.** If at least 80% of your filenames carry both a dose
 and a plate token — `N2_500J_p03_0001.tif` — it groups by filename. Otherwise it
 groups by folder. Which it chose is printed in the log and recorded in the
 Excel's `run_info` sheet. **The plate is the unit of replication**: per-condition
-means and SDs are taken across plates, not across images.
+means and SDs are taken across plates. The one exception is a condition with a
+single plate, where the four quadrant images are used instead — that is
+technical rather than biological variation, and each row records which was used.
 
-**Output** in `_survival_<timestamp>\`: `worm_survival_results.xlsx` (sheets
-`run_info`, `per_image`, `per_plate`, `per_condition`, `dose_response`),
-`survival_curve.png`, `log.txt`, and `previews\` if you asked for them.
+**Output** in `_development_<timestamp>\`: `development_results.xlsx` (sheets
+`README`, `run_info`, `per_image`, `per_plate`, `per_condition`, `qc`,
+`size_histogram`, `size_summary`), four figures, `explorer.html` for browsing
+the detections, `soft_stage_scores.csv`, `log.txt`, and `previews\` if you asked
+for them.
 
-**Read `run_info` first.** It records the thresholds, tiling and model that
-*actually ran*, echoed back from the inference step rather than from what the
+**Read `run_info` first.** It records the thresholds, tiling, correction and
+model that *actually ran*, echoed back from the inference step rather than from what the
 dialog asked for — so a saved result always states how it was produced.
 
 ---
@@ -230,9 +303,9 @@ against other papers with that in mind.
 Worms grouped as "curled" and as "colliding" use slightly different denominators
 when converting bends to BPM.
 
-### Worm Survival numbers are provisional
+### Development stage calls are provisional
 
-Four things, in descending order of how much they should worry you:
+Five things, in descending order of how much they should worry you:
 
 1. **Stage calls skew OLD on mixed plates, and L1/L2 are almost never
    emitted.** On uniform plates carrying one stage the model is good; on plates
@@ -244,13 +317,22 @@ Four things, in descending order of how much they should worry you:
 2. **The survivor cutoff sits on the L2/L3 boundary**, which is the model's
    weakest distinction. So exact percentages are soft even where the direction
    of an effect is robust.
-3. **The per-class confidence thresholds were chosen, not calibrated.** They
-   look as authoritative in `run_info` as measured ones would.
-   `dev/tools/stage_conf_report.py` derives them from a real plate set; until
-   that has been run, the numbers are a sensible guess.
-4. **It has so far only been validated on training data**, which makes that
-   validation partly circular — it confirmed the pipeline works, not that the
-   counts are right.
+3. **A large minority of L3 calls are the size of an L2.** Measured on a real
+   plate set: roughly 30% of L3 calls are at or below the median size of a
+   confirmed L2. These are not low-confidence calls — the model is confident —
+   so no threshold removes them. They are not corrected, deliberately: an L3
+   that is really an L2 must be *counted as a non-survivor*, and deleting it
+   would bias the ratio the other way. **Treat the survival percentage as biased
+   high**, and prefer the body-size distribution, which uses no labels.
+4. **The per-class confidence thresholds are measured but not calibrated.** They
+   were derived from the model's own score distribution on a real plate set, so
+   they are no longer guesses — but that is not the same as being checked
+   against hand-labelled animals, which has not been done. They look as
+   authoritative in `run_info` as calibrated ones would.
+5. **The class-confidence correction is on by default and is a judgement, not a
+   measurement.** It reassigns stages, its strength was chosen by comparing
+   against manual counts rather than derived, and a milder setting performed
+   about as well. Turn it off to see how much of a result depends on it.
 
 Two worms sitting very close together can still produce one extra box. Known,
 not fixed, deliberately — every rule that would suppress it can also delete a

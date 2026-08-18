@@ -105,7 +105,8 @@ for a 26-character one. Anything worse gets told to use `C:\WormScan`.
 `launcher/paths.py` resolves the venv in either layout - dev checkout first,
 install second - so running from source is unchanged.
 
-If `torch` is upgraded, re-measure: the constant lives in `paths.py`
+If `torch` is upgraded, re-measure: the constant lives in THREE places that must agree — `wormscan.iss` (inline in
+the directory-page check), `paths.py`
 (`MAX_PACKAGE_PATH`) and `postinstall.ps1` (`$MaxPackagePath`).
 
 ### Why the venvs are built on arrival rather than shipped ready-made
@@ -163,12 +164,14 @@ engine needs admin rights and possibly a reboot — none of which belongs inside
 per-user install that promises no UAC prompt.
 
 Instead, `setup_engine.ps1` ships as a Start Menu shortcut. It detects an
-existing engine, installs Rancher Desktop via winget if there is none, waits for
+existing engine and, if there is none, offers two routes — Podman as a per-user
+MSI (the default when WSL is present, and it needs no administrator rights) or
+Rancher Desktop via winget (which does). It then waits for
 it, pulls the image and verifies. It handles the two predictable failures
 explicitly: no winget, and exit code 1603 from the WSL dependency (which means
 "restart and run me again").
 
-Colony Survival and Worm Survival never touch a container, so a user who only
+Colony Survival and Development never touch a container, so a user who only
 runs those never needs any of this.
 
 ### Engine support in the app
@@ -225,8 +228,10 @@ from the commit it claims.
   which is supported and preserves settings and data.
 - **Windows only.** `Scripts\python.exe`, `CREATE_NO_WINDOW`, the Segoe icon
   fonts and `%APPDATA%` are all assumed throughout the app, not just here.
-- **Licensing.** The vision environment contains `ultralytics`, which is
-  AGPL-3.0. Building an installer for your own lab is not distribution; sending
-  it to another lab is. Settle that question before wider release — the
-  cheapest resolution is usually publishing the repo under AGPL, and the
-  alternative is exporting the model to ONNX so no `ultralytics` ships at all.
+- **Licensing — settled.** The project is released under AGPL-3.0 (`LICENSE`),
+  which is the resolution this note used to recommend: the vision environment
+  contains `ultralytics`, which is AGPL-3.0, and the installer ships it. Both
+  `LICENSE` and `THIRD-PARTY-NOTICES.md` are copied into the install directory.
+  The remaining open item is the **copyright holder**, not the licence — see the
+  note at the end of `README.md`. Exporting the model to ONNX so no
+  `ultralytics` ships remains an option if a permissive licence is ever wanted.

@@ -1415,13 +1415,28 @@ def analyze(
                             "encoded_fraction": frac})
         soft_parts.append({"plan": plan, "cached": cached_rows,
                            "fresh_csv": soft_csv})
+        # `covered` is what this folder actually produced a record for —
+        # cached rows plus fresh inference. It is NOT len(images): a run that
+        # is cancelled, or whose subprocess dies part-way, returns fewer.
+        # write_manifest refuses to mark the folder reusable when the two
+        # disagree, because a missing row is indistinguishable from a real
+        # zero once the run is over.
+        covered = sorted({Path(r["path"]).name for r in records})
         manifest_folders.append({
             "folder": plan.folder,
             "timepoint_h": plan.hours or 0.0,
             "images": images,
             "errors": [Path(r["path"]).name for r in records if "error" in r],
-            "n_rows": 0,
+            "n_rows": len(records),
+            "covered": covered,
         })
+        if len(covered) < len(images):
+            write_log(
+                f"  WARNING: {len(images) - len(covered)} of {len(images)} "
+                "image(s) in this folder were never analysed. They are absent "
+                "from this run's numbers, and the folder will be re-analysed "
+                "next time rather than reused."
+            )
         reuse_rows.append((plan.folder.name, fc.n_reused, len(fc.to_infer),
                            fc.reason))
         if cancel_check is not None and cancel_check():
@@ -1643,7 +1658,7 @@ def survival_preflight(folders: list[Path]) -> list[str]:
     if not _VISION_PY.exists():
         errors.append(
             f"Vision venv not found:\n    {_VISION_PY}\n"
-            "Create it (Python 3.12) and install ultralytics + torch."
+            "Create it and install ultralytics + torch (see launcher/vision/requirements.txt)."
         )
     if not _INFER_SCRIPT.exists():
         errors.append(f"Inference script missing:\n    {_INFER_SCRIPT}")

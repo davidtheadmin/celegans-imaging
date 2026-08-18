@@ -1,3 +1,13 @@
+> **HISTORICAL — archived 2026-08-18.** Build and validation log; the last entry
+> is 2026-05-05. Several "outstanding" items listed here have since shipped:
+> session-level and condition-level delete, and the YOLO staging pipeline (now
+> **Development** mode). Two specific claims are wrong against current code: the
+> video fps is the fixed constant `VIDEO_FPS = 30.0`, not measured from camera
+> metadata; and `bend_calibration.py` is not a regression validator (it has no
+> assertions and hardcodes absolute paths). Note also that the bend prominence
+> validated here (0.30 rad) is **not** the value the code ships (0.50) — see
+> `docs/calibration/README.md`.
+
 ## 2026-05-05
 
 **Bend-counting algorithm replaced with head-angle peak counting.** Validated against lab technician's manual counts on 8 worms (4 fast WT, 4 slow). MAE 1.8 bends/30s vs prior method's 5.1. Old midbody-curvature method overcounted noise on slow/dying worms; new method directly implements the lab's manual protocol. `bend_calibration.py` kept in repo as reference implementation and regression validator.
