@@ -954,7 +954,8 @@ def compute_crawling_metrics(
 
         # --- reversal rate: per OBSERVED minute (finite-speed frames), not span ---
         observed_min = (n / fps / 60.0) if fps > 0 else 0.0
-        reversal_rate_per_min = (reversal_count / observed_min) if observed_min > 1e-9 else 0.0
+        reversal_rate_per_min = ((reversal_count / observed_min)
+                                 if observed_min > 1e-9 else float("nan"))
 
         # --- centroid path geometry (combined, gap-aware) ---
         path_length_px, net_displacement_px, tortuosity = _combined_path_geometry(
@@ -979,7 +980,7 @@ def compute_crawling_metrics(
         # Observed-frame-only: each member's signal contributes its valid
         # skeleton frames; bpm divides by valid-frame seconds so gaps (within or
         # between members) simply do not count.
-        bpm: float = 0.0
+        bpm: float = float("nan")
         bend_cv: float = float("nan")
         if skel_all is not None:
             half_bends = 0
@@ -998,10 +999,32 @@ def compute_crawling_metrics(
                 all_peak_frames.extend(fns[sig["pos_peaks"]].tolist())
                 all_peak_frames.extend(fns[sig["neg_peaks"]].tolist())
             duration_min = (total_valid / fps / 60.0) if fps > 0 else 0.0
-            bpm = round((half_bends / 2.0) / duration_min, 2) if duration_min > 1e-9 else 0.0
+            # duration_min == 0 means no member yielded a usable head-angle
+            # signal, i.e. this worm was never measured. That is NaN, not 0 —
+            # a 0 here is averaged into the condition mean as a real bend rate.
+            bpm = (round((half_bends / 2.0) / duration_min, 2)
+                   if duration_min > 1e-9 else float("nan"))
             bend_cv = bend_interval_cv(np.array(all_peak_frames, dtype=float), fps)
 
         is_long = bool(np.isfinite(track_duration_s) and track_duration_s >= long_threshold_s)
+
+        # A worm with no timeseries rows at all was NOT measured. Tierpsy's
+        # SKE_FILT (filt_min_displacement=100 for crawling) drops whole
+        # fragments before features are computed, while the quality gate reads
+        # track_duration_s and skeleton_coverage from the PRE-filter skeletons
+        # table — so such a worm can pass the gate and still have g empty.
+        # Reporting 0.0 for its speeds, reversals and rate put un-measured
+        # worms into the condition means as real zeros, a downward bias that is
+        # worst in exactly the conditions where tracking is worst (i.e. it
+        # manufactures a dose-response). aggregate_per_condition filters
+        # non-finite values, so NaN keeps them out of the means while the row
+        # stays visible in per_worm. Note fraction_forward/backward/paused
+        # below already do this; these fields were the inconsistency.
+        if n == 0:
+            mean_forward_speed_pxs = float("nan")
+            mean_backward_speed_pxs = float("nan")
+            reversal_count = float("nan")
+            reversal_rate_per_min = float("nan")
 
         rows.append({
             "condition": condition,

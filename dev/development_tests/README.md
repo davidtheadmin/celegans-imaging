@@ -1,6 +1,6 @@
 # Development-mode verification harness
 
-Five scripts that prove the Development pipeline still does what it claims,
+Eight scripts that prove the Development pipeline still does what it claims,
 without a GPU, the vision venv, or a single real plate image. Run them in this
 order after touching anything in `launcher/survival*.py`:
 
@@ -92,3 +92,26 @@ doing nothing.
 `launcher/requirements.txt`), plus `playwright` and LibreOffice for the last
 two checks. `recalc.py` and `office/` are Anthropic's xlsx-skill helpers,
 vendored here so `verify.py` runs without them installed.
+
+## `test_cache_guards.py`
+
+Added 2026-08-18, alongside the fixes it guards. Two silent-staleness holes in
+the detection cache:
+
+- **Rescore refs must invalidate the cache; rescore alpha must not.** Alpha is
+  recomputable from the stored per-class vectors, so changing it relabels cached
+  rows rather than forcing a re-run. Refs are not recomputable, and
+  `stage_conf.json` instructs you to re-measure them after a retrain — so
+  leaving them out of the digest made that supported workflow serve the previous
+  refs' counts while `run_info` reported the new ones.
+- **A run that did not finish must not be reusable.** The soft CSV is
+  per-detection, so once a run is over, an image with no rows is
+  indistinguishable from an image that was never analysed. A run that died at
+  image 3 of 32 used to write a manifest claiming all 32 were analysed, and the
+  next run then reported 29 plates as having zero animals — with no warning.
+
+It also checks that a manifest written before the completeness record existed is
+refused rather than trusted. That costs one re-analysis of any folder cached
+before 2026-08-18, deliberately.
+
+Needs no LibreOffice and no Playwright; it runs in a couple of seconds.

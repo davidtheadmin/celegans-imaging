@@ -1,151 +1,109 @@
-# C. elegans Imaging Station
+# C. elegans Imaging Station — working notes
 
-Raspberry Pi 5–based automated imaging system for C. elegans assays (motility and survival scoring).
+Raspberry Pi 5 imaging rig for C. elegans assays, plus a Windows analysis
+launcher.
+
+**Read `ARCHITECTURE.md` first.** It describes the system and its invariants.
+This file holds only what you cannot cheaply derive by reading the code: the
+environment, the deploy channel, and the rules that bite.
+
+Anything in `docs/history/` is archived and must not be trusted — in particular
+`CURRENT_STATE.md`, which instructs the reader to trust it over everything else
+and is 36 commits out of date.
 
 ## Hardware
 
-- **Camera**: Sony IMX477 HQ Camera (12.3 MP, 4056×3040 full array), attached via CSI ribbon cable
-- **Illumination**: Custom LED transilluminator (bottom light), controlled via GPIO
-- **Compute**: Raspberry Pi 5 (8 GB RAM)
-- **Optics**: Fixed magnification macro lens for whole-plate imaging
+- **Camera**: Sony IMX477 HQ Camera (12.3 MP, 4056×3040 full array), CSI ribbon
+- **Illumination**: custom LED transilluminator (bottom light), GPIO-controlled
+- **Compute**: Raspberry Pi 5 (8 GB)
+- **Optics**: fixed-magnification macro lens for whole-plate imaging
+
+Magnification is fixed but **not** calibrated into the analysis: the Tierpsy
+parameter files set `microns_per_pixel = -1.0`, so motility and crawling outputs
+are pixels and pixels/second. The Pi *does* have a spatial calibration and
+stamps ImageJ-readable µm/px into every TIFF — it just does not reach the
+analysis parameters yet. Do not describe those columns as physical units.
 
 ## Dev environment
 
-- **Laptop**: Windows 11, edits code locally. Dependencies like `picamera2` only exist on the Pi — import errors locally are expected.
-- **Pi IP**: `192.168.50.2` (static, direct ethernet cable, no router)
-- **Laptop IP**: `192.168.50.1` (hand-set static; ignores DHCP)
+- **Laptop**: Windows 11, edits code locally. `picamera2` exists only on the Pi;
+  import errors for it locally are expected.
+- **Pi IP** `192.168.50.2` (static, direct ethernet, no router) ·
+  **Laptop IP** `192.168.50.1` (hand-set static, ignores DHCP)
 - **Other machines get an address automatically.** `eth0` uses NetworkManager
   `ipv4.method shared`, so the Pi is a DHCP server on the direct cable
   (`192.168.50.11`–`.254`). Options in
   `/etc/NetworkManager/dnsmasq-shared.d/celegans.conf` suppress the gateway and
-  DNS advertisements, so a client does not try to route the internet down a
-  cable that goes nowhere. Do NOT set `ipv4.method shared` without also setting
-  `ipv4.addresses 192.168.50.2/24` in the same command — alone it picks
+  DNS advertisements so a client does not try to route the internet down a cable
+  that goes nowhere. **Do NOT set `ipv4.method shared` without also setting
+  `ipv4.addresses 192.168.50.2/24` in the same command** — alone it picks
   `10.42.0.1/24` and breaks every hardcoded address. Details in `README.md`.
-- **SSH alias**: `ssh celegans` connects as user `pi` with key-based auth. Always use this alias — never `celegans.local`.
-- **Pi user/home**: `pi` / `/home/pi/`
-- **Repo on Pi**: `/home/pi/celegans-imaging/`
-- **Venv**: `/home/pi/celegans-imaging/.venv/` (created with `--system-site-packages` so it can see system `picamera2`)
-- **Deployment channel**: All code goes through Git. Commit → push to GitHub → `ssh celegans "cd celegans-imaging && git pull"`. No rsync or scp.
-- **Pi internet**: intermittent (phone hotspot). If `git pull` or `pip install` fails with DNS errors, enable the hotspot.
+- **SSH alias**: `ssh celegans` (user `pi`, key auth). Always use the alias,
+  never `celegans.local`.
+- **Repo on Pi**: `/home/pi/celegans-imaging/` ·
+  **venv**: `.venv/` there, created with `--system-site-packages` so it can see
+  the system `picamera2`, `opencv`, `numpy` and `scipy`.
+- **Data on Pi**: `/home/pi/celegans-data/` — never inside the repo.
 
-## Repository layout
+## Deployment — the Pi has no internet
 
-```
-capture/                  # FastAPI service (Phase 1+)
-├── .env.example          # committed config template
-├── requirements.txt      # pinned to Pi venv versions
-└── app/
-    ├── main.py           # app factory, route mounting, static files
-    ├── config.py         # pydantic-settings, reads from .env
-    ├── auth.py           # bearer token dependency
-    ├── models.py         # Session, Plate, request models
-    ├── sessions.py       # filesystem-backed CRUD
-    └── static/
-        └── index.html
+Use **`scripts/deploy_local.sh`**. It copies the tree over SSH and restarts the
+service. `scripts/deploy.sh` (commit → push → `git pull` on the Pi) only works if
+the Pi is given outbound internet, which it normally does not have. A new Python
+dependency cannot be installed by a deploy; it has to be put on the Pi by hand.
 
-launcher/                 # Windows sync/launcher app (Phase 6)
-├── main.py               # entry point
-├── config.py             # settings dataclass, APPDATA persistence
-├── sync.py               # background sync thread
-├── ui.py                 # Tkinter main window + settings dialog
-├── requirements.txt      # requests + scientific stack (pandas, numpy, scipy, scikit-image, opencv, h5py, tables, matplotlib, openpyxl, imageio-ffmpeg, tifffile, imagecodecs, customtkinter)
-├── setup.bat             # one-time installer for non-technical users
-├── INSTALL.md            # end-user installation guide
-└── assets/
-    └── wormscan.ico      # placeholder app icon (replace later)
+Deploying the capture service is a separate act from updating the launcher. A
+change under `capture/` does nothing until it is deployed.
 
-deploy/
-└── celegans-capture.service   # systemd unit
+## Rules that bite
 
-scripts/
-└── deploy.sh             # push → pull → restart helper
+These are the ones that have cost real debugging. `ARCHITECTURE.md` §11 has the
+full list with reasons.
 
-capture.py                # standalone full-res capture script (do not modify)
-```
+1. **The launcher never imports `ultralytics` or `torch`.** Staging inference
+   runs in a separate environment under `launcher/vision/`, reached by
+   subprocess. Adding a direct import breaks the build and the licence boundary.
+2. **Worker threads write status; the UI thread reads it. No widget is ever
+   touched off the main thread.** Every agent's docstring states this.
+3. **Do not change the camera locking/threading** in `capture/app/camera.py`.
+   The preview thread deliberately does not take the capture lock; the comment
+   at the site explains the deadlock that causes.
+4. **Anything that changes what an analysis produces must enter the cache key.**
+   Both caches (Tierpsy per-video, detections per-image) are otherwise happy to
+   serve results produced under different settings.
+5. **Never report an unmeasured quantity as zero.** A zero is a claim about the
+   plate; a blank is a claim about the run. This has bitten twice.
+6. **Reach tunable files through `launcher/paths.py`.** Hardcoded relative paths
+   work in a checkout and silently use the wrong file when installed.
+7. **Shell out through the engine abstraction, not to `docker`.** Three
+   container engines are supported.
 
-## Launcher — both launch paths are supported
+## Files-as-contract
 
-| Path | Command |
-|------|---------|
-| Dev (Git Bash, manual venv) | `source launcher/.venv/Scripts/activate && python launcher/main.py` |
-| End-user (desktop shortcut) | Double-click the WormScan icon created by `setup.bat` |
+No database anywhere. Folder structure and `session.json` manifests are the
+source of truth; manifests are written atomically (`.tmp` then `os.replace`).
+Every data file carries a `.sha256` sidecar, and `.acked` marks it synced.
+The live schema is `capture/app/models.py` — read it there rather than from a
+copy in a document.
 
-`setup.bat` is additive and idempotent. Admin rights are not required — the venv lives
-inside the repo folder and the shortcut targets the current user's Desktop.
+## API auth
 
-## Data layout (outside the repo)
+One shared bearer token, `X-Auth-Token` header or `?token=` query parameter,
+compared with `secrets.compare_digest`. Only `/health` is unauthenticated. The
+query-parameter path exists because an `<img>` MJPEG stream cannot send headers.
 
-All data lives at `/home/pi/celegans-data/` — never inside the repo.
+Config comes from `capture/.env` (gitignored — see `capture/.env.example`).
 
-```
-/home/pi/celegans-data/
-├── sessions/
-│   └── <session_id>/
-│       ├── session.json          # manifest (see schema below)
-│       └── plates/
-│           └── <condition_id>_<name>_plate<NN>/   # image frames go here
-├── freecapture/
-├── flatfield/
-└── .trash/
-```
+## Before you change the Development pipeline
 
-## Files-as-contract philosophy
+`dev/development_tests/` is a seven-script harness covering it, including a
+LibreOffice recalculation that checks every computed workbook cell against
+Python. It exists because a signature mismatch once made every run raise into a
+`pythonw.exe` void with no visible symptom. Run it.
 
-No database. Folder structure and `session.json` manifests are the source of truth. All experimental metadata is encoded in the filesystem tree. Manifests are written atomically (write to `.tmp`, then `os.replace`) so a crash mid-write cannot corrupt a file.
+## Testing and deps
 
-## session.json schema (schema_version: 1)
-
-```json
-{
-  "schema_version": 1,
-  "id": "YYYYMMDDTHHMMSS_<6charhash>",
-  "name": "string",
-  "assay_mode": "motility | survival",
-  "assay_config": {},
-  "created_at": "<ISO 8601>",
-  "plates": [
-    {
-      "id": "string",
-      "condition_id": "string",
-      "name": "string",
-      "plate_number": 1,
-      "folder_name": "<condition_id>_<name>_plate<NN>",
-      "created_at": "<ISO 8601>"
-    }
-  ]
-}
-```
-
-`assay_config` is a permissive dict — contents vary by assay type and are not validated by the API.
-
-## API authentication
-
-Shared bearer token. Pass as `X-Auth-Token` header or `?token=` query parameter. Compare via `secrets.compare_digest`. Only `/health` is unauthenticated.
-
-Config is loaded from `capture/.env` (gitignored). See `capture/.env.example` for the template.
-
-## Systemd service
-
-```
-Unit file:  deploy/celegans-capture.service
-Install:    sudo cp deploy/celegans-capture.service /etc/systemd/system/
-            sudo systemctl daemon-reload
-            sudo systemctl enable --now celegans-capture
-Logs:       sudo journalctl -u celegans-capture -f
-```
-
-## Phase roadmap
-
-Status reflects live code. Note the analysis pipelines run in the Windows
-launcher (`launcher/analysis/`), not as a Pi-side `analysis/` service as
-originally sketched.
-
-| Phase | Status | Scope |
-|-------|--------|-------|
-| 1 | Done | FastAPI skeleton: config, auth, session/plate CRUD, health/status, static file serving, systemd unit |
-| 2 | Done | Camera integration: `capture.py` imported by the service, single-frame and timelapse endpoints |
-| 3 | Done | Flat-field correction pipeline, exposure calibration endpoint |
-| 4 | Done | Windows launcher + background sync agent (manifest polling, download, ack, local mirror); Pi-side SHA256 sidecars, manifest/ack endpoints, retention daemon + systemd timer |
-| 5 | Done | Web UIs: capture-service plate management / live preview; launcher desktop UI (CustomTkinter) |
-| Analysis | Done (in launcher) | Motility, crawling, and counting (colony-survival) pipelines in `launcher/analysis/` — motility & crawling headless via Tierpsy/Docker, counting via classical CV |
+Launcher dependencies are **exact-pinned** (`==`) on purpose; bumping one is a
+deliberate act with a commit attached, not a casual edit. There are three
+separate requirements files for three separate environments — the numpy versions
+differing between launcher and vision is intentional isolation, not a conflict.

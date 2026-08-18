@@ -118,7 +118,7 @@ Name: "{group}\{#AppName} - Set up video analysis"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup_engine.ps1"""; \
     WorkingDir: "{app}"; \
     IconFilename: "{app}\app\launcher\assets\wormscan.ico"; \
-    Comment: "Installs Rancher Desktop and downloads Tierpsy. Only needed for Motility and Crawling."
+    Comment: "Sets up the container engine (Podman or Rancher Desktop) and downloads Tierpsy. Only needed for Motility and Crawling."
 
 Name: "{group}\{#AppName} data folder"; \
     Filename: "{userappdata}\WormScan"; \

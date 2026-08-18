@@ -23,7 +23,7 @@ at the end.
 ## What you will end up with
 
 - **WormScan** on your desktop and in the Start Menu
-- **Colony Survival** and **Worm Survival** working immediately
+- **Colony Survival** and **Development** working immediately
 - **Motility** and **Crawling** working after one extra step, which is
   described further down and which you can do later or never
 
@@ -79,7 +79,7 @@ Double-click **WormScan**.
 The dot in the corner will be **red**, because it does not yet know where the
 imaging Pi is. To fix that:
 
-1. Click **Settings** (bottom right)
+1. Click **Settings** (top right)
 2. **Paste the connection link David sends you** into the **Pi URL** box.
 
    It looks like this:
@@ -109,7 +109,7 @@ If the dot stays red, the message under it tells you which problem it is:
 | **Pi unreachable** | Nothing answered. Check the cable and that the Pi is on. |
 | **Pi error 500** | The Pi answered with a fault. Send David the number. |
 
-**You can now use Colony Survival and Worm Survival.** Nothing further is needed
+**You can now use Colony Survival and Development.** Nothing further is needed
 for those.
 
 ---
@@ -139,7 +139,7 @@ stage. In summary, it:
 
 ### Two things to be ready for
 
-**It will ask for administrator permission.** Installing a container engine
+**It may ask for administrator permission.** Installing a container engine
 changes system settings, so Windows will show a permission prompt. If you do not
 have administrator rights on this laptop, ask your IT department to run this one
 step for you.
@@ -194,9 +194,11 @@ outside the program folder. You do not need to uninstall first.
 
 ### Turning the check off
 
-The check is a single request to `github.com` when WormScan starts. It sends no
-information about you or your data — it only asks what the latest version
-number is, the same thing you would see by visiting the page yourself.
+The check is a single request to `github.com` when WormScan starts, and at most
+once a day. It sends WormScan's own version number and — as any web request
+does — your IP address. Nothing about you, your experiments or your data: it
+asks only what the latest version number is, the same thing you would see by
+visiting the page yourself.
 
 If your IT policy would rather it did not happen, untick **Check for updates on
 startup** in **Settings**. Nothing else changes; you just have to be told about

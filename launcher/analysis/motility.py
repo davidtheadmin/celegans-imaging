@@ -7,6 +7,7 @@ Read contract  — UI thread ONLY: call status.snapshot() / status.pop_completed
 Never touch Tk widgets from this thread.
 """
 import copy
+import hashlib
 import json
 import logging
 import shutil
@@ -65,6 +66,64 @@ def _hdf5_cache_valid(hdf5_path: Path) -> bool:
             return "trajectories_data" in fh
     except Exception:
         return False
+
+
+_CACHE_STAMP = ".wormscan-cache.json"
+
+
+def _params_fingerprint(pipeline: str, params: dict) -> str:
+    """Identify the Tierpsy run that produced a cache entry.
+
+    Covers BOTH the parameter set and which pipeline ran, because motility and
+    crawling share `_wormscan_cache/<stem>/` and their params diverge on
+    mask_min_area, traj_min_area, traj_max_allowed_dist, traj_max_frames_gap
+    and filt_min_displacement. Without the pipeline tag, running one pipeline
+    then the other on the same folder made the second silently reuse the
+    first's tracking, and which result you got depended on the order you ran
+    them in.
+
+    expected_fps is excluded (patched per video from the probed fps, so it is
+    a property of the video, not of the settings), and so are the WormScan-only
+    keys, which are consumed after Tierpsy and therefore do not invalidate its
+    output.
+    """
+    payload = {k: v for k, v in (params or {}).items()
+               if k != "expected_fps" and k not in _WORMSCAN_ONLY_KEYS}
+    blob = json.dumps({"pipeline": pipeline, "params": payload},
+                      sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _cache_stamp_check(cache_dir: Path, pipeline: str,
+                       want: str) -> tuple[bool, str]:
+    """(reusable, why not). Anything unreadable or unstamped is NOT reusable."""
+    stamp = cache_dir / _CACHE_STAMP
+    if not stamp.is_file():
+        return False, ("it was written before the cache recorded its "
+                       "parameters, so it cannot be matched against these")
+    try:
+        got = json.loads(stamp.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "its cache fingerprint could not be read"
+    if got.get("fingerprint") == want:
+        return True, ""
+    prev = str(got.get("pipeline") or "unknown")
+    if prev != pipeline:
+        return False, f"it was produced by the {prev} pipeline, not {pipeline}"
+    return False, "the Tierpsy parameters have changed since it was written"
+
+
+def _write_cache_stamp(cache_dir: Path, pipeline: str, want: str) -> None:
+    """Stamp a cache entry only after Tierpsy actually produced its HDF5."""
+    try:
+        (cache_dir / _CACHE_STAMP).write_text(json.dumps({
+            "pipeline": pipeline,
+            "fingerprint": want,
+            "written_at": datetime.now().isoformat(timespec="seconds"),
+        }, indent=2), encoding="utf-8")
+    except OSError:
+        # A cache that cannot be stamped is simply re-run next time.
+        log.warning("Could not write cache stamp in %s", cache_dir)
 
 
 def _safe_sheet_name(name: str, seen: dict[str, int]) -> str:
@@ -150,7 +209,14 @@ def _process_one_video_motility(
 
         avi = cache_dir / (video.stem + ".avi")
         candidate_hdf5 = cache_dir / "Results" / (video.stem + "_featuresN.hdf5")
-        cache_hit = not clear_cache and _hdf5_cache_valid(candidate_hdf5)
+        cache_fp = _params_fingerprint("motility", params_template)
+        stamp_ok, stamp_why = _cache_stamp_check(cache_dir, "motility", cache_fp)
+        cache_hit = (not clear_cache and _hdf5_cache_valid(candidate_hdf5)
+                     and stamp_ok)
+        if (not clear_cache and not stamp_ok
+                and _hdf5_cache_valid(candidate_hdf5)):
+            plog(f"[CACHE MISS] A cached result exists but {stamp_why} — "
+                 "re-running Tierpsy.")
 
         if cache_hit:
             hdf5_path = candidate_hdf5
@@ -197,6 +263,7 @@ def _process_one_video_motility(
                     f"No _featuresN.hdf5 in {results_dir}"
                 )
             hdf5_path = candidates[0]
+            _write_cache_stamp(cache_dir, "motility", cache_fp)
 
         fragment_rows, analysis_log = read_fragments(
             hdf5_path, fps, condition, plate,

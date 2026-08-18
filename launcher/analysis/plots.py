@@ -185,7 +185,7 @@ def make_overview_png(
             ok[ok["condition"] == c]["bpm_median_long"].dropna().tolist()
             for c in conditions
         ]
-        bp = ax.boxplot(data, labels=conditions, patch_artist=True)
+        bp = ax.boxplot(data, tick_labels=conditions, patch_artist=True)
         for patch in bp["boxes"]:
             patch.set_facecolor("#4caf5066")
 

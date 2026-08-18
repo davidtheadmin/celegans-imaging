@@ -1,3 +1,12 @@
+> **HISTORICAL — archived 2026-08-18.** A reproducibility audit taken 2026-07-09
+> at commit `c7045bd`. Four of its seven "[blocks paper]" findings are now
+> closed: `LICENSE` exists (AGPL-3.0), launcher dependencies are exact-pinned,
+> automated tests exist (`dev/development_tests/`), and the README's camera and
+> bend-method claims were corrected. Still open: the Tierpsy image is pinned to
+> `:latest`, and analysis outputs remain in pixels. Its file lists in §3 and §4
+> point at paths that no longer exist (`launcher/tools/` moved to `dev/tools/`).
+> Superseded by the 2026-08-18 audit.
+
 # AUDIT.md
 
 Read-only audit generated 2026-07-09 from live `HEAD` (`c7045bd`). No source,

@@ -131,6 +131,14 @@ def _run_inference(frame_path: Path, run_dir: Path,
     annotated = run_dir / "annotated.png"
     counts = run_dir / "counts.txt"
     cmd = [str(_VENV_PY), str(_INFER), str(frame_path),
+           # Resolved through paths.py so a model or stage_conf.json dropped in
+           # %APPDATA%\WormScan is honoured here too. Without these two flags
+           # infer_stage.py falls back to the copies shipped beside itself,
+           # which meant a retrained model reached the batch pipeline but NOT
+           # this button — the two silently disagreeing, which is exactly what
+           # the comment below claims cannot happen.
+           "--model", str(paths.staging_model()),
+           "--stage-conf", str(paths.stage_conf()),
            "--draw", str(annotated), "--counts", str(counts)]
     # count_eggs is None when the Pi did not send the header (older service):
     # say nothing and let stage_conf.json decide, rather than forcing a default
@@ -139,10 +147,10 @@ def _run_inference(frame_path: Path, run_dir: Path,
         cmd += ["--count-eggs"]
     elif count_eggs is False:
         cmd += ["--exclude-classes", "egg"]
-    # No --conf and no --class-conf means infer_stage.py falls back to
-    # vision/stage_conf.json — the same per-class thresholds the Worm Survival
-    # batch run starts from, so the button and the pipeline never disagree by
-    # accident. We only pass thresholds when the user has actually moved the
+    # No --conf and no --class-conf means infer_stage.py falls back to the
+    # stage_conf.json resolved above — the same per-class thresholds the
+    # Development batch run starts from, so the button and the pipeline never
+    # disagree by accident. We only pass thresholds when the user has actually moved the
     # sliders in the analysis dialog, so the button follows their tuning too.
     if class_conf:
         cmd += ["--class-conf", json.dumps(class_conf)]

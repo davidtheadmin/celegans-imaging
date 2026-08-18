@@ -13,8 +13,14 @@ __pycache__/
 *.pt
 launcher/vision/models/
 
-# Vision inference venv (Python 3.12; the .venv/ rule above doesn't match this name)
+# Vision inference venv (separate venv for licence isolation and weight, not for
+# a version split - both venvs are Python 3.13; the .venv/ rule doesn't match this name)
 launcher/vision/.venv-vision/
+
+# Secrets — capture/.env holds the shared bearer token. The Pi is a git working
+# tree, so without this a `git add -A` there commits the token to history.
+.env
+capture/.env
 
 # OS
 .DS_Store

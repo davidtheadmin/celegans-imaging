@@ -10,7 +10,7 @@ loaded ONCE and reused for every image, so batch mode is cheap per image.
 This is the ONLY place a model is loaded / a CLI is exposed. tiled_infer.py
 stays a pure library — do NOT add a __main__ or model-loading there.
 
-Runs ONLY under vision/.venv-vision (3.12, ultralytics + torch). The launcher's
+Runs ONLY under vision/.venv-vision (ultralytics + torch). The launcher's
 3.13 side calls this as a subprocess and MUST NOT import it.
 
 Defaults

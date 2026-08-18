@@ -1,3 +1,24 @@
+> **HISTORICAL — archived 2026-08-18. This document contradicts the code.**
+>
+> The May 2026 design spec for the motility pipeline. It is not merely stale: it
+> asserts authority (*"validated, do not change"*) while describing a method that
+> was replaced. Specifically:
+>
+> - **The bend-counting algorithm is different.** This spec describes counting
+>   zero-crossings of `curvature_midbody` from the `timeseries_data` table. The
+>   code counts peaks in a head-swing angle derived from skeleton points 0/5 and
+>   20/30, detrended, at 0.50 rad prominence, over `trajectories_data` and the
+>   skeletons array. Every row is stamped `bend_method = "head_angle_peaks_v2"`.
+> - **The output format is different.** There is no per-fragment CSV. Output is
+>   `motility_results.xlsx`, one sheet per condition, plus `motility_summary.csv`.
+> - **The design rule is inverted.** It says *"Don't try to re-stitch fragments
+>   into per-physical-worm tracks"*. The pipeline does exactly that, by design
+>   (`fragment_grouping.py`, union-find with curl/collision classification).
+> - Counting is described as a stub. Two counting pipelines now ship.
+>
+> Its lasting value is the *rationale* for each non-default Tierpsy parameter,
+> which is recorded nowhere else. Read it for that.
+
 # Motility Analysis — Module Specification for Claude Code
 
 ## Context
