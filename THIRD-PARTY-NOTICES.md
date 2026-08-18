@@ -5,9 +5,9 @@ licence, reproduced or linked here as those licences require. Nothing in this
 file changes WormScan's own licence, which is the GNU Affero General Public
 License v3.0 — see [`LICENSE`](LICENSE).
 
-WormScan itself is Copyright (C) 2026 The WormScan authors. See the licence note
-in [`README.md`](README.md) — the copyright holder is not yet settled, and under
-Dutch law it may be the institution rather than any individual.
+WormScan itself is Copyright (C) 2026 Erasmus MC, University Medical Center
+Rotterdam, and is released under the AGPL-3.0. See the licence section of
+[`README.md`](README.md).
 
 Two entries decide WormScan's own licence, and are the reason this project is
 AGPL rather than something more permissive:
@@ -51,6 +51,7 @@ travel inside the same installer, so they are distributed together.
 | Package | Licence |
 |---|---|
 | customtkinter | MIT |
+| pillow | MIT-CMU |
 | pandas | BSD-3-Clause |
 | numpy, scipy | BSD-3-Clause |
 | matplotlib | matplotlib licence (PSF-based) |
@@ -64,7 +65,14 @@ travel inside the same installer, so they are distributed together.
 | pydantic, pydantic-core | MIT |
 | httpx, httpcore, h11, h2, hpack, hyperframe, anyio | BSD-3-Clause / MIT |
 | rich, pygments, markdown-it-py, mdurl | MIT / BSD-2-Clause |
+| contourpy, kiwisolver, cycler, fonttools | BSD-3-Clause / MIT (matplotlib dependencies) |
+| networkx | BSD-3-Clause |
+| typing-extensions | PSF-2.0 |
 | numexpr, ndindex, msgpack, threadpoolctl, py-cpuinfo, lazy-loader, darkdetect, tzdata | MIT / BSD |
+
+matplotlib also ships the **DejaVu** font family (DejaVu Fonts License, a
+permissive Bitstream Vera derivative) as its default typeface. It is installed
+with matplotlib rather than separately by WormScan.
 
 The exact version of every package in a given build is recorded in
 `_wheels-manifest.txt` inside that installation.

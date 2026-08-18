@@ -428,6 +428,21 @@ class SettingsDialog(ctk.CTkToplevel):
             text_color=theme.TEXT_2, anchor="w", justify="left",
         ).pack(fill="x")
 
+        # Licence + source. Free software should say so somewhere a user can
+        # see it, and the source URL is what makes the AGPL work in practice.
+        lic = ctk.CTkLabel(
+            body,
+            text="WormScan " + paths.version_string()
+                 + "  \u00b7  \u00a9 2026 Erasmus MC  \u00b7  GNU AGPL v3",
+            font=theme.caption(), text_color=theme.TEXT_2,
+            anchor="w", justify="left", cursor="hand2",
+        )
+        lic.pack(fill="x", pady=(6, 0))
+        lic.bind("<Button-1>", lambda _e: webbrowser.open_new_tab(
+            "https://github.com/davidtheadmin/celegans-imaging"))
+        widgets.Tooltip(lic, "Free software under the GNU AGPL v3.\n"
+                             "Click to open the source code on GitHub.")
+
         # Footer — Save (primary) / Cancel (secondary)
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(fill="x", padx=16, pady=(0, 16))

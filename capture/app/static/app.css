@@ -819,3 +819,17 @@ body[data-mode="light"] .tab.active {
 body[data-mode="light"] .hdr {
   background: linear-gradient(180deg, rgba(255,255,255,.7), var(--surface));
 }
+
+/* Licence / source offer. Small and out of the way, but present on the one
+   interface users reach over a network, which is what an AGPL source offer
+   has to be. */
+.legal-footer {
+  padding: 10px 16px 14px;
+  text-align: center;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  border-top: 1px solid var(--hairline);
+}
+.legal-footer a { color: inherit; text-decoration: underline; }
+.legal-footer a:hover { color: var(--accent); }

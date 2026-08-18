@@ -302,24 +302,15 @@ everything redistributed here and under what licence — including the bundled
 ffmpeg, which is a **GPL** build because `render_video.py` encodes with
 libx264.
 
-Copyright (C) 2026 The WormScan authors.
+Copyright (C) 2026 Erasmus MC, University Medical Center Rotterdam.
 
-> **The copyright holder is not yet settled, and it matters.** Under Dutch
-> copyright law (Auteurswet art. 7) copyright in work created by an employee in
-> the course of their employment vests in the **employer** by default, and PhD
-> candidates at Dutch universities are normally employees. If the institution
-> holds the copyright then only the institution can choose the licence - so the
-> AGPL-3.0 release above needs their agreement, not just the maintainer's.
->
-> "The WormScan authors" is used deliberately in the meantime: it asserts
-> nothing false. Two questions to settle with whoever handles research software
-> or IP at the institution:
->
-> 1. May this be released under AGPL-3.0? (Note that `ultralytics`, which the
->    staging pipeline links, is AGPL-3.0, so a permissive licence is not
->    available while it ships - see
->    [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).)
-> 2. Whose name belongs on the notice - and the exact legal entity name?
->
-> Also worth confirming that every contributor agrees, since each holds rights
-> in their own contribution.
+WormScan was developed at Erasmus MC. Under Dutch copyright law (Auteurswet
+art. 7) copyright in work created by an employee in the course of their
+employment vests in the employer, so Erasmus MC holds it. That is a statement
+about who owns the code; it says nothing about authorship of the research —
+see [`CITATION.cff`](CITATION.cff) for how to cite the software and who wrote
+it.
+
+Released as free and open-source software. Non-commercial in intent, though
+note the AGPL does not itself restrict commercial use — it requires that source
+remains available, including to users who interact with it over a network.

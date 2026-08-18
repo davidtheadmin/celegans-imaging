@@ -1,0 +1,48 @@
+# Citation metadata for WormScan.
+#
+# GitHub reads this file and shows a "Cite this repository" button; Zenodo and
+# most reference managers read it too. Copyright in the code belongs to Erasmus
+# MC (Dutch Auteurswet art. 7, employer ownership); authorship of the work is a
+# separate matter and is recorded here.
+#
+# CHECK BEFORE PUBLISHING: the spelling of your name, and add your ORCID.
+# When the paper is out, uncomment the preferred-citation block at the bottom
+# so citations point at the paper rather than the repository.
+
+cff-version: 1.2.0
+message: "If you use WormScan in work that is published, please cite it."
+title: "WormScan: an automated imaging and analysis platform for C. elegans assays"
+abstract: >-
+  An imaging rig and analysis chain for C. elegans experiments. A Raspberry Pi
+  with an HQ camera captures whole-plate stills and video; a Windows application
+  mirrors the data and runs four analysis pipelines: swimming motility and
+  crawling locomotion via Tierpsy Tracker, clonogenic colony counting, and
+  developmental staging from a YOLO model.
+type: software
+authors:
+  - family-names: Haeckes
+    given-names: David
+    affiliation: "Erasmus MC, University Medical Center Rotterdam"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/davidtheadmin/celegans-imaging"
+license: AGPL-3.0-only
+keywords:
+  - C. elegans
+  - motility
+  - developmental staging
+  - image analysis
+  - Raspberry Pi
+  - open-source instrumentation
+
+# Uncomment and complete once the paper is published. With this present,
+# "Cite this repository" points at the paper instead of the software.
+#
+# preferred-citation:
+#   type: article
+#   title: ""
+#   authors:
+#     - family-names: Haeckes
+#       given-names: David
+#   journal: ""
+#   year: 2026
+#   doi: ""

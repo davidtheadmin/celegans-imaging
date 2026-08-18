@@ -478,6 +478,37 @@ if ($FfmpegZip) {
             New-Item -ItemType Directory -Path $ffBinDst -Force | Out-Null
             Copy-Item $localFf.Source $ffBinDst -Force
             Copy-Item $localFp.Source $ffBinDst -Force
+
+            # ffmpeg is GPL when built with libx264, which is the build we need
+            # and what THIRD-PARTY-NOTICES.md says we ship. This path skipped
+            # the licence copy below, so a build taken from PATH used to
+            # redistribute GPL binaries with no accompanying licence -- and with
+            # no record of where they came from. Write both.
+            $ffNote = Join-Path $PayloadDir 'ffmpeg\LICENSE.txt'
+            @"
+ffmpeg / ffprobe - PROVENANCE NOT VERIFIED BY THE BUILD
+
+These binaries were copied from the build machine's PATH because every
+download source failed. The build could not determine their version,
+configuration or licence.
+
+    source: $($localFf.Source)
+            $($localFp.Source)
+    copied: $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+
+ffmpeg is distributed under the LGPL v2.1 or later, and under the GPL v2 or
+later when built with GPL components such as libx264. WormScan encodes H.264
+with libx264, so the build it expects is GPL.
+
+DO NOT DISTRIBUTE this installer until the licence of the binaries above has
+been confirmed and this file replaced with their actual licence text. If you
+are conveying GPL binaries you must also be able to provide their source.
+
+Upstream: https://ffmpeg.org/  -  https://ffmpeg.org/legal.html
+"@ | Set-Content -Path $ffNote -Encoding UTF8
+
+            Write-Host "    Wrote a provenance note to ffmpeg\LICENSE.txt." -ForegroundColor Yellow
+            Write-Host "    DO NOT DISTRIBUTE this build until that is resolved." -ForegroundColor Red
             $script:FfmpegDone = $true
         } else {
             Die @"
@@ -530,7 +561,13 @@ foreach ($exe in 'ffmpeg.exe', 'ffprobe.exe') {
 # The licence must travel with the binaries.
 $ffLicense = Get-ChildItem $ffTmp -Recurse -File |
     Where-Object { $_.Name -match '^(LICENSE|COPYING)' } | Select-Object -First 1
-if ($ffLicense) { Copy-Item $ffLicense.FullName (Join-Path $PayloadDir 'ffmpeg\LICENSE.txt') -Force }
+if ($ffLicense) {
+    Copy-Item $ffLicense.FullName (Join-Path $PayloadDir 'ffmpeg\LICENSE.txt') -Force
+} else {
+    # Shipping GPL binaries without their licence is not something to warn
+    # about and continue past.
+    Die "The ffmpeg archive contained no LICENSE/COPYING file. WormScan ships these binaries, so their licence has to ship with them."
+}
 Remove-Item $ffTmp -Recurse -Force
 
 }  # end if (-not $FfmpegDone)
