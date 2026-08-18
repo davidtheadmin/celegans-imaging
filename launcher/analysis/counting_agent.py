@@ -298,6 +298,7 @@ class CountingAgent(threading.Thread):
         # pulled in once a run actually starts — mirrors motility/crawling.
         from analysis.counting import (
             CountingOptions, find_images, process_image, write_outputs,
+            _options_note,
             threshold_scale, _ANALYSIS_PREFIX,
         )
 
@@ -397,7 +398,9 @@ class CountingAgent(threading.Thread):
                 current_basename="",
                 current_stage="Writing results…",
             )
-            n_plates, n_colonies = write_outputs(out_dir, all_colony_rows, plate_rows)
+            n_plates, n_colonies = write_outputs(
+                out_dir, all_colony_rows, plate_rows, write_log,
+                options_note=_options_note(opts))
             n_fail = total - n_plates
 
             write_log(

@@ -213,24 +213,16 @@ def _mean_stage_index(counts: dict[str, int]) -> tuple[float, int]:
     return ((total / n) if n else float("nan")), n
 
 
-# --- condition grammar (reused from the viewer generators) ------------------
+# --- condition grammar ------------------------------------------------------
 # "<strain> <dose><unit>", e.g. "601 20J" / "N2 100 uM". <unit> is J (rendered
-# J/m²) or uM/µM (rendered µM). Mirrors make_video_viewer.py COND_RE.
-_COND_RE = re.compile(r"^(?P<strain>.+?)\s+(?P<dose>\d+)\s*(?P<unit>[Jj]|[uUµ][Mm])$")
-
-
-def _canon_unit(token: str) -> str:
-    if token in ("J", "j"):
-        return "J/m²"
-    return "µM"  # u/µ + M
-
-
-def parse_condition(name: str):
-    """Return (strain, dose:int, unit) or None if the name isn't the grammar."""
-    m = _COND_RE.match(name.strip())
-    if not m:
-        return None
-    return m.group("strain"), int(m.group("dose")), _canon_unit(m.group("unit"))
+# J/m²) or uM/µM (rendered µM).
+#
+# The definition lives in assay_common so all four assays share ONE grammar —
+# motility, crawling and counting parse condition folders with the same rule, and
+# a change here cannot reach one assay and miss another. Re-exported under the
+# names this module has always used, so every call site is unchanged.
+from assay_common import canon_unit as _canon_unit    # noqa: E402
+from assay_common import parse_condition             # noqa: E402,F401
 
 
 # --- filename-encoded metadata (flat-folder capture naming) -----------------
@@ -1250,6 +1242,7 @@ def analyze(
     import survival_excel
     import survival_explorer
     import survival_figures
+    import survival_scale
     import survival_size
 
     log_timepoint_plan(plans, write_log)
@@ -1308,7 +1301,9 @@ def analyze(
     write_log(
         f"Soft per-class scores: {_SOFT_SCORES_NAME} — always written. One row "
         "per detection carrying every class score for the box the pipeline "
-        "kept, plus its size_px. The body-size figure and the size sheets are "
+        "kept, plus its size_px (always pixels here; the size outputs convert "
+        "to µm when every image is calibrated). The body-size figure and the "
+        "size sheets are "
         "built from it, and it is what lets a later run reuse this one. Scores "
         "are per-class sigmoids (they do NOT sum to 1) and are UNCALIBRATED: "
         "do not report them as percentages without calibrating against manual "
@@ -1560,8 +1555,32 @@ def analyze(
     # --- body size ---------------------------------------------------------
     soft_path = out_dir / _SOFT_SCORES_NAME
     survival_size.write_merged_soft_csv(soft_path, soft_parts, write_log)
+
+    # Physical scale, read from each image's OWN TIFF tags. Deliberately done
+    # here and not in the vision subprocess: scale is a property of the image,
+    # not of the inference settings, so this keeps the detection cache key
+    # unchanged AND scales detections replayed from an earlier run exactly like
+    # fresh ones — which is most of the rows in a combining run. See
+    # survival_scale's module docstring.
+    scale_report = survival_scale.scan(all_images)
+    write_log("Spatial calibration: " + scale_report.describe() + ".")
+    scale_by_key: dict[tuple, Optional[float]] = {}
+    for plan, images in zip(plans, per_folder_images):
+        if plan.hours is None:
+            continue
+        tag = f"{plan.hours:g}"
+        for p in images:
+            k = (tag, p.name)
+            v = scale_report.by_path.get(p)
+            # Same basename twice in one timepoint with different scales: the
+            # size join cannot tell those images apart either, so record the
+            # ambiguity rather than pick one.
+            scale_by_key[k] = None if (k in scale_by_key
+                                       and scale_by_key[k] != v) else v
     size = survival_size.build_size_payload(soft_path, agg["per_image"],
-                                            write_log)
+                                            write_log,
+                                            scale_by_key=scale_by_key,
+                                            scale_report=scale_report)
 
     # --- workbook ----------------------------------------------------------
     survival_excel.index_map = dict(STAGE_INDEX)

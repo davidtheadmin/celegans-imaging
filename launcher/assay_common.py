@@ -1,0 +1,412 @@
+"""Shared plumbing for the assay readouts: condition grammar, aggregation to
+plate and condition level, and log-space distributions.
+
+WHY THIS EXISTS. Development grew a full aggregation layer — per image, then per
+plate, then per condition, with strain and dose parsed out of the folder name —
+and its explorer only draws what that layer computes. Motility, crawling and
+counting had no equivalent: motility summarised per video and stopped, crawling
+pooled every worm in a condition regardless of which plate it came from, and
+counting never parsed a dose. This module is that missing layer, written once so
+the four assays report n the same way and can be read side by side.
+
+THE REPLICATION UNIT IS THE PLATE. Items (worms, colonies) are averaged within a
+plate first, and the condition statistic is taken across plate means. That
+matches how Development already computes mean stage index, and it is the reason
+a 200-worm plate does not outvote a 12-worm one. Crawling's previous per-worm
+pooling is still available — ``pooled_*`` columns — so its old numbers stay
+reproducible and the difference between the two is visible rather than argued
+about.
+
+WHAT IS NOT MEASURED IS NOT ZERO. Every aggregate carries its own n, non-finite
+values are dropped per column rather than per row, and a column with nothing
+finite in it returns None. A blank is a claim about the run; a zero would be a
+claim about the plate (invariant 7 in ARCHITECTURE.md).
+"""
+from __future__ import annotations
+
+import math
+import re
+from dataclasses import dataclass, field
+from typing import Callable, Iterable, Optional, Sequence
+
+# ---------------------------------------------------------------------------
+# Condition grammar
+#
+# "<strain> <dose><unit>", e.g. "601 20J" / "N2 100 uM". THE single definition —
+# survival.py imports it from here rather than keeping its own copy, so a change
+# to the grammar cannot reach one assay and miss another.
+# ---------------------------------------------------------------------------
+
+_COND_RE = re.compile(r"^(?P<strain>.+?)\s+(?P<dose>\d+)\s*(?P<unit>[Jj]|[uUµ][Mm])$")
+
+
+def canon_unit(token: str) -> str:
+    """Display form of a dose unit token."""
+    return "J/m²" if token in ("J", "j") else "µM"
+
+
+def parse_condition(name: str):
+    """Return (strain, dose:int, unit) or None if the name isn't the grammar."""
+    m = _COND_RE.match(name.strip())
+    if not m:
+        return None
+    return m.group("strain"), int(m.group("dose")), canon_unit(m.group("unit"))
+
+
+def split_condition(name: str) -> dict:
+    """parse_condition with the fallback every assay uses.
+
+    A name outside the grammar is NOT dropped — it becomes its own strain with
+    no dose, so it still appears in every table and in the explorer, just
+    without a position on a dose axis. Losing a condition because someone named
+    a folder "control" would be worse than showing it unplaced.
+    """
+    hit = parse_condition(name)
+    if hit is None:
+        return {"condition": name, "strain": name, "dose": None, "unit": "",
+                "parsed": False}
+    strain, dose, unit = hit
+    return {"condition": name, "strain": strain, "dose": dose, "unit": unit,
+            "parsed": True}
+
+
+def dose_unit_of(rows: Iterable[dict]) -> str:
+    """The single dose unit in use, or "" when there is none or several."""
+    units = {r.get("unit") for r in rows if r.get("unit")}
+    return units.pop() if len(units) == 1 else ""
+
+
+# ---------------------------------------------------------------------------
+# Metric declaration
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Metric:
+    """One measured quantity, and how to present it.
+
+    ``key``    column name in the per-item table
+    ``label``  axis / panel title, without the unit
+    ``unit``   unit string for axes and tooltips ("" for dimensionless)
+    ``agg``    how a plate summarises its items: "mean" or "median". Counts and
+               rates use "mean"; anything with a long tail uses "median".
+    ``log``    draw this metric's distribution in log space (multiplicative
+               quantities: sizes, speeds). Linear otherwise.
+    ``note``   one line shown under the panel — where a number is a proxy, or
+               in pixel units, this is where it says so.
+    """
+    key: str
+    label: str
+    unit: str = ""
+    agg: str = "mean"
+    log: bool = False
+    note: str = ""
+
+    @property
+    def axis(self) -> str:
+        return f"{self.label} ({self.unit})" if self.unit else self.label
+
+
+# ---------------------------------------------------------------------------
+# Numbers
+# ---------------------------------------------------------------------------
+
+def _finite(values: Iterable) -> list:
+    out = []
+    for v in values:
+        if v is None or isinstance(v, bool):
+            continue
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(f):
+            out.append(f)
+    return out
+
+
+def mean(values) -> Optional[float]:
+    v = _finite(values)
+    return sum(v) / len(v) if v else None
+
+
+def median(values) -> Optional[float]:
+    v = sorted(_finite(values))
+    if not v:
+        return None
+    m = len(v) // 2
+    return v[m] if len(v) % 2 else 0.5 * (v[m - 1] + v[m])
+
+
+def sd(values) -> Optional[float]:
+    """Sample SD (ddof=1). None below two finite values — a single plate has no
+    spread, and reporting 0.0 there would draw an error bar that claims one."""
+    v = _finite(values)
+    if len(v) < 2:
+        return None
+    mu = sum(v) / len(v)
+    return math.sqrt(sum((x - mu) ** 2 for x in v) / (len(v) - 1))
+
+
+def quantile(values, q: float) -> Optional[float]:
+    v = sorted(_finite(values))
+    if not v:
+        return None
+    if len(v) == 1:
+        return v[0]
+    pos = q * (len(v) - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (pos - lo)
+
+
+# ---------------------------------------------------------------------------
+# Aggregation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Aggregation:
+    per_plate: list = field(default_factory=list)
+    per_condition: list = field(default_factory=list)
+    metrics: Sequence[Metric] = ()
+    n_items: int = 0
+    n_kept: int = 0
+
+
+def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
+              keep: Optional[Callable[[dict], bool]] = None) -> Aggregation:
+    """Items (worms, colonies) -> per-plate rows -> per-condition rows.
+
+    ``items`` each need "condition" and "plate"; everything else is metric
+    columns. ``keep`` is the quality gate — items failing it are counted in
+    ``n_items`` and excluded from every statistic, so a condition that lost most
+    of its animals says so in n rather than quietly reporting the survivors'
+    mean as the condition's.
+
+    Per-plate rows carry, for each metric, the plate's own summary
+    (``<key>``, by the metric's ``agg``) and its ``n_<key>``.
+
+    Per-condition rows carry ``<key>_mean`` / ``<key>_sd`` ACROSS PLATE MEANS —
+    n_plates is the n — plus ``<key>_pooled_median`` over every item in the
+    condition, for comparison with the pre-existing worm-pooled numbers.
+    """
+    keep = keep or (lambda r: True)
+    by_plate: dict[tuple, list] = {}
+    n_items = n_kept = 0
+    for r in items:
+        n_items += 1
+        if not keep(r):
+            continue
+        n_kept += 1
+        by_plate.setdefault((str(r.get("condition", "")),
+                             str(r.get("plate", ""))), []).append(r)
+
+    # every plate that produced items, plus the ones the gate emptied — a plate
+    # with zero surviving worms is a result, not an absence
+    seen_plates = {(str(r.get("condition", "")), str(r.get("plate", "")))
+                   for r in items}
+
+    per_plate = []
+    for cond, plate in sorted(seen_plates):
+        rows = by_plate.get((cond, plate), [])
+        info = split_condition(cond)
+        out = {"condition": cond, "strain": info["strain"], "dose": info["dose"],
+               "unit": info["unit"], "plate": plate,
+               "n_items": sum(1 for r in items
+                              if str(r.get("condition", "")) == cond
+                              and str(r.get("plate", "")) == plate),
+               "n_kept": len(rows)}
+        for m in metrics:
+            vals = [r.get(m.key) for r in rows]
+            out[m.key] = median(vals) if m.agg == "median" else mean(vals)
+            out[f"n_{m.key}"] = len(_finite(vals))
+        per_plate.append(out)
+
+    per_condition = []
+    for cond in sorted({p["condition"] for p in per_plate}):
+        plates = [p for p in per_plate if p["condition"] == cond]
+        info = split_condition(cond)
+        pooled = [r for r in items
+                  if str(r.get("condition", "")) == cond and keep(r)]
+        out = {"condition": cond, "strain": info["strain"], "dose": info["dose"],
+               "unit": info["unit"], "parsed": info["parsed"],
+               "n_plates": len(plates),
+               "n_plates_with_data": sum(1 for p in plates if p["n_kept"]),
+               "n_items": sum(p["n_items"] for p in plates),
+               "n_kept": sum(p["n_kept"] for p in plates)}
+        for m in metrics:
+            plate_vals = [p[m.key] for p in plates]
+            out[f"{m.key}_mean"] = mean(plate_vals)
+            out[f"{m.key}_sd"] = sd(plate_vals)
+            out[f"{m.key}_pooled_median"] = median([r.get(m.key)
+                                                    for r in pooled])
+        per_condition.append(out)
+
+    return Aggregation(per_plate=per_plate, per_condition=per_condition,
+                       metrics=list(metrics), n_items=n_items, n_kept=n_kept)
+
+
+def aggregate_from_plates(plate_rows: Sequence[dict], metrics: Sequence[Metric],
+                          n_items_key: Optional[str] = None) -> Aggregation:
+    """Same output shape when the measurement IS the plate.
+
+    Colony survival's headline quantities — colony count, stained fraction —
+    are properties of a whole well, not of one colony, so there is no item level
+    to average first. Those rows go straight in as plate rows and only the
+    across-plate step runs. ``n_items_key`` names the column that says how many
+    things the plate contained (colonies), purely so the qc sheet and the
+    explorer can show it; it never enters a statistic.
+    """
+    per_plate = []
+    for r in plate_rows:
+        cond = str(r.get("condition", ""))
+        info = split_condition(cond)
+        n = r.get(n_items_key) if n_items_key else None
+        try:
+            n = int(n) if n is not None and math.isfinite(float(n)) else 0
+        except (TypeError, ValueError):
+            n = 0
+        out = {"condition": cond, "strain": info["strain"], "dose": info["dose"],
+               "unit": info["unit"], "plate": str(r.get("plate", "")),
+               "n_items": n, "n_kept": n}
+        for m in metrics:
+            out[m.key] = (float(r[m.key])
+                          if r.get(m.key) is not None
+                          and _finite([r.get(m.key)]) else None)
+            out[f"n_{m.key}"] = 1 if out[m.key] is not None else 0
+        per_plate.append(out)
+
+    per_condition = []
+    for cond in sorted({p["condition"] for p in per_plate}):
+        plates = [p for p in per_plate if p["condition"] == cond]
+        info = split_condition(cond)
+        out = {"condition": cond, "strain": info["strain"], "dose": info["dose"],
+               "unit": info["unit"], "parsed": info["parsed"],
+               "n_plates": len(plates),
+               "n_plates_with_data": sum(1 for p in plates if p["n_kept"]),
+               "n_items": sum(p["n_items"] for p in plates),
+               "n_kept": sum(p["n_kept"] for p in plates)}
+        for m in metrics:
+            vals = [p[m.key] for p in plates]
+            out[f"{m.key}_mean"] = mean(vals)
+            out[f"{m.key}_sd"] = sd(vals)
+            out[f"{m.key}_pooled_median"] = median(vals)
+        per_condition.append(out)
+
+    return Aggregation(per_plate=per_plate, per_condition=per_condition,
+                       metrics=list(metrics),
+                       n_items=sum(p["n_items"] for p in per_plate),
+                       n_kept=sum(p["n_kept"] for p in per_plate))
+
+
+# ---------------------------------------------------------------------------
+# Distributions
+#
+# Moved here from survival_size so the four assays draw a distribution the same
+# way. The numerics are that module's, unchanged: the bandwidth rule, the grid
+# padding and the log-density -> value-density conversion are the ones whose
+# output David already signed off on for body size.
+# ---------------------------------------------------------------------------
+
+GRID_N = 150
+MIN_FOR_CURVE = 8
+
+
+def kde_log(values, grid, np):
+    """Normalised kernel density over ``grid`` (log space), or None if n < 8.
+
+    Below 8 items a KDE is a picture of the bandwidth, not of the data, so we
+    return nothing and the caller draws no curve for that group.
+    """
+    v = np.asarray([x for x in values if x and x > 0], dtype=float)
+    if len(v) < MIN_FOR_CURVE:
+        return None
+    lv = np.log(v)
+    # Silverman, eased up for small samples so a 23-item group does not sprout
+    # spurious modes next to a 639-item one.
+    bw = float(np.clip(0.62 * len(v) ** (-1 / 5), 0.17, 0.42)) * max(
+        float(lv.std(ddof=1)) if len(lv) > 1 else 1.0, 1e-6)
+    z = (grid[:, None] - lv[None, :]) / bw
+    dens = np.exp(-0.5 * z * z).sum(1) / (len(v) * bw * np.sqrt(2 * np.pi))
+    dens = dens / np.exp(grid)          # log-density -> value-density
+    m = dens.max()
+    return (dens / m) if m > 0 else None
+
+
+def kde_linear(values, grid, np):
+    """Same, without the log transform, for quantities that can be zero or that
+    are not multiplicative — bend rates, time fractions, reversal rates. A dying
+    animal at 0 bpm is a real observation and log space cannot hold it."""
+    v = np.asarray([x for x in values if x is not None and np.isfinite(x)],
+                   dtype=float)
+    if len(v) < MIN_FOR_CURVE:
+        return None
+    bw = float(np.clip(0.62 * len(v) ** (-1 / 5), 0.17, 0.42)) * max(
+        float(v.std(ddof=1)) if len(v) > 1 else 1.0, 1e-9)
+    z = (grid[:, None] - v[None, :]) / bw
+    dens = np.exp(-0.5 * z * z).sum(1) / (len(v) * bw * np.sqrt(2 * np.pi))
+    m = dens.max()
+    return (dens / m) if m > 0 else None
+
+
+def distribution(values_by_group: dict, log: bool, write_log=None) -> Optional[dict]:
+    """A shared grid plus one density curve and percentile set per group.
+
+    Returns None when nothing usable came in, so the caller skips the panel
+    rather than drawing an empty axis.
+    """
+    import numpy as np
+
+    allv = np.array([v for vals in values_by_group.values()
+                     for v in _finite(vals)], dtype=float)
+    if log:
+        allv = allv[allv > 0]
+    if not allv.size:
+        return None
+
+    if log:
+        lo = math.log(max(float(np.quantile(allv, 0.002)), 1e-9))
+        hi = math.log(float(np.quantile(allv, 0.998)))
+        if not (hi > lo):
+            hi = lo + 1.0
+        pad = 0.18 * (hi - lo)
+        grid = np.linspace(lo - pad, hi + pad, GRID_N)
+        edges = np.exp(grid)
+    else:
+        lo = float(np.quantile(allv, 0.002))
+        hi = float(np.quantile(allv, 0.998))
+        if not (hi > lo):
+            hi = lo + 1.0
+        pad = 0.12 * (hi - lo)
+        grid = np.linspace(max(lo - pad, 0.0), hi + pad, GRID_N)
+        edges = grid
+
+    groups: dict[str, dict] = {}
+    n_total = 0
+    for key in sorted(values_by_group):
+        vals = np.array(_finite(values_by_group[key]), dtype=float)
+        if not vals.size:
+            continue
+        n_total += int(vals.size)
+        y = kde_log(vals, grid, np) if log else kde_linear(vals, grid, np)
+        hist, _ = np.histogram(vals, bins=edges)
+        groups[key] = {
+            "n": int(vals.size),
+            "hist": [int(v) for v in hist],
+            "y": None if y is None else [round(float(v), 5) for v in y],
+            "p10": _r(np.percentile(vals, 10)), "p25": _r(np.percentile(vals, 25)),
+            "p50": _r(np.percentile(vals, 50)), "p75": _r(np.percentile(vals, 75)),
+            "p90": _r(np.percentile(vals, 90)), "mean": _r(vals.mean()),
+        }
+        if y is None and write_log:
+            write_log(f"distribution: {key} has {vals.size} item(s) — under the "
+                      f"{MIN_FOR_CURVE} needed for a density curve; its "
+                      "percentiles are still reported, but it draws no curve.")
+    if not groups:
+        return None
+    return {"x": [round(float(v), 4) for v in edges],
+            "bin_edges": [float(v) for v in edges],
+            "groups": groups, "n_total": n_total, "log": bool(log)}
+
+
+def _r(v) -> float:
+    return round(float(v), 3)

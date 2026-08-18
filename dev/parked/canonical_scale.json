@@ -1,0 +1,8 @@
+{
+  "canonical_um_per_px": 5.095440638554331,
+  "output_bit_depth": 8,
+  "_note": "PARKED 2026-08-18 -- see dev/parked/README.md. Deliberate MINIMUM-magnification floor, frozen from the Lowestmag_survival capture set (2026-07-10, IMX477 full-frame 4056x3040, 8-bit RGB). This is the COARSEST acceptable um/px -- the scale below which worms/eggs can no longer be reliably counted. The batch was captured at this just-enough-to-count magnification on purpose, so every legitimate future image is at this scale or FINER and reaches canonical by DOWNSCALING. An image COARSER than this would require upscaling (inventing detail that was never captured) and is REFUSED, not resampled. Do not edit without re-freezing from a new floor capture set.",
+  "_correction": "An earlier version of this note claimed the value was 'Read by both training-prep and inference so the value cannot drift'. That was never true -- normalize.py, its only reader, was imported by nothing. This is a CAPTURE recommendation, not a unit conversion. Body size is converted to micrometres from each image's own TIFF tags by launcher/survival_scale.py; using this constant as a conversion factor would mis-scale every plate imaged finer than the floor, which is all of them.",
+  "_source_xresolution_rational": [13170375, 67108864],
+  "_frozen_from": "experiments/Lowestmag_survival/Lowest mag/plate 01..05"
+}

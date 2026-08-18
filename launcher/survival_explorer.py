@@ -125,7 +125,11 @@ def build_payload(agg: dict, size: Optional[dict], meta: dict,
             groups[k] = {"y": g["y"], "n": g["n"], "p25": g["p25"],
                          "p50": g["p50"], "p75": g["p75"]}
         size_out = {"x": size["x"], "groups": groups,
-                    "n_total": size["n_total"]}
+                    "n_total": size["n_total"],
+                    # px or µm — the template puts this in the axis note, so a
+                    # saved explorer never has to be read against the wrong unit.
+                    "unit": size.get("unit_label", "px"),
+                    "scale_note": size.get("scale_note", "")}
 
     rescore = meta.get("rescore") or {}
     alpha = float(rescore.get("alpha") or 0.0)

@@ -287,12 +287,39 @@ def fig_composition(out_png: Path, agg: dict, write_log) -> None:
 # 3 — body-size distribution
 # ---------------------------------------------------------------------------
 
+_TICK_MANTISSAS = (1, 1.5, 2, 3, 4, 6, 8)
+
+
+def _log_ticks(lo: float, hi: float) -> list:
+    """A 1-1.5-2-3-4-6-8-per-decade ladder covering [lo, hi].
+
+    Replaces a hardcoded pixel-range tick list so the same axis works whether
+    the run reports pixels (~20-200) or micrometres (~100-1500). The mantissas
+    are chosen to reproduce roughly the old hand-picked pixel ticks
+    (20/30/40/60/80/…) rather than leaving a bare decade gap above 100. An
+    empty result leaves matplotlib's own ticker in charge.
+    """
+    import math
+    if not (hi > lo > 0):
+        return []
+    out = []
+    dec = math.floor(math.log10(lo))
+    while 10 ** dec <= hi:
+        for m in _TICK_MANTISSAS:
+            t = m * 10 ** dec
+            if lo <= t <= hi:
+                out.append(int(t) if float(t).is_integer() else t)
+        dec += 1
+    return out
+
+
 def fig_body_size(out_png: Path, agg: dict, size: dict, write_log) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import numpy as np
 
+    size_unit = size.get("unit_label", "px")
     cond = agg["per_condition"]
     strains = _sorted_strains(cond)
     doses = _sorted_doses(cond)
@@ -329,13 +356,14 @@ def fig_body_size(out_png: Path, agg: dict, size: dict, write_log) -> None:
                         color=colors[s], clip_on=False)
                 drawn += 1
             ax.set_xscale("log")
-            # Plain integers, not 2x10^1: these are pixels, and scientific
-            # notation on a 20-200 px range reads as a mistake.
-            ticks = [t for t in (20, 30, 40, 60, 80, 120, 160, 240)
-                     if x[0] <= t <= x[-1]]
+            # Plain integers, not 2x10^1: scientific notation on a range this
+            # narrow reads as a mistake. Ticks are derived from the data range
+            # rather than hardcoded, because that range is ~20-200 in pixels
+            # and ~100-1500 in micrometres.
+            ticks = _log_ticks(float(x[0]), float(x[-1]))
             if ticks:
                 ax.set_xticks(ticks)
-                ax.set_xticklabels([str(t) for t in ticks])
+                ax.set_xticklabels([f"{t:g}" for t in ticks])
             ax.set_xticks([], minor=True)
             ax.set_ylim(-0.12, 1.12)
             if ri == 0:
@@ -343,17 +371,22 @@ def fig_body_size(out_png: Path, agg: dict, size: dict, write_log) -> None:
             if ci == 0:
                 ax.set_ylabel(_dose_label(d, unit), fontsize=9, color=_INK)
             if ri == len(doses) - 1:
-                ax.set_xlabel("body size √(w·h)  [px]", fontsize=8, color=_MUT)
+                ax.set_xlabel(f"apparent size √(w·h)  [{size_unit}]",
+                              fontsize=8, color=_MUT)
     handles = [plt.Line2D([], [], color=colors[s], linewidth=2) for s in strains]
-    fig.legend(handles, strains, loc="lower center", ncol=min(6, len(strains)),
-               frameon=False, fontsize=8, bbox_to_anchor=(0.5, 0.035))
     fig.suptitle("Body-size distribution", fontsize=13, color=_INK)
+    # Caption first, legend above it: the caption is three lines here, and a
+    # legend pinned to a fixed offset lands on top of it.
     bottom = _caption(fig,
                       "Kernel density in log space, curves scaled to equal "
                       f"height; ▲ marks the median. {size['n_total']:,} "
-                      "animals. A group needs at least 8 animals to draw a "
-                      "curve.")
-    fig.tight_layout(rect=(0, bottom + 0.055, 1, 0.955))
+                      "animals; a group needs at least 8 to draw a curve. "
+                      "Apparent size is √(w·h) of the detection box, not a body "
+                      "length: a coiled animal reads smaller than a straight "
+                      "one of the same length.")
+    fig.legend(handles, strains, loc="lower center", ncol=min(6, len(strains)),
+               frameon=False, fontsize=8, bbox_to_anchor=(0.5, bottom + 0.005))
+    fig.tight_layout(rect=(0, bottom + 0.075, 1, 0.955))
     fig.savefig(out_png, dpi=200)
     plt.close(fig)
     write_log(f"Wrote {out_png} ({drawn} curve(s))")

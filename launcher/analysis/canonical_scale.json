@@ -1,7 +1,0 @@
-{
-  "canonical_um_per_px": 5.095440638554331,
-  "output_bit_depth": 8,
-  "_note": "Deliberate MINIMUM-magnification floor, frozen from the Lowestmag_survival capture set (2026-07-10, IMX477 full-frame 4056x3040, 8-bit RGB). This is the COARSEST acceptable um/px -- the scale below which worms/eggs can no longer be reliably counted. The batch was captured at this just-enough-to-count magnification on purpose, so every legitimate future image is at this scale or FINER and reaches canonical by DOWNSCALING. An image COARSER than this would require upscaling (inventing detail that was never captured) and is REFUSED, not resampled. Read by both training-prep and inference so the value cannot drift. Do not edit without re-freezing from a new floor capture set.",
-  "_source_xresolution_rational": [13170375, 67108864],
-  "_frozen_from": "experiments/Lowestmag_survival/Lowest mag/plate 01..05"
-}

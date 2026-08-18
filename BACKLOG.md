@@ -207,31 +207,20 @@ per-plate delete so retention can clean up later.
   Desktop → Settings → Resources CPU/RAM so auto scales to ~4 workers. Settings
   change, not code.
 
-## YOLO staging — scale normalization (`launcher/analysis/normalize.py`)
+## YOLO staging — scale normalization (PARKED 2026-08-18)
 
-New module committed untracked (nothing imports it yet). VERIFY BEFORE THE FIRST
-REAL TRAINING-PREP BATCH RUN — these generate images we annotate, so a silent
-error here poisons the training set:
+`launcher/analysis/normalize.py`, its test and `canonical_scale.json` moved to
+`dev/parked/`. They were imported by nothing — not inference, not training-prep —
+so the checklist that used to live here could never be run and has been removed
+with them. The two conditions it listed (inference must read through `_read_rgb`;
+the first `Lowestmag_survival` run must log exact passthrough at `scale = 1.0000`)
+are restated in `dev/parked/README.md` and would have to be met before any revival.
 
-- [x] **1(a) Channel conversion is clean.** `_read_rgb` uses
-  `cv2.cvtColor(img, cv2.COLOR_BGR2RGB)` (not axis slicing). Verified 2026-07-10.
-- [ ] **1(b) Inference must read through `_read_rgb`.** `crop_wells._read`
-  returns BGR; the RGB invariant only holds if inference also converts. A loud
-  banner comment was added above `_read_rgb`. **Re-confirm when wiring inference
-  in**: the inference path must call `_read_rgb` (or apply the same BGR→RGB),
-  never a bare `crop_wells._read`. Silent failure = channels swap, no error, mAP
-  degrades.
-- [x] **2. `warn` must not upscale.** Fixed 2026-07-10: `--on-below-floor warn`
-  now logs + skips + writes NO output (same as `refuse`; only log wording
-  differs). Below-floor files always raise `BelowFloorError` and are skipped.
-  `allow_upscale=True` on `resample_to_canonical` is a deliberate programmatic
-  escape hatch only — never reachable through the CLI/`warn`. Verified: warn run
-  on a synthetic below-floor TIFF wrote zero image files.
-- [ ] **3. Passthrough sanity on first run.** When the CLI is first run on the
-  `Lowestmag_survival` batch, ALL FIVE files must log EXACT passthrough,
-  `scale = 1.0000`, zero interpolation. If any file logs a non-exact scale (e.g.
-  `0.9998`), the batch is NOT all at one identical calibration as assumed —
-  STOP and report the spread rather than writing it as training data.
+Body size is now reported in micrometres read from each image's own TIFF tags
+(`launcher/survival_scale.py`), which is a per-image measurement rather than a
+frozen constant. The canonical 5.0954 µm/px survives as a *capture* recommendation
+— the coarsest scale at which worms and eggs can still be counted — and must not be
+used as a unit conversion.
 
 ## Staging model — per-class confidence thresholds
 

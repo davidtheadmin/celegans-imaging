@@ -770,6 +770,21 @@ class MotilityAgent(threading.Thread):
                        .sort_values("duration_s", ascending=False))
                 cdf.to_excel(xw, sheet_name=_safe_sheet_name(cond, name_seen), index=False)
             pd.DataFrame(summary_rows).to_excel(xw, sheet_name="_summary", index=False)
+            # Plate and condition layer, the two figures and the explorer.
+            # Into the SAME workbook, under names that collide with nothing
+            # above. Never fails the run: a day's imaging is not worth losing
+            # to a bug in a reporting layer.
+            try:
+                import assay_reports
+                assay_reports.motility_report(
+                    xw.book, all_fragment_rows, out_dir, write_log,
+                    long_threshold_s=threshold_s)
+            except Exception as exc:                              # noqa: BLE001
+                log.warning("motility: report layer failed", exc_info=True)
+                write_log(f"WARNING: the plate/condition sheets, the figures and "
+                          f"the explorer could not be written ({exc}). Every "
+                          "per-worm and per-video output of this run is "
+                          "unaffected.")
 
         pd.DataFrame(summary_rows).to_csv(
             out_dir / "motility_summary.csv", index=False

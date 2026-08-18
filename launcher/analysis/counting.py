@@ -36,10 +36,13 @@ launcher.
 from __future__ import annotations
 
 import argparse
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as _dc_fields
 from datetime import datetime
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 import cv2
 import numpy as np
@@ -490,14 +493,38 @@ def _round4(df: pd.DataFrame) -> pd.DataFrame:
     return df.round({col: 4 for col in df.select_dtypes(include="number").columns})
 
 
+def _options_note(opts) -> str:
+    """The run's knobs as one line, for run_info.
+
+    They were previously only in log.txt prose, which means a workbook on its
+    own could not say what threshold produced its counts — and with the default
+    otsu mode every plate is its own reference, so that is not a detail.
+    """
+    keys = [f.name for f in _dc_fields(CountingOptions)]
+    parts = []
+    for k in keys:
+        v = getattr(opts, k, None)
+        if v is not None:
+            parts.append(f"{k}={v}")
+    return ", ".join(parts)
+
+
 def write_outputs(out_dir: Path, all_colony_rows: list[dict],
-                  plate_rows: list[dict]) -> tuple[int, int]:
+                  plate_rows: list[dict], write_log=None,
+                  options_note: str = "") -> tuple[int, int]:
     """Write the xlsx (per_colony / per_plate / per_condition) + summary CSV.
 
-    Returns (n_plates, n_colonies). Behaviour is identical to the inline writer
-    that previously lived in run(); extracted so the agent can reuse it.
+    Returns (n_plates, n_colonies). The three original sheets and the summary
+    CSV are exactly what they were; the report layer adds condition_summary, qc,
+    two figures and the explorer beside them.
+
+    ``write_log`` is optional so the CLI path keeps working without one — its
+    messages then go to the module logger instead of log.txt.
     """
     cond_rows = per_condition_rows(plate_rows)
+    if write_log is None:
+        def write_log(msg: str) -> None:                    # noqa: F811
+            log.info("[counting] %s", msg)
 
     colony_cols = ["condition", "plate", "label", "centroid_x", "centroid_y",
                    "area_px", "area_mm2", "equiv_diam_um", "mean_stain",
@@ -518,6 +545,24 @@ def write_outputs(out_dir: Path, all_colony_rows: list[dict],
         colony_df.to_excel(xw, sheet_name="per_colony", index=False)
         plate_df.to_excel(xw, sheet_name="per_plate", index=False)
         cond_df.to_excel(xw, sheet_name="per_condition", index=False)
+        try:
+            # counting.py doubles as a standalone CLI, in which case sys.path[0]
+            # is this folder and launcher/ is not importable. Add it here rather
+            # than letting the report layer silently never run from the CLI.
+            import sys as _sys
+            _launcher = str(Path(__file__).resolve().parent.parent)
+            if _launcher not in _sys.path:
+                _sys.path.insert(0, _launcher)
+            import assay_reports
+            assay_reports.counting_report(xw.book, plate_rows, all_colony_rows,
+                                          out_dir, write_log,
+                                          options_note=options_note)
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("counting: report layer failed", exc_info=True)
+            write_log(f"WARNING: condition_summary, qc, the figures and the "
+                      f"explorer could not be written ({exc}). per_colony, "
+                      "per_plate, per_condition and the overlays are "
+                      "unaffected.")
     cond_df.to_csv(out_dir / "counting_summary.csv", index=False)
 
     return len(plate_rows), len(all_colony_rows)
@@ -632,7 +677,9 @@ def run(experiment_dir: str, output_dir: str | None, opts) -> Path:
             if plate_row is not None:
                 plate_rows.append(plate_row)
 
-        n_plates, n_colonies = write_outputs(out_dir, all_colony_rows, plate_rows)
+        n_plates, n_colonies = write_outputs(
+            out_dir, all_colony_rows, plate_rows, write_log,
+            options_note=_options_note(opts))
 
         write_log(f"done: {n_plates} plate(s), "
                   f"{n_colonies} colony(ies) -> {out_dir}")

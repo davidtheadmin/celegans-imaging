@@ -204,6 +204,14 @@ across them.
 
 The headline readout is **mean stage index**, stage composition and body size.
 
+Body size is reported in **micrometres**, converted from each image's own TIFF
+calibration tags, and falls back to pixels for the **whole run** if any image is
+uncalibrated — never a mixture, and never a substituted default. The scale is
+read on the launcher side (`survival_scale.py`) rather than in the vision
+subprocess, so the detection cache key is unaffected and detections replayed
+from an earlier run are scaled exactly like fresh ones. It is an *apparent*
+size — `sqrt(w·h)` of an axis-aligned box — not a body length.
+
 A survival percentage is still computed and written to the workbook, but it
 appears in **no figure**, deliberately. The reason is recorded in
 `launcher/survival.py`: in a full dose experiment the denominator collapses at
@@ -348,6 +356,7 @@ it is here:
 | Camera resolutions, bitrate, capture duration | `capture/app/camera.py`, `capture/app/capture_ops.py` |
 | Dependency versions | The three `requirements.txt` files; the resolved set per build is recorded by the installer |
 | Survivor / stage mapping | `SURVIVAL_CONFIG` and `STAGE_INDEX` in `launcher/survival.py` |
+| Body-size unit and the µm/px it came from | Nowhere — it is read per image from that image's TIFF tags by `launcher/survival_scale.py`, and the range actually used is recorded in each run's `run_info`. There is deliberately no constant to look up: `dev/parked/canonical_scale.json` is a capture recommendation, not a conversion factor |
 
 The `_README` blocks in `stage_conf.json` are the model to copy: they record not
 just the value but how it was measured, what it removed, and what is still not

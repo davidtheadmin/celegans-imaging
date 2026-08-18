@@ -889,7 +889,22 @@ class CrawlingAgent(threading.Thread):
 
         with pd.ExcelWriter(out_dir / "crawling_results.xlsx", engine="openpyxl") as xw:
             per_worm_df.to_excel(xw, sheet_name="per_worm", index=False)
+            # per_condition pools WORMS across plates — kept exactly as it was,
+            # so older numbers stay reproducible. condition_summary, added by
+            # the report layer below, aggregates PLATES instead and is what the
+            # figures and the explorer use. The workbook README explains which
+            # answers which question.
             per_condition_df.to_excel(xw, sheet_name="per_condition", index=False)
+            try:
+                import assay_reports
+                assay_reports.crawling_report(
+                    xw.book, all_worm_rows, out_dir, write_log,
+                    min_span_s=min_span_s)
+            except Exception as exc:                              # noqa: BLE001
+                log.warning("crawling: report layer failed", exc_info=True)
+                write_log(f"WARNING: the plate/condition sheets, the figures and "
+                          f"the explorer could not be written ({exc}). Every "
+                          "per-worm output of this run is unaffected.")
 
         per_condition_df.to_csv(out_dir / "crawling_summary.csv", index=False)
 

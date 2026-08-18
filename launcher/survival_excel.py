@@ -124,10 +124,20 @@ def _readme_rows(meta: dict, plans, summary: dict, stage_names: list[str],
          "per_condition row says which it used, in 'replicate_unit'. A mean ± SD "
          "whose n means two different things in two rows is worse than none."),
         ("Body size",
-         "size_px = sqrt(width x height) of the detection box, in full-frame "
-         "pixels. Distributions are estimated in LOG space, because growth is "
-         "multiplicative: a fixed bandwidth in linear space over-smooths the "
-         "tight L1 peak and under-smooths the broad adult tail."),
+         "sqrt(width x height) of the detection box. Reported in MICROMETRES "
+         "when every image carries a spatial calibration in its TIFF tags, and "
+         "in full-frame pixels otherwise — all or nothing, never a mixture; "
+         "run_info records which and why. Distributions are estimated in LOG "
+         "space, because growth is multiplicative: a fixed bandwidth in linear "
+         "space over-smooths the tight L1 peak and under-smooths the broad "
+         "adult tail."),
+        ("...and what it is not",
+         "APPARENT size, not a body length. A box does not know how coiled the "
+         "animal in it is, so a curled worm reads smaller than a straight one "
+         "of the same length: sqrt(w x h) grows about 2.5x from L1 to adult "
+         "where real body length grows 4-5x. Micrometres make it comparable "
+         "across magnifications; they do not make it a length, and it should "
+         "not be compared against published body lengths."),
         ("", ""),
         ("SURVIVAL % — READ THIS BEFORE USING IT", ""),
         ("", "survival % = (L3 + L4 + adult) / (all staged animals) x 100. It is "
@@ -348,7 +358,11 @@ def write_workbook(out_path: Path, agg: dict, *, stage_names: list[str],
 
     size_note = (
         f"{size['n_total']:,} animals from soft_stage_scores.csv, "
-        f"{len(size['groups'])} condition x timepoint group(s)."
+        f"{len(size['groups'])} condition x timepoint group(s). Sizes are in "
+        f"{'micrometres' if size.get('unit') == 'um' else 'pixels'} "
+        f"({size.get('scale_note', '')}). This is APPARENT size, sqrt(w*h) of "
+        "the detection box, not a body length: a coiled animal reads smaller "
+        "than a straight one of the same length."
         if size else
         "soft_stage_scores.csv held no usable size_px column — the two size "
         "sheets and the body-size figure were skipped."
@@ -356,7 +370,7 @@ def write_workbook(out_path: Path, agg: dict, *, stage_names: list[str],
     _write_readme(wb, _readme_rows(meta, plans, summary, stage_names, unmapped,
                                    size_note))
     _write_run_info(wb, _run_info_rows(meta, plans, summary, stage_names,
-                                       unmapped, agg))
+                                       unmapped, agg, size))
 
     expected: dict[str, float] = {}
 
@@ -644,7 +658,35 @@ def index_map_lookup(stage: str) -> Optional[float]:
     return index_map.get(str(stage).strip().lower())
 
 
-def _run_info_rows(meta, plans, summary, stage_names, unmapped, agg):
+def _size_scale_rows(size) -> list:
+    """Provenance for the body-size unit. A magnification change mid-experiment
+    silently widens every distribution, so the scale that was actually used is
+    recorded here rather than inferred from the axis label."""
+    if not size:
+        return []
+    unit = size.get("unit", "px")
+    rows = [("size_metric",
+             "sqrt(w*h) of the detection box — APPARENT size, not a body "
+             "length: a coiled animal reads smaller than a straight one of the "
+             "same length"),
+            ("size_unit", "µm" if unit == "um" else "px"),
+            ("size_unit_reason", size.get("scale_note", ""))]
+    if unit == "um":
+        lo, mid, hi = (size.get("um_per_px_min"), size.get("um_per_px_median"),
+                       size.get("um_per_px_max"))
+        if lo is not None and hi is not None:
+            spread = 100.0 * (hi / lo - 1.0) if lo else 0.0
+            rows.append(("um_per_px",
+                         f"{lo:.4g}–{hi:.4g} (median {mid:.4g}), read from each "
+                         f"image's TIFF tags; spread {spread:.1f}%"
+                         + ("" if spread < 1.0 else
+                            " — the working distance moved during this "
+                            "experiment, so sizes are comparable only to the "
+                            "extent that tag is right")))
+    return rows
+
+
+def _run_info_rows(meta, plans, summary, stage_names, unmapped, agg, size=None):
     # Local import: survival.py imports this module lazily, inside the run.
     from survival import (SURVIVAL_CONFIG, _RESULTS_NAME, _MODEL_PATH,
                           _VISION_PY)
@@ -717,6 +759,7 @@ def _run_info_rows(meta, plans, summary, stage_names, unmapped, agg):
          "figure; see the README sheet"),
         ("vision_python", str(_VISION_PY)),
     ]
+    rows += _size_scale_rows(size)
     return rows
 
 
@@ -732,8 +775,9 @@ def _write_size_sheets(wb, size: dict, expected: dict) -> None:
 
     keys = list(size["groups"].keys())
     edges = size["bin_edges"]
+    u = size.get("unit", "px")          # "um" or "px" — set by survival_size
     ws = wb.create_sheet("size_histogram")
-    headers = ["bin_lo_px", "bin_hi_px", "bin_mid_px"] + keys
+    headers = [f"bin_lo_{u}", f"bin_hi_{u}", f"bin_mid_{u}"] + keys
     _write_header(ws, headers)
     for i in range(len(edges) - 1):
         row = [round(edges[i], 2), round(edges[i + 1], 2),
@@ -756,9 +800,12 @@ def _write_size_sheets(wb, size: dict, expected: dict) -> None:
     ws.column_dimensions["A"].width = 12
 
     ws = wb.create_sheet("size_summary")
-    sh = ["group", "strain", "dose", "unit", "timepoint_h", "n",
+    # "unit" here is the DOSE unit (J/m², µM) and has always been; "size_unit"
+    # is the new one and says what the percentile columns are measured in.
+    sh = ["group", "strain", "dose", "unit", "timepoint_h", "n", "size_unit",
           "p10", "p25", "p50_median", "p75", "p90", "mean", "geometric_mean"]
     _write_header(ws, sh)
+    size_unit = "µm" if u == "um" else "px"
     for j, k in enumerate(keys):
         g = size["groups"][k]
         hist_col = _col(4 + j)
@@ -766,6 +813,7 @@ def _write_size_sheets(wb, size: dict, expected: dict) -> None:
         ws.append([
             k, g["strain"], g["dose"], g["unit"], g["timepoint_h"],
             f"=SUM('size_histogram'!{hist_col}$2:{hist_col}${n_bins + 1})",
+            size_unit,
             g["p10"], g["p25"], g["p50"], g["p75"], g["p90"],
             g["mean"], g["gmean"],
         ])

@@ -237,7 +237,13 @@ function sizePanel(){
  const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Body size distribution'});
  svg.setAttribute('style','max-width:100%;height:auto');
  const lx=Math.log(X[0]), hx=Math.log(X[n-1]);
- const ticks=[20,30,40,60,80,120,160,240].filter(z=>z>=X[0]&&z<=X[n-1]);
+ /* 1-1.5-2-3-4-6-8 per decade, derived from the range instead of hardcoded: the
+    same axis has to work in pixels (~20-200) and in micrometres (~100-1500).
+    Mirrors survival_figures._log_ticks — keep the two ladders the same. */
+ const ticks=(()=>{const o=[];let e=Math.floor(Math.log10(X[0]));
+  while(Math.pow(10,e)<=X[n-1]){[1,1.5,2,3,4,6,8].forEach(m=>{const z=m*Math.pow(10,e);
+   if(z>=X[0]&&z<=X[n-1])o.push(z);});e++;}return o;})();
+ const SU=D.size.unit||'px';
  let drawn=0;
  DOS.forEach((d,ri)=>TPS.forEach((t,ci)=>{
   const ox=padL+ci*(pw+gapC), oy=padT+ri*(ph+gapR);
@@ -256,17 +262,20 @@ function sizePanel(){
    svg.appendChild(E('path',{d:dsc.replace(/Z$/,''),fill:'none',stroke:v(SC[s]),'stroke-width':2,
      'stroke-linejoin':'round','stroke-linecap':'round'}));
    const tri=E('path',{d:'M'+PX(g.p50)+' '+(oy+ph+6)+'l-4.5 7h9z',fill:v(SC[s])});
-   hov(tri,'<b>'+s+' · '+dl(ri)+' · '+tl(t)+'</b><br>median '+g.p50+' px · '+g.n+' animals'+
-       '<br>p25–p75 '+g.p25+'–'+g.p75+' px');
+   hov(tri,'<b>'+s+' · '+dl(ri)+' · '+tl(t)+'</b><br>median '+g.p50+' '+SU+' · '+g.n+' animals'+
+       '<br>p25–p75 '+g.p25+'–'+g.p75+' '+SU);
    svg.appendChild(tri);
    svg.appendChild(E('text',{x:ox+2+si*42,y:oy-4,fill:v(SC[s]),'font-size':8.6},[T('n='+g.n)]));});
   svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
  }));
  const el=document.getElementById('size'); el.innerHTML=''; el.appendChild(svg);
  document.getElementById('sizelg').innerHTML=STR.map(s=>'<span><i style="background:'+v(SC[s])+'"></i>'+s+'</span>').join('')
-  +'<span style="color:var(--mut)">body size √(w·h) in px, log scale · ▲ median · '
+  +'<span style="color:var(--mut)">apparent size √(w·h) in '+SU+', log scale · ▲ median · '
   +D.size.n_total.toLocaleString()+' animals · '+drawn+' curve'+(drawn===1?'':'s')
-  +' (a group needs ≥8 animals)</span>';
+  +' (a group needs ≥8 animals)</span>'
+  +'<span style="color:var(--mut)">√(w·h) of the detection box — apparent size, not a body '
+  +'length: a coiled animal reads smaller than a straight one of the same length'
+  +(D.size.scale_note?'. '+D.size.scale_note:'')+'</span>';
 }
 
 /* ---------- 4. quality control ---------- */
