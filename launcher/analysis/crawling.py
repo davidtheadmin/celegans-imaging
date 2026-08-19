@@ -22,6 +22,7 @@ import json
 import logging
 import shlex
 import shutil
+import traceback
 import subprocess
 import sys
 import threading
@@ -564,6 +565,29 @@ class CrawlingStatus:
             self._current_basename = current_basename
             self._current_stage = current_stage
 
+    def mark_failed(self, error: str, out_dir=None) -> None:
+        """A run that died, surfaced through the SAME channel as a success.
+
+        Without this a crash set the dot red, wrote a short label and stopped.
+        From the outside that is indistinguishable from a run that quietly did
+        nothing, and the UI's failure notice (which has existed all along)
+        never fired because nothing ever put a result in the queue for it.
+        Development already did this; the other three did not.
+        """
+        with self._lock:
+            self._color = "red"
+            self._label = "Analysis failed — see log"
+            self._running = False
+            self._current_stage = ""
+            self._completed_result = {
+                "failed": True,
+                "error": error,
+                "n_ok": 0,
+                "n_fail": 0,
+                "out_dir": out_dir,
+                "note": "",
+            }
+
     def mark_completed(self, n_ok: int, n_fail: int, out_dir: Path) -> None:
         with self._lock:
             self._color = "green"
@@ -571,6 +595,7 @@ class CrawlingStatus:
             self._running = False
             self._current_stage = ""
             self._completed_result = {
+                "failed": False,
                 "n_ok": n_ok,
                 "n_fail": n_fail,
                 "out_dir": out_dir,
@@ -702,13 +727,23 @@ class CrawlingAgent(threading.Thread):
                         want_tracked, want_sidebyside, want_path_traces,
                         min_span_s,
                     )
-                except Exception:
+                except Exception as exc:
                     log.exception("CrawlingAgent crashed")
-                    self.status.update(
-                        color="red",
-                        label="Analysis crashed — see log",
-                        running=False,
-                    )
+                    # Report through the SAME channel as a success, and put the
+                    # traceback in the run's own log.txt so that "see log"
+                    # points at something that actually explains it.
+                    out_dir = getattr(self, "_last_out_dir", None)
+                    if out_dir is not None:
+                        try:
+                            with open(Path(out_dir) / "log.txt", "a",
+                                      encoding="utf-8") as fh:
+                                fh.write("\n" + "=" * 60
+                                         + "\nANALYSIS CRASHED\n"
+                                         + traceback.format_exc() + "\n")
+                        except Exception:                     # noqa: BLE001
+                            pass
+                    self.status.mark_failed(
+                        f"{type(exc).__name__}: {exc}", out_dir)
 
     def _run_analysis(
         self,
@@ -733,6 +768,9 @@ class CrawlingAgent(threading.Thread):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         out_dir = folder / f"{_ANALYSIS_PREFIX}_{timestamp}"
         out_dir.mkdir(parents=True, exist_ok=True)
+        # the crash handler in run() needs this to point the
+        # user at the folder and to append the traceback
+        self._last_out_dir = out_dir
         per_video_dir = out_dir / "per_video"
         per_video_dir.mkdir(exist_ok=True)
         log_path = out_dir / "log.txt"
