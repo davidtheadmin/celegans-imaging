@@ -227,6 +227,42 @@ def test_counting(tmp: Path):
           "colony size is a log-space distribution in µm")
 
 
+def test_logger_cannot_kill_a_run(tmp: Path):
+    """Regression: a write_log that raises must not cost the run its outputs.
+
+    Motility and crawling build log.txt inside a `with open(...)` block that has
+    already closed by the time the workbook is written, so the write_log closure
+    they hand us was writing to a closed file and raising ValueError. That
+    aborted the report after the CSV and before the figures, and the handler
+    raised again logging the failure, which escaped and took the pipeline's own
+    summary CSV and overview figure with it. Seen in the wild 2026-08-19.
+    """
+    print("\nlogging failures cannot end a run")
+    from openpyxl import Workbook
+
+    def closed_file_logger(msg):
+        raise ValueError("I/O operation on closed file.")
+
+    d = tmp / "closedlog"; d.mkdir()
+    wb = Workbook(); wb.remove(wb.active)
+    AR.motility_report(wb, _worms(), d, closed_file_logger, long_threshold_s=5.0)
+    check("condition_summary" in wb.sheetnames,
+          "the workbook sheets are still written")
+    check((d / "motility_condition_summary.csv").exists(),
+          "the condition CSV is still written")
+    check((d / "motility_dose_response.png").exists()
+          and (d / "motility_distribution.png").exists(),
+          "BOTH figures are still written (these were the casualties)")
+    check((d / "explorer.html").exists(),
+          "the explorer is still written")
+
+    d2 = tmp / "nolog"; d2.mkdir()
+    wb2 = Workbook(); wb2.remove(wb2.active)
+    AR.motility_report(wb2, _worms(), d2, None, long_threshold_s=5.0)
+    check((d2 / "explorer.html").exists(),
+          "write_log=None is also survivable")
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
@@ -236,6 +272,7 @@ if __name__ == "__main__":
         test_motility(tmp)
         test_crawling(tmp)
         test_counting(tmp)
+        test_logger_cannot_kill_a_run(tmp)
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S):")

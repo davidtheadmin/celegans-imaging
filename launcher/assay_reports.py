@@ -14,6 +14,7 @@ someone has to read.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -21,6 +22,34 @@ import assay_common as AC
 import assay_excel as AX
 import assay_explorer as AE
 import assay_figures as AF
+
+log = logging.getLogger(__name__)
+
+
+def _safe_log(write_log: Optional[Callable[[str], None]]) -> Callable[[str], None]:
+    """Wrap the caller's logger so that logging can never end a run.
+
+    This is not defensive programming for its own sake. Two of the three
+    pipelines build their log.txt inside a ``with open(...)`` block that has
+    already closed by the time the workbook is written, so a ``write_log`` call
+    from here hit a closed file handle and raised ValueError. That aborted the
+    report layer AFTER it had written some of its outputs and, because the
+    handler then tried to log the failure the same way, it raised a second time
+    and escaped, taking the pipeline's own summary CSV and overview figure with
+    it. A run was lost to a log line.
+
+    Whatever the caller hands us, a message that cannot be delivered is
+    dropped to the module logger and the analysis carries on.
+    """
+    def safe(msg: str) -> None:
+        if write_log is not None:
+            try:
+                write_log(msg)
+                return
+            except Exception:                                  # noqa: BLE001
+                pass
+        log.info("[assay] %s", msg)
+    return safe
 
 # ---------------------------------------------------------------------------
 # Metric declarations
@@ -102,6 +131,7 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
             keep_note: str, unit_note: str,
             write_log: Callable[[str], None]) -> list:
     """The half of every report that is identical: sheets, figures, explorer."""
+    write_log = _safe_log(write_log)
     AX.write_readme(wb, assay,
                     list(readme_extra) + AX.readme_common(metrics, keep_note,
                                                           unit_note))
@@ -165,6 +195,8 @@ def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
     """Motility: items are worms, the gate is is_long."""
     metrics = MOTILITY_METRICS
 
+    write_log = _safe_log(write_log)
+
     def keep(r):
         return bool(r.get("is_long"))
 
@@ -226,6 +258,8 @@ def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
     """Crawling: items are worms, the gate is passed_filter."""
     metrics = CRAWLING_METRICS
 
+    write_log = _safe_log(write_log)
+
     def keep(r):
         return bool(r.get("passed_filter"))
 
@@ -286,6 +320,7 @@ def counting_report(wb, plate_rows: Sequence[dict],
                     options_note: str = "") -> list:
     """Colony survival: the measurement IS the plate, so plate rows go in
     directly. The distribution comes from the individual colonies."""
+    write_log = _safe_log(write_log)
     metrics = COUNTING_METRICS
     agg = AC.aggregate_from_plates(plate_rows, metrics,
                                    n_items_key="colony_count")

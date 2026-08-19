@@ -740,9 +740,27 @@ class CrawlingAgent(threading.Thread):
         with open(log_path, "w", encoding="utf-8") as lf:
 
             def write_log(msg: str) -> None:
-                lf.write(msg + "\n")
-                lf.flush()
+                """Append one line to log.txt, and never raise.
+
+                The workbook and the report layer are written AFTER this
+                ``with`` block has closed ``lf`` (see the end of this method),
+                so a naive lf.write() there raises ValueError on a closed file.
+                That is not a hypothetical: it aborted a real run mid-report and
+                cost it its summary CSV and overview figure. Reopen in append
+                mode when the handle has gone, and swallow anything that still
+                fails, because losing an analysis to a log line is never the
+                right trade.
+                """
                 log.info("[crawling] %s", msg)
+                try:
+                    if lf.closed:
+                        with open(log_path, "a", encoding="utf-8") as fh:
+                            fh.write(msg + "\n")
+                    else:
+                        lf.write(msg + "\n")
+                        lf.flush()
+                except Exception:                             # noqa: BLE001
+                    pass
 
             if clear_cache:
                 write_log("Clearing cache folders…")
