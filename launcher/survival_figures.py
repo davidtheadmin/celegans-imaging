@@ -12,9 +12,13 @@ workbook is the primary artefact and must always complete.
 
 Palette
 -------
-Strains carry fixed colours (N2 blue, 604 green, 601 orange) so the same strain
-is the same colour in every figure, every run, and in the explorer. Unknown
-strains fall through to a fixed cycle. Stages use a single-hue ordinal ramp
+Strains carry fixed colours (wild type blue, 604 green, 601 orange) so the same
+strain is the same colour in every figure, every run, and in the explorer.
+Unknown strains fall through to a fixed cycle. "Wild type" is whatever
+assay_common.is_wildtype accepts — N2, WT, wildtype — so the colour follows the
+strain rather than one spelling of its name. It is a colour and a position in a
+legend, nothing more: the wild type is not treated as anyone's control, and
+% of control is always a condition against its own strain's lowest dose. Stages use a single-hue ordinal ramp
 assigned over the classes actually emitted, so "later stage = darker" reads
 without consulting a legend.
 """
@@ -25,10 +29,17 @@ import textwrap
 from pathlib import Path
 from typing import Callable, Optional
 
+import assay_common as AC
+
 log = logging.getLogger(__name__)
 
 # Strain colours — fixed by name first, then a cycle for anything unknown.
-STRAIN_COLORS = {"n2": "#2a78d6", "604": "#1baf7a", "601": "#eb6834"}
+# A recognised wild type gets _WT_COLOR wherever it appears and whatever it is
+# called; only the FIRST one does, because two strains painted the same blue
+# would be worse than one of them taking a cycle colour. A run with no wild type
+# in it simply has no fixed blue — nothing is promoted into the role.
+_WT_COLOR = "#2a78d6"
+STRAIN_COLORS = {"604": "#1baf7a", "601": "#eb6834"}
 _CYCLE = ["#2a78d6", "#1baf7a", "#eb6834", "#eda100", "#e87ba4",
           "#4a3aa7", "#008300", "#e34948"]
 # Single-hue ordinal ramps, indexed by how many stages are actually present.
@@ -45,13 +56,17 @@ _MUT = "#898781"
 
 
 def strain_colors(strains: list[str]) -> dict[str, str]:
+    wt = next((s for s in sorted(strains, key=AC.strain_sort_key)
+               if AC.is_wildtype(s)), None)
+    taken = {STRAIN_COLORS[str(s).lower()] for s in strains
+             if str(s).lower() in STRAIN_COLORS}
+    if wt is not None:
+        taken.add(_WT_COLOR)
+    spare = [c for c in _CYCLE if c not in taken]
     out: dict[str, str] = {}
-    spare = [c for c in _CYCLE if c not in
-             {STRAIN_COLORS[s.lower()] for s in strains
-              if s.lower() in STRAIN_COLORS}]
     i = 0
     for s in strains:
-        fixed = STRAIN_COLORS.get(str(s).lower())
+        fixed = _WT_COLOR if s == wt else STRAIN_COLORS.get(str(s).lower())
         if fixed:
             out[s] = fixed
         else:
@@ -66,9 +81,9 @@ def stage_colors(stages: list[str]) -> dict[str, str]:
 
 
 def _sorted_strains(rows: list[dict]) -> list[str]:
-    """N2 first (it is the reference), then the rest alphabetically."""
-    names = sorted({str(r["strain"]) for r in rows})
-    return sorted(names, key=lambda s: (s.lower() != "n2", s))
+    """A recognised wild type first, then the rest alphabetically. Display
+    order only — it does not make that strain the control."""
+    return sorted({str(r["strain"]) for r in rows}, key=AC.strain_sort_key)
 
 
 def _sorted_doses(rows: list[dict]) -> list:

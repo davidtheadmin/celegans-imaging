@@ -50,6 +50,10 @@ DATE_RE = re.compile(r"^(?P<date>\d{6})")
 # A friendly day label: prefer a trailing 'dayN', else the date itself.
 DAYLABEL_RE = re.compile(r"(day\s*\d+)", re.IGNORECASE)
 
+# Sorting only, and deliberately broader than assay_common.is_wildtype, which
+# is the rule the analysis outputs use: this script is a standalone browsing
+# aid with no import path back into the launcher, and putting a folder called
+# "control" first in a gallery assumes nothing about what it contains.
 WT_NAMES = {"n2", "wt", "wildtype", "wild-type", "wild_type", "control", "ctrl"}
 
 

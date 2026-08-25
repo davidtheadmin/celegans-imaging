@@ -23,6 +23,8 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 
+import assay_common as AC
+
 log = logging.getLogger(__name__)
 
 _TEMPLATE = Path(__file__).parent / "survival_explorer_template.html"
@@ -54,7 +56,7 @@ def build_payload(agg: dict, size: Optional[dict], meta: dict,
     stage_cols = list(agg["stage_cols"])
 
     strains = sorted({str(r["strain"]) for r in cond},
-                     key=lambda s: (s.lower() != "n2", s))
+                     key=AC.strain_sort_key)
     doses_num = sorted({r["dose"] for r in cond if r["dose"] is not None})
     doses = list(doses_num) + ([None] if any(r["dose"] is None for r in cond)
                                else [])
@@ -145,6 +147,10 @@ def build_payload(agg: dict, size: Optional[dict], meta: dict,
 
     return {
         "strains": strains,
+        # The strain the wild-type rule recognised, if any — so the template
+        # colours it consistently without carrying its own copy of the rule.
+        # None is normal: plenty of experiments have no wild type in them.
+        "wt": next((s for s in strains if AC.is_wildtype(s)), None),
         "doses": doses,
         "tps": tps,
         "stages": stage_cols,
