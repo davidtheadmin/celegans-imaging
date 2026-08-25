@@ -82,6 +82,78 @@ def threshold_scale(sensitivity: float) -> float:
     return float(_SENS_SPAN ** ((_SENS_NEUTRAL - s) / _SENS_NEUTRAL))
 
 
+# THE WELL CIRCLE COMES FROM THE CAPTURE UI, NOT FROM THE IMAGE.
+#
+# The colony screen in the imaging UI draws a crosshair and an aim circle, and
+# the operator frames the well to it, so where the well sits in the frame is
+# already known before analysis starts: centred, with a radius that is a fixed
+# fraction of the frame's short side.
+#
+# Detecting that circle instead means re-deriving something we already know
+# from the least reliable part of a stained image — its rim — and when the fit
+# slips the error lands in two numbers at once: which colonies are inside the
+# mask, and the micrometres per pixel. On the first dose series analysed this
+# way the fitted radius ranged 952-1255 px across 36 wells of the same plate
+# type, a 30% swing in scale; the oversized fits pulled the plastic rim into
+# the mask and counted its texture as colonies, and the undersized ones cut a
+# ring of real colonies out of the well. A fixed circle cannot slip, is
+# identical for every plate in a dose series — the same argument as the fixed
+# absolute threshold — and puts the responsibility on the one thing that can
+# actually see the well: the person at the microscope, aiming.
+#
+# THE FRACTION IS MEASURED, NOT ASSUMED. 0.39 is where the well floor edge sits
+# on full-resolution stills from this rig (checked against the floor/rim
+# boundary on stained wells; 0.35 lands visibly inside the floor and 0.41 on
+# the outer rim). GUIDED_CIRCLE_FRAC in capture/app/static/app.js draws the
+# on-screen circle at the same fraction of the preview image, so what the
+# operator aims with and what the analysis masks with are the same circle.
+# `mask_shrink` then holds the analysis mask a little inside that edge. It is
+# set to leave real slack rather than to hug the rim: losing a few colonies in
+# the outermost ring costs a small, EVEN fraction of every plate in the run,
+# which a survival ratio divides straight back out, while a mask that catches
+# the rim on one plate invents colonies out of moulding texture on that plate
+# alone. The two errors are not the same size, so the margin is not a
+# compromise between them.
+#
+# `well_mode="auto"` restores per-image detection for stills that were not
+# framed to the aim circle.
+_AIM_CIRCLE_FRAC = 0.39        # keep in sync with GUIDED_CIRCLE_FRAC in app.js
+
+
+def aim_circle(shape, frac: float = _AIM_CIRCLE_FRAC) -> tuple[float, float, float]:
+    """The capture UI's aim circle in image pixels: centred, radius frac x the
+    short side. Resolution-independent, so a future camera or a downscaled copy
+    lands in the same place."""
+    h, w = shape[:2]
+    return w / 2.0, h / 2.0, frac * min(w, h)
+
+
+def well_circle(gray, opts, tag: str, write_log):
+    """(cx, cy, r, source) for one image, or None if there is no usable well.
+
+    "aim" never fails, which is the point: an unreadable rim used to cost the
+    whole plate a row in the workbook. "auto" keeps the old behaviour, skip and
+    all.
+    """
+    mode = str(getattr(opts, "well_mode", "aim") or "aim").lower()
+    frac = float(getattr(opts, "aim_circle_frac", _AIM_CIRCLE_FRAC) or
+                 _AIM_CIRCLE_FRAC)
+    if mode == "aim":
+        h, w = gray.shape[:2]
+        cx, cy, r = aim_circle(gray.shape, frac)
+        if abs((w / h) - (4 / 3)) > 0.02:
+            write_log(f"{tag}: WARNING image is {w}x{h}, not the 4:3 the aim "
+                      f"circle was calibrated on — check overlays/, or use "
+                      f"--well-mode auto for this folder")
+        return cx, cy, r, f"aim-circle frac={frac:g}"
+    circle = detect_well(gray)
+    if circle is None:
+        write_log(f"{tag}: NO WELL FOUND - skipped")
+        return None
+    cx, cy, r = circle
+    return cx, cy, r, "detected"
+
+
 @dataclass
 class CountingOptions:
     """Per-run knobs consumed by process_image / find_images. Field names and
@@ -98,7 +170,9 @@ class CountingOptions:
     background_radius_um: float = 3000.0
     min_solidity: float = 0.5
     confluence_frac: float = 0.55
-    mask_shrink: float = 0.96
+    mask_shrink: float = 0.915
+    well_mode: str = "aim"
+    aim_circle_frac: float = _AIM_CIRCLE_FRAC
     max_depth: int = _MAX_DEPTH
 
 
@@ -428,11 +502,29 @@ def _to_display(bgr: np.ndarray) -> np.ndarray:
 
 def render_overlay(bgr: np.ndarray, labels: np.ndarray, kept_rows: list[dict],
                    kept_ids: list[int], dropped_ids: list[int],
-                   well_radius_px: float, header: str, out_path: Path) -> None:
+                   well_radius_px: float, header: str, out_path: Path,
+                   well_centre: tuple[float, float] | None = None,
+                   mask_radius_px: float | None = None) -> None:
     ov = _to_display(bgr)
     h, w = ov.shape[:2]
     thick = max(2, int(well_radius_px * 0.004))
     fs = max(0.5, well_radius_px * 0.0011)
+
+    # The well circle and the analysis mask, drawn because "open overlays/ and
+    # check" is the whole quality-control story for this assay, and a mask that
+    # has slipped off the well is the failure that costs the most and shows the
+    # least in a number.
+    if well_centre is not None:
+        cx, cy = int(round(well_centre[0])), int(round(well_centre[1]))
+        # Amber, because the stain is blue-violet and the colony outlines are
+        # green: the one colour left that cannot be mistaken for data.
+        cv2.circle(ov, (cx, cy), int(round(well_radius_px)), (0, 170, 255),
+                   max(1, thick // 2))
+        if mask_radius_px:
+            cv2.circle(ov, (cx, cy), int(round(mask_radius_px)), (0, 110, 255),
+                       max(1, thick // 2))
+        cv2.drawMarker(ov, (cx, cy), (0, 170, 255), cv2.MARKER_CROSS,
+                       int(well_radius_px * 0.06), max(1, thick // 2))
 
     # filtered-out objects: faint thin gray, so over/under-segmentation shows
     if dropped_ids:
@@ -531,8 +623,8 @@ def write_outputs(out_dir: Path, all_colony_rows: list[dict],
                    "integrated_stain", "solidity"]
     plate_cols = ["condition", "plate", "colony_count", "mean_area_mm2",
                   "median_area_mm2", "total_colony_area_mm2", "stained_fraction",
-                  "confluent", "um_per_px", "well_radius_px", "cells_seeded",
-                  "image_path"]
+                  "confluent", "um_per_px", "well_radius_px", "well_source",
+                  "cells_seeded", "image_path"]
     cond_cols = ["condition", "n_plates", "colony_count_mean", "colony_count_sd",
                  "mean_area_mm2", "stained_fraction_mean", "stained_fraction_sd",
                  "n_confluent_plates"]
@@ -582,11 +674,10 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
         return [], None
 
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
-    circle = detect_well(gray)
-    if circle is None:
-        write_log(f"{tag}: NO WELL FOUND - skipped")
+    found = well_circle(gray, opts, tag, write_log)
+    if found is None:
         return [], None
-    cx, cy, r = circle
+    cx, cy, r, well_src = found
 
     mask = np.zeros(gray.shape, np.uint8)
     cv2.circle(mask, (int(round(cx)), int(round(cy))),
@@ -620,9 +711,11 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
         row["plate"] = plate
 
     header = (f"{condition} | {plate}   count={len(kept_ids)}   "
-              f"confluent={confluent}   stained={stained_fraction:.2f}")
+              f"confluent={confluent}   stained={stained_fraction:.2f}   "
+              f"well={well_src}")
     render_overlay(bgr, labels, colony_rows, kept_ids, dropped_ids, r, header,
-                   out_dir / "overlays" / f"{condition}__{plate}.png")
+                   out_dir / "overlays" / f"{condition}__{plate}.png",
+                   well_centre=(cx, cy), mask_radius_px=r * opts.mask_shrink)
 
     areas_mm2 = [row["area_mm2"] for row in colony_rows]
     plate_row = {
@@ -636,6 +729,7 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
         "confluent": confluent,
         "um_per_px": um_per_px if um_per_px else float("nan"),
         "well_radius_px": float(r),
+        "well_source": well_src,
         "cells_seeded": float("nan"),  # hook for later
         "image_path": str(path),
     }
@@ -643,7 +737,8 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
     thr_str = "adaptive" if isinstance(thr, float) and np.isnan(thr) else f"{thr:.4f}"
     thr_note = "fixed" if opts.threshold == "fixed" else f"x{scale:.2f}"
     write_log(
-        f"{tag}: scale={scale_src} bg_r={bg_radius_px:.0f}px "
+        f"{tag}: well={well_src} r={r:.0f}px scale={scale_src} "
+        f"bg_r={bg_radius_px:.0f}px "
         f"smooth={smooth_um:.0f}um thr={thr_str} ({thr_note}) "
         f"n_raw={len(kept_ids) + len(dropped_ids)} n_kept={len(kept_ids)} "
         f"stained={stained_fraction:.3f} confluent={confluent}"
@@ -723,8 +818,19 @@ def main() -> None:
     # secondary filters
     ap.add_argument("--min-solidity", type=float, default=0.5)
     ap.add_argument("--confluence-frac", type=float, default=0.55)
-    ap.add_argument("--mask-shrink", type=float, default=0.96,
-                    help="analysis-mask radius as fraction of detected radius")
+    ap.add_argument("--mask-shrink", type=float, default=0.915,
+                    help="analysis-mask radius as a fraction of the well "
+                         "radius; the margin that keeps the mask inside the "
+                         "well when framing is imperfect (default 0.915)")
+    ap.add_argument("--well-mode", choices=["aim", "auto"], default="aim",
+                    help="aim: the well is the capture UI's aim circle — "
+                         "centred, radius --aim-circle-frac x the short side "
+                         "(default). auto: detect the well circle in the image, "
+                         "for stills that were not framed to the aim circle")
+    ap.add_argument("--aim-circle-frac", type=float, default=_AIM_CIRCLE_FRAC,
+                    help="aim-circle radius as a fraction of the frame's short "
+                         "side; must match GUIDED_CIRCLE_FRAC in the capture UI "
+                         f"(default {_AIM_CIRCLE_FRAC})")
     ap.add_argument("--max-depth", type=int, default=_MAX_DEPTH)
     args = ap.parse_args()
 

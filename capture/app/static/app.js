@@ -34,7 +34,15 @@ const CALIB_FULL_W = 4056;           // full-res still width (µm/px reference)
 const CALIB_VIDEO_W = 2028;      // video width
 
 // ── Guided (Colony Survival) capture ───────────────────────────────────────────
-const GUIDED_CIRCLE_FRAC = 0.35;     // aim circle radius = this × shorter displayed dim
+// Aim circle radius as a fraction of the PREVIEW IMAGE's shorter side — not of
+// the element it is displayed in. The two are not the same: object-fit:contain
+// letterboxes the image inside whatever box the layout gives it, so sizing the
+// circle off the element made its size depend on the window shape, and the
+// circle the operator aimed with was not the circle the analysis could
+// reconstruct. Measured against the well floor on this rig; keep in sync with
+// _AIM_CIRCLE_FRAC in launcher/analysis/counting.py, which masks colony
+// counting to exactly this circle.
+const GUIDED_CIRCLE_FRAC = 0.39;
 const G = {
   active: false,
   sessionId: null,
@@ -1645,11 +1653,18 @@ function drawGuidedOverlay() {
   // quadrant (and shrunk to fit it) for worm-survival quadrant items.
   const item = G.index < G.queue.length ? G.queue[G.index] : null;
   const quad = item && item.quadrant != null ? item.quadrant : null;
-  let cx = w / 2, cy = h / 2, r = GUIDED_CIRCLE_FRAC * Math.min(w, h);
+  // The image's own rendered box inside the element (object-fit: contain
+  // centres it and letterboxes the rest). Sizing off this rather than off w/h
+  // is what makes the circle a fixed fraction of the FRAME, so counting can
+  // mask to the same circle whatever shape the window happens to be.
+  const nw = img.naturalWidth || w, nh = img.naturalHeight || h;
+  const fit = Math.min(w / nw, h / nh);
+  const iw = nw * fit, ih = nh * fit;
+  let cx = w / 2, cy = h / 2, r = GUIDED_CIRCLE_FRAC * Math.min(iw, ih);
   if (quad != null) {
     cx = (quad === 1 || quad === 3) ? w * 0.75 : w * 0.25;   // NE/SE right, else left
     cy = (quad >= 2) ? h * 0.75 : h * 0.25;                  // SW/SE bottom, else top
-    r = GUIDED_CIRCLE_FRAC * Math.min(w, h) / 2;
+    r = GUIDED_CIRCLE_FRAC * Math.min(iw, ih) / 2;
   }
   ctx.lineWidth = 2;
   ctx.strokeStyle = 'rgba(107,156,245,0.95)';

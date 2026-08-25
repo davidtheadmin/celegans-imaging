@@ -226,6 +226,7 @@ class CountingAgent(threading.Thread):
         self._cancel = threading.Event()
         self._wake = threading.Event()
         self._folder: Optional[Path] = None
+        self._well_mode: str = "aim"
         self._split_sensitivity: float = 3.0
         self._min_colony_um: float = 200.0
         self._sensitivity: float = 5.0
@@ -259,10 +260,12 @@ class CountingAgent(threading.Thread):
         smooth_um: float = 0.0,
         threshold_mode: str = "otsu",
         od_threshold: float = 0.05,
+        well_mode: str = "aim",
     ) -> None:
         """UI thread: trigger a counting run on the given folder."""
         with self._lock:
             self._folder = folder
+            self._well_mode = well_mode
             self._split_sensitivity = split_sensitivity
             self._min_colony_um = min_colony_um
             self._sensitivity = sensitivity
@@ -294,13 +297,14 @@ class CountingAgent(threading.Thread):
                 smooth_um = self._smooth_um
                 threshold_mode = self._threshold_mode
                 od_threshold = self._od_threshold
+                well_mode = self._well_mode
                 self._folder = None
             if folder is not None:
                 self._cancel.clear()
                 try:
                     self._run_analysis(folder, split_sensitivity, min_colony_um,
                                        sensitivity, smooth_um,
-                                       threshold_mode, od_threshold)
+                                       threshold_mode, od_threshold, well_mode)
                 except Exception as exc:
                     log.exception("CountingAgent crashed")
                     # Report through the SAME channel as a success, and put the
@@ -328,6 +332,7 @@ class CountingAgent(threading.Thread):
         smooth_um: float = 0.0,
         threshold_mode: str = "otsu",
         od_threshold: float = 0.05,
+        well_mode: str = "aim",
     ) -> None:
         # Lazy import: the heavy pipeline (cv2/numpy/pandas/skimage) is only
         # pulled in once a run actually starts — mirrors motility/crawling.
@@ -344,6 +349,7 @@ class CountingAgent(threading.Thread):
             smooth_um=smooth_um,
             threshold=threshold_mode,
             od_threshold=od_threshold,
+            well_mode=well_mode,
         )
 
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -368,6 +374,16 @@ class CountingAgent(threading.Thread):
             write_log(f"Images found: {total}")
             write_log(f"Split sensitivity: {split_sensitivity:.2f}")
             write_log(f"Min colony diameter: {min_colony_um:.0f} um")
+            if well_mode == "aim":
+                write_log(
+                    f"Well: the capture aim circle — centred, radius "
+                    f"{opts.aim_circle_frac:g} x the short side of the frame. "
+                    f"Not detected in the image, so it cannot slip, and it is "
+                    f"the same circle on every plate in the run."
+                )
+            else:
+                write_log("Well: detected per image (older behaviour); a plate "
+                          "whose rim cannot be fitted is skipped entirely.")
             if threshold_mode == "fixed":
                 write_log(
                     f"Threshold: FIXED at {od_threshold:.4f} OD for every plate "
