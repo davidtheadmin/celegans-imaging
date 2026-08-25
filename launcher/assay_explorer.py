@@ -53,13 +53,15 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                   caveat: str = "", dist: Optional[dict] = None,
                   dist_title: str = "", dist_caption: str = "",
                   dist_label: str = "", dist_unit: str = "",
+                  survival_metric: Optional[AC.Metric] = None,
+                  survival_caption: str = "",
                   meta: Optional[dict] = None) -> dict:
     """Turn an Aggregation into the JSON the template draws."""
     cond, plates = agg.per_condition, agg.per_plate
 
     has_dose = any(c.get("dose") is not None for c in cond)
     doses = sorted({c["dose"] for c in cond if c.get("dose") is not None})
-    strains = sorted({c["strain"] for c in cond})
+    strains = sorted({c["strain"] for c in cond}, key=AC.strain_sort_key)
     conditions = [c["condition"] for c in cond]
 
     cond_out = []
@@ -90,8 +92,32 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                          "caption": dist_caption, "label": dist_label,
                          "unit": dist_unit})
 
+    surv = None
+    if survival_metric is not None:
+        built = AC.survival_series(agg, survival_metric.key)
+        if built is not None:
+            # Capped at eight for the same reason the figure is: past that, two
+            # strains would have to share a colour.
+            drop = max(0, len(built["series"]) - 8)
+            surv = {
+                "label": survival_metric.label,
+                "caption": survival_caption,
+                "notes": built["notes"],
+                "capped": drop,
+                "series": [
+                    {"strain": s["strain"], "ctrl_dose": s["ctrl_dose"],
+                     "base": _r(s["base"], 3),
+                     "pts": [{"dose": q["dose"], "mean": _r(q["mean"], 3),
+                              "sd": _r(q["sd"], 3),
+                              "vals": [_r(x, 3) for x in q["vals"]],
+                              "plates": q["plates"]}
+                             for q in s["pts"]]}
+                    for s in built["series"][:8]],
+            }
+
     return {
         "title": title, "subtitle": subtitle, "caveat": caveat,
+        "survival": surv,
         "dr_caption": dr_caption,
         "has_dose": has_dose,
         "dose_unit": AC.dose_unit_of(cond),

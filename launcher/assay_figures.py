@@ -1,11 +1,14 @@
 """Shared figures for motility, crawling and colony survival.
 
-Two per assay, matching the Development set in style and in restraint:
+Two per assay, matching the Development set in style and in restraint, plus
+one that only the assays with a real untreated control ask for:
 
   <assay>_dose_response.png   metric (rows) x strain (columns), dose on x,
                               y shared across a row so columns compare
   <assay>_distribution.png    the per-item quantity behind the headline metric,
                               as a density per condition
+  <assay>_survival.png        one metric, every strain in one axis, each
+                              normalised to its own untreated control
 
 Both are bonus outputs — a failure is logged and swallowed, because the workbook
 is the primary artefact and must always complete.
@@ -90,7 +93,7 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
             write_log("dose-response figure: nothing to draw — skipped.")
             return None
         has_dose = any(c.get("dose") is not None for c in cond)
-        strains = sorted({c["strain"] for c in cond})
+        strains = sorted({c["strain"] for c in cond}, key=AC.strain_sort_key)
         xs = (sorted({c["dose"] for c in cond if c.get("dose") is not None})
               if has_dose else [None])
         unit = AC.dose_unit_of(cond)
@@ -235,5 +238,248 @@ def fig_distribution(out_png: Path, dist: Optional[dict], label: str,
         return out_png
     except Exception as exc:                                   # noqa: BLE001
         log.warning("distribution figure failed: %s", exc, exc_info=True)
+        write_log(f"WARNING: {Path(out_png).name} was not written ({exc}).")
+        return None
+
+
+# Categorical hues, in fixed order, for the one figure that puts several
+# strains in a single axis. Validated as a set on a light surface: worst
+# all-pairs colour-vision-deficiency separation ΔE 9.2, worst normal-vision
+# ΔE 24.0. They are never cycled — past the eighth strain the figure stops
+# drawing rather than repeat a colour, because two strains sharing a colour is
+# a wrong figure, not a crowded one.
+_CAT = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+        "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
+
+
+def _decade_ticks(lo: float, hi: float) -> list:
+    """Powers of ten inside [lo, hi]. A survival axis is read in decades — 100,
+    10, 1 — and intermediate labels only compete with the curves."""
+    import math
+    if not (hi > lo > 0):
+        return []
+    out, dec = [], math.floor(math.log10(lo))
+    while 10.0 ** dec <= hi:
+        if 10.0 ** dec >= lo:
+            out.append(10.0 ** dec)
+        dec += 1
+    return out
+
+
+def _survival_curves(agg: AC.Aggregation, metric: AC.Metric,
+                     write_log: Callable[[str], None]):
+    """AC.survival_series, capped at the palette and given its colours."""
+    built = AC.survival_series(agg, metric.key, write_log)
+    if built is None:
+        return None
+    series = built["series"]
+    if len(series) > len(_CAT):
+        write_log(f"survival figure: {len(series)} strains present, only the "
+                  f"first {len(_CAT)} are drawn — beyond that the colours stop "
+                  "being distinguishable.")
+        series = series[:len(_CAT)]
+    for i, s in enumerate(series):
+        s["color"] = _CAT[i]
+    return series, built["notes"], built["unit"]
+
+
+def _draw_survival(ax, series, *, logscale: bool, floor: float, top: float,
+                   span: float, label: bool):
+    """One survival panel. Returns (n_zero_plates, n_clipped_bars).
+
+    The two panels differ in exactly one thing that matters: zero. A linear
+    axis can draw it, so a wiped-out condition is a point on the floor like any
+    other. A log axis cannot, so those plates become open triangles on the axis
+    floor with the curve dropping to them dotted — the floor is a margin, not a
+    value, and it is labelled as such in the caption.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import LogLocator, NullFormatter
+
+    _style(ax)
+    if logscale:
+        ax.set_yscale("log")
+        ax.yaxis.set_minor_locator(
+            LogLocator(base=10.0, subs=tuple(range(2, 10)), numticks=100))
+        ax.yaxis.set_minor_formatter(NullFormatter())
+        ax.grid(True, axis="y", which="major", color=_GRID, linewidth=0.8)
+        ax.grid(True, axis="y", which="minor", color=_GRID, linewidth=0.5,
+                alpha=0.45)
+        ax.tick_params(axis="y", which="minor", length=2.5, color=_AXIS)
+        ax.tick_params(axis="y", which="major", length=4.5, color=_AXIS)
+    else:
+        ax.grid(True, axis="y", color=_GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.axhline(100, color=_AXIS, linewidth=0.9, linestyle=(0, (4, 3)), zorder=1)
+
+    n_zero = n_clip = 0
+    base_y = floor if logscale else 0.0
+    for s in series:
+        for p in s["pts"]:
+            n = len(p["vals"])
+            for j, v in enumerate(p["vals"]):
+                dx = (j - (n - 1) / 2) * 0.014 * span
+                if v > 0:
+                    ax.plot([p["dose"] + dx], [v], marker="o", markersize=3.4,
+                            color=s["color"], alpha=0.5, linestyle="none",
+                            markeredgecolor="white", markeredgewidth=0.5,
+                            zorder=2)
+                elif logscale:
+                    n_zero += 1
+                    ax.plot([p["dose"] + dx], [floor], marker="v",
+                            markersize=3.6, markerfacecolor="none",
+                            markeredgecolor=s["color"], markeredgewidth=0.9,
+                            alpha=0.5, linestyle="none", zorder=2)
+                else:
+                    n_zero += 1
+                    ax.plot([p["dose"] + dx], [0.0], marker="o", markersize=3.4,
+                            color=s["color"], alpha=0.5, linestyle="none",
+                            markeredgecolor="white", markeredgewidth=0.5,
+                            zorder=2)
+
+        X, Y, elo, ehi = [], [], [], []
+        for p in s["pts"]:
+            mu = p["mean"]
+            if mu is None or (logscale and mu <= 0):
+                continue
+            X.append(p["dose"])
+            Y.append(mu)
+            ehi.append(p["sd"])
+            room = max(mu - base_y * (1.02 if logscale else 1.0), 0.0)
+            if p["sd"] > room:
+                n_clip += 1
+            elo.append(min(p["sd"], room))
+        if not X:
+            continue
+        ax.errorbar(X, Y, yerr=[elo, ehi], marker="o", markersize=5.4,
+                    linewidth=1.9, capsize=3, color=s["color"],
+                    markeredgecolor="white", markeredgewidth=0.7, zorder=3)
+
+        lx, ly = X[-1], Y[-1]
+        if logscale:
+            zeros_at = sorted(p["dose"] for p in s["pts"]
+                              if p["mean"] is not None and p["mean"] <= 0)
+            if zeros_at:
+                ax.plot([X[-1], zeros_at[0]], [Y[-1], floor], color=s["color"],
+                        linewidth=1.5, linestyle=(0, (2, 2)), zorder=3)
+                if len(zeros_at) > 1:
+                    ax.plot(zeros_at, [floor] * len(zeros_at), color=s["color"],
+                            linewidth=1.5, linestyle=(0, (2, 2)), zorder=3)
+                for zd in zeros_at:
+                    ax.plot([zd], [floor], marker="v", markersize=7.5,
+                            markerfacecolor="white", markeredgecolor=s["color"],
+                            markeredgewidth=1.7, linestyle="none", zorder=4)
+                lx, ly = zeros_at[-1], floor
+        if label:
+            ax.annotate(str(s["strain"]), xy=(lx, ly), xytext=(7, 0),
+                        textcoords="offset points", va="center", fontsize=8.5,
+                        color=_INK)
+    return n_zero, n_clip
+
+
+def fig_survival(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
+                 title: str, write_log: Callable[[str], None]) -> Optional[Path]:
+    """Survival against dose, every strain in one axis, each normalised to its
+    own untreated control — drawn twice, linear and logarithmic.
+
+    The only figure in this file that overlays strains, and it earns the
+    exception: "which strain falls off faster" is a comparison BETWEEN curves,
+    and facets answer that badly. The cost is paid twice over — a
+    colour-vision-validated categorical set, capped at eight, and every curve
+    labelled at its end, so identity never rests on colour alone.
+
+    TWO PANELS, NOT A CHOICE BETWEEN THEM. Linear is how the number is spoken
+    and is the only one of the two that can draw a zero; log is how a
+    multiplicative quantity behaves — a fall from 100% to 10% and one from 10%
+    to 1% are the same event twice, and only the log panel shows them as the
+    same step. Both are the same numbers on the same x-axis, so nothing is
+    hidden by preferring one.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        built = _survival_curves(agg, metric, write_log)
+        if built is None:
+            return None
+        series, notes, unit = built
+
+        every = [v for s in series for p in s["pts"] for v in p["vals"]]
+        pos = [v for v in every if v > 0]
+        import math
+        floor = 10.0 ** math.floor(math.log10(min(pos + [100.0])))
+        # The two panels want different headroom: the log panel needs room
+        # above 100% for the label row, the linear one only looks empty with it.
+        top_log = max(max(every + [100.0]) * 1.3, 100.0)
+        top_lin = max(105.0, max(every + [100.0]) * 1.08)
+        all_d = sorted({p["dose"] for s in series for p in s["pts"]})
+        span = (all_d[-1] - all_d[0]) or 1.0
+
+        fig, axes = plt.subplots(1, 2, figsize=(11.6, 4.7))
+        n_zero = n_clip = 0
+        for ax, is_log in ((axes[0], False), (axes[1], True)):
+            z, c = _draw_survival(ax, series, logscale=is_log, floor=floor,
+                                  top=top_log if is_log else top_lin,
+                                  span=span, label=is_log)
+            n_zero, n_clip = max(n_zero, z), max(n_clip, c)
+            if is_log:
+                ticks = _decade_ticks(floor, top_log)
+                if ticks:
+                    ax.set_yticks(ticks)
+                    ax.set_yticklabels([f"{t:g}%" for t in ticks])
+                ax.set_ylim(floor / 1.6, top_log)
+                ax.set_title("Log scale", fontsize=9.5, color=_MUT)
+            else:
+                step = (20.0 if top_lin <= 140 else
+                        25.0 if top_lin <= 220 else 50.0)
+                ticks = [t for t in
+                         [step * i for i in range(int(top_lin // step) + 2)]
+                         if t <= top_lin]
+                ax.set_yticks(ticks)
+                ax.set_yticklabels([f"{t:g}%" for t in ticks])
+                ax.set_ylim(0, top_lin)
+                ax.set_title("Linear scale", fontsize=9.5, color=_MUT)
+                ax.set_ylabel(f"{metric.label}, % of untreated", fontsize=8.5,
+                              color=_INK)
+            ax.set_xticks(all_d)
+            ax.set_xticklabels([f"{d:g}" for d in all_d], fontsize=8)
+            ax.set_xlim(all_d[0] - 0.06 * span,
+                        all_d[-1] + (0.20 if is_log else 0.08) * span)
+            ax.set_xlabel(f"Dose ({unit})" if unit else "Dose", fontsize=8.5,
+                          color=_MUT)
+        fig.suptitle(title, fontsize=13, y=0.985, color=_INK)
+
+        cap = ("Each plate's " + metric.label.lower() + " as a percentage of "
+               "the mean of that strain's untreated plates. Markers are the "
+               "condition mean across plates, bars ±1 SD across those "
+               "normalised plates, faint dots the plates themselves. The "
+               "untreated point is 100% by construction; its bar is the spread "
+               "of the controls. Same numbers in both panels.")
+        if n_clip:
+            cap += (" A bar that reaches the bottom of a panel is one whose "
+                    "mean minus SD is at or below zero — those plates disagree "
+                    "by more than their own mean.")
+        if n_zero:
+            cap += (f" {n_zero} plate(s) scored zero: a real point at 0% on the "
+                    "left, and on the right an open triangle on the axis floor "
+                    "reached by a dotted drop, because zero has no place on a "
+                    "log axis. That floor is a margin, not a value.")
+        if notes:
+            cap += " " + "; ".join(notes) + "."
+        bottom = _caption(fig, cap, width=142)
+        handles = [plt.Line2D([], [], color=s["color"], linewidth=2.2,
+                              marker="o", markersize=5) for s in series]
+        fig.legend(handles, [str(s["strain"]) for s in series],
+                   loc="lower center", ncol=min(8, len(series)), frameon=False,
+                   fontsize=8.5, bbox_to_anchor=(0.5, bottom + 0.005))
+        fig.tight_layout(rect=(0, bottom + 0.06, 1, 0.945))
+        fig.savefig(out_png, dpi=200)
+        plt.close(fig)
+        write_log(f"Wrote {out_png} ({len(series)} strain(s), linear and log, "
+                  "normalised to each strain's untreated control)")
+        return out_png
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("survival figure failed: %s", exc, exc_info=True)
         write_log(f"WARNING: {Path(out_png).name} was not written ({exc}).")
         return None

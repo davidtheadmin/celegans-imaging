@@ -70,6 +70,54 @@ def split_condition(name: str) -> dict:
             "parsed": True}
 
 
+# ---------------------------------------------------------------------------
+# Wild type
+#
+# The ONLY thing this codebase is willing to infer about a condition name
+# beyond the dose grammar, and it is kept deliberately small.
+# ---------------------------------------------------------------------------
+
+_WT_NAMES = frozenset({"n2", "wt", "wildtype", "wild type"})
+
+
+def is_wildtype(strain) -> bool:
+    """True when a strain name IS an unambiguous spelling of wild type.
+
+    A short exact list, not a guess. It matches "N2", "WT", "wildtype",
+    "wild-type", "wild_type", "wild type" — and nothing else. Not "control" or
+    "ctrl", because a control condition is not necessarily a wild-type strain:
+    in a rescue experiment the control is a mutant. Not "WT rescue" or "N2
+    outcross" either, which are their own strains.
+
+    THIS AFFECTS PRESENTATION ONLY: which colour a curve gets and where it sits
+    in a legend. No name is ever rewritten, no conditions are merged, and no
+    statistic is computed differently. A name we cannot read as wild type is
+    treated as an ordinary strain, which is the safe failure — it keeps its own
+    name and colour and sorts alphabetically, and nothing about the numbers
+    moves.
+
+    AND IT DOES NOT MAKE THAT STRAIN THE CONTROL. Not every experiment uses a
+    wild type as its comparator: a rescue line, a parental strain or a vehicle
+    arm can be the thing everything else is read against, and plenty of runs
+    have no wild type in them at all. Every "percent of control" in this
+    codebase is a condition against ITS OWN strain — the colony survival figure
+    divides each strain by its own untreated plates, and the worm assays divide
+    each condition by its own strain's lowest dose at the same timepoint.
+    Recognising the name changes none of that; it only means someone can find
+    the wild type in a legend without hunting for it.
+    """
+    return re.sub(r"[\s_-]+", " ", str(strain).strip().lower()) in _WT_NAMES
+
+
+def strain_sort_key(name):
+    """Display order: a recognised wild type first, then alphabetical.
+
+    A convention for reading, not a statement about the experiment's design —
+    see is_wildtype. Two wild-type spellings in one experiment stay two
+    strains; they just sort next to each other."""
+    return (not is_wildtype(name), str(name).lower())
+
+
 def dose_unit_of(rows: Iterable[dict]) -> str:
     """The single dose unit in use, or "" when there is none or several."""
     units = {r.get("unit") for r in rows if r.get("unit")}
@@ -243,6 +291,59 @@ def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
 
     return Aggregation(per_plate=per_plate, per_condition=per_condition,
                        metrics=list(metrics), n_items=n_items, n_kept=n_kept)
+
+
+def survival_series(agg: "Aggregation", metric_key: str,
+                    write_log: Optional[Callable[[str], None]] = None):
+    """Per-strain survival: every plate as a percentage of its own strain's
+    untreated control. Returns {"series", "notes", "unit"} or None.
+
+    THE ONE DEFINITION. The figure and the explorer both call this, so the two
+    cannot disagree about what "percent survival" means — the same reason the
+    condition grammar lives here rather than in each assay.
+
+    NORMALISATION IS PER STRAIN, AND ONLY EVER AGAINST ITS OWN CONTROL. Each
+    plate is divided by the mean of that strain's own untreated plates, and the
+    condition mean and SD are taken across those normalised plates. So the
+    control sits at 100% by construction and still carries the spread of the
+    control plates themselves: a control that disagrees with itself has to look
+    like one. A strain with no untreated condition falls back to its lowest
+    dose and says so in ``notes``; a strain whose control is zero or
+    unmeasured is dropped entirely rather than normalised against another
+    strain's control, because that number would not be survival.
+    """
+    log_ = write_log or (lambda _m: None)
+    plates = [p for p in agg.per_plate
+              if p.get("dose") is not None and p.get(metric_key) is not None]
+    if not plates:
+        log_(f"survival: no dosed plates carrying {metric_key}.")
+        return None
+    unit = dose_unit_of(agg.per_condition)
+    series, notes = [], []
+    for s in sorted({p["strain"] for p in plates}, key=strain_sort_key):
+        rows = [p for p in plates if p["strain"] == s]
+        doses = sorted({p["dose"] for p in rows})
+        ctrl = 0 if 0 in doses else doses[0]
+        base = mean([p[metric_key] for p in rows if p["dose"] == ctrl])
+        if not base or base <= 0:
+            log_(f"survival: {s} has no usable control at {ctrl} {unit} — "
+                 "strain dropped.")
+            continue
+        if ctrl != 0:
+            notes.append(f"{s} is normalised to {ctrl} {unit}".strip())
+        pts = []
+        for d in doses:
+            vals = [100.0 * p[metric_key] / base
+                    for p in rows if p["dose"] == d]
+            pts.append({"dose": d, "vals": vals, "mean": mean(vals),
+                        "sd": sd(vals) or 0.0,
+                        "plates": [p["plate"] for p in rows if p["dose"] == d]})
+        series.append({"strain": s, "ctrl_dose": ctrl, "base": base,
+                       "pts": pts})
+    if not series:
+        log_("survival: no strain had a usable untreated control.")
+        return None
+    return {"series": series, "notes": notes, "unit": unit}
 
 
 def aggregate_from_plates(plate_rows: Sequence[dict], metrics: Sequence[Metric],

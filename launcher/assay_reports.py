@@ -129,7 +129,8 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
             dist_title: str, dist_caption: str, dist_label: str,
             dist_unit: str, readme_extra, run_info_extra,
             keep_note: str, unit_note: str,
-            write_log: Callable[[str], None]) -> list:
+            write_log: Callable[[str], None],
+            survival_metric: Optional[AC.Metric] = None) -> list:
     """The half of every report that is identical: sheets, figures, explorer."""
     write_log = _safe_log(write_log)
     AX.write_readme(wb, assay,
@@ -151,7 +152,14 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
                              metrics, title, write_log)
     if f:
         written.append(f)
-    strains = sorted({c["strain"] for c in agg.per_condition})
+    if survival_metric is not None:
+        f = AF.fig_survival(out_dir / f"{stem}_survival.png", agg,
+                            survival_metric, f"{title} relative to untreated",
+                            write_log)
+        if f:
+            written.append(f)
+    strains = sorted({c["strain"] for c in agg.per_condition},
+                     key=AC.strain_sort_key)
     doses = sorted({c["dose"] for c in agg.per_condition
                     if c.get("dose") is not None})
     f = AF.fig_distribution(out_dir / f"{stem}_distribution.png", dist,
@@ -165,6 +173,17 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
         title=title, subtitle=subtitle, dr_caption=dr_caption, caveat=caveat,
         agg=agg, metrics=metrics, dist=dist, dist_title=dist_title,
         dist_caption=dist_caption, dist_label=dist_label, dist_unit=dist_unit,
+        survival_metric=survival_metric,
+        survival_caption=(
+            "Every plate as a percentage of the mean of its own strain's "
+            "untreated plates, so strains that plated at different densities "
+            "can be compared. Marker is the condition mean across those "
+            "normalised plates, bar is ±1 SD, faint dots are the plates. The "
+            "untreated point is 100% by construction and its bar is the spread "
+            "of the controls themselves. Linear is how the number is spoken and "
+            "is the only scale that can draw a zero; log is how a "
+            "multiplicative quantity behaves — 100%→10% and 10%→1% are the "
+            "same step. Switch and read both."),
         meta={"assay": assay})
     f = AE.write_explorer(out_dir / "explorer.html", payload, write_log)
     if f:
@@ -374,4 +393,5 @@ def counting_report(wb, plate_rows: Sequence[dict],
                   "where no well circle was found, produces no row at all.",
         unit_note="Areas in mm², diameters in µm, stained fraction 0–1 (not a "
                   "percentage), counts as counts.",
-        write_log=write_log)
+        write_log=write_log,
+        survival_metric=metrics[0])

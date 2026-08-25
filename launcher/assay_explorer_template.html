@@ -4,15 +4,18 @@
 <style>
 :root{color-scheme:light;--surface-1:#fcfcfb;--plane:#f9f9f7;--ink:#0b0b0b;--ink2:#52514e;--mut:#898781;
 --grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--crit:#d03b3b;--s1:#2a78d6;
---g1:#86b6ef;--g2:#5598e7;--g3:#2a78d6;--g4:#1c5cab;--g5:#104281;--g6:#0d366b;--g7:#08203f}
+--g1:#86b6ef;--g2:#5598e7;--g3:#2a78d6;--g4:#1c5cab;--g5:#104281;--g6:#0d366b;--g7:#08203f;
+--c1:#2a78d6;--c2:#eb6834;--c3:#1baf7a;--c4:#eda100;--c5:#e87ba4;--c6:#008300;--c7:#4a3aa7;--c8:#e34948}
 :root[data-theme=dark],
 html[data-theme=dark]{color-scheme:dark;--surface-1:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;
 --grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--s1:#3987e5;
---g1:#b7d3f6;--g2:#86b6ef;--g3:#3987e5;--g4:#256abf;--g5:#184f95;--g6:#104281;--g7:#0d366b}
+--g1:#b7d3f6;--g2:#86b6ef;--g3:#3987e5;--g4:#256abf;--g5:#184f95;--g6:#104281;--g7:#0d366b;
+--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#008300;--c7:#9085e9;--c8:#e66767}
 @media(prefers-color-scheme:dark){:root:where(:not([data-theme=light])){color-scheme:dark;
 --surface-1:#1a1a19;--plane:#0d0d0d;--ink:#fff;--ink2:#c3c2b7;--grid:#2c2c2a;--axis:#383835;
 --ring:rgba(255,255,255,.10);--s1:#3987e5;
---g1:#b7d3f6;--g2:#86b6ef;--g3:#3987e5;--g4:#256abf;--g5:#184f95;--g6:#104281;--g7:#0d366b}}
+--g1:#b7d3f6;--g2:#86b6ef;--g3:#3987e5;--g4:#256abf;--g5:#184f95;--g6:#104281;--g7:#0d366b;
+--c1:#3987e5;--c2:#d95926;--c3:#199e70;--c4:#c98500;--c5:#d55181;--c6:#008300;--c7:#9085e9;--c8:#e66767}}
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--ink);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;padding:28px 22px 60px}
 .wrap{max-width:1180px;margin:0 auto}
@@ -47,6 +50,12 @@ thead th{color:var(--mut);font-weight:600;font-size:11.5px;text-transform:upperc
 
 <div class="bar"><div class="ctrl"><b>Theme</b><span id="theme"></span>
 <span style="width:14px"></span><b id="fillab">Strains</b><span id="filt"></span></div></div>
+
+<div class="card" id="survcard"><h2>Survival, normalised to untreated</h2>
+<p class="cap" id="survcap"></p>
+<div class="ctrl" id="survk"><b>Scale</b></div>
+<div class="scroll"><div id="surv"></div></div><div class="lg" id="survlg"></div>
+<div class="note" id="survnote"></div></div>
 
 <div class="card"><h2 id="drt">Dose&ndash;response</h2>
 <p class="cap" id="drcap"></p>
@@ -92,6 +101,118 @@ let SHOWN=new Set(D.has_dose?D.strains:D.conditions);
 const colKeys=()=>(D.has_dose?D.strains:D.conditions).filter(s=>SHOWN.has(s));
 const condOf=(strain,dose)=>D.cond.find(c=>c.strain===strain&&c.dose===dose);
 const condByName=n=>D.cond.find(c=>c.condition===n);
+
+/* ---------- 0. survival: one axis, every strain, normalised to its own control
+   The one panel that overlays strains instead of faceting them, because "which
+   strain falls off faster" is a comparison between curves. It pays for the
+   exception with a colour-vision-validated categorical set, capped at eight,
+   and a label on every curve, so identity never rests on colour alone.
+   Linear and log are the same numbers: linear can draw a zero, log shows a
+   fall from 100% to 10% and one from 10% to 1% as the same step. -------- */
+const CAT=['--c1','--c2','--c3','--c4','--c5','--c6','--c7','--c8'];
+let SLOG=0;
+function drawSurv(){
+ const P=D.survival;
+ if(!P){$('survcard').style.display='none';return;}
+ const S=P.series.filter(s=>SHOWN.has(s.strain));
+ const slot={}; P.series.forEach((s,i)=>slot[s.strain]=i);   /* colour follows the strain, never its rank */
+ if(!S.length){$('surv').innerHTML='<p class="note">Nothing selected.</p>';$('survlg').innerHTML='';return;}
+ const every=[]; S.forEach(s=>s.pts.forEach(q=>(q.vals||[]).forEach(x=>{if(x!==null&&isFinite(x))every.push(x)})));
+ const mx=Math.max(100,...every), pos=every.filter(x=>x>0);
+ const isLog=SLOG===1;
+ const top=isLog?Math.max(100,mx*1.3):Math.max(105,mx*1.08);
+ const fl=Math.pow(10,Math.floor(Math.log10(Math.min(100,...(pos.length?pos:[100])))));
+ const ds=[...new Set(S.flatMap(s=>s.pts.map(q=>q.dose)))].sort((a,b)=>a-b);
+ const dmin=ds[0], dmax=ds[ds.length-1], span=(dmax-dmin)||1;
+ const padL=64,padT=14,padB=50,pw=650,ph=258,labw=70;
+ const W=padL+pw+labw, H=padT+ph+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Survival normalised to untreated'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ const ox=padL, oy=padT;
+ const X=d=>ox+(ds.length===1?pw/2:pw*(d-dmin)/span*0.92);
+ const lg=Math.log10(fl), lgT=Math.log10(top);
+ const Y=y=>isLog?oy+ph-ph*(Math.log10(Math.max(y,fl))-lg)/(lgT-lg):oy+ph-ph*Math.min(y,top)/top;
+ const FY=isLog?oy+ph:Y(0);                       /* where a zero-count plate sits */
+
+ /* grid + y labels */
+ const yt=[];
+ if(isLog){for(let e=Math.floor(lg);Math.pow(10,e)<=top;e++){const z=Math.pow(10,e);if(z>=fl)yt.push(z);}}
+ else{const st=top<=140?20:(top<=220?25:50);for(let z=0;z<=top;z+=st)yt.push(z);}
+ yt.forEach(z=>{const y=Y(z);
+  svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
+  svg.appendChild(E('text',{x:ox-9,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':10},
+    [T((z===0?0:z<1?z.toFixed(1):z)+'%')]));});
+ if(isLog){for(let e=Math.floor(lg);Math.pow(10,e)<top;e++)for(let m=2;m<10;m++){
+   const z=m*Math.pow(10,e); if(z<fl||z>top)continue; const y=Y(z);
+   svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.5,opacity:.5}));
+   svg.appendChild(E('line',{x1:ox-3,x2:ox,y1:y,y2:y,stroke:v('--axis'),'stroke-width':.8}));}}
+ svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:Y(100),y2:Y(100),stroke:v('--axis'),'stroke-width':1,
+   'stroke-dasharray':'5 4'}));
+
+ let nz=0; const labs=[];
+ S.forEach(s=>{
+  const col=v(CAT[slot[s.strain]%CAT.length]);
+  (s.pts||[]).forEach(q=>{const n=(q.vals||[]).length;
+   (q.vals||[]).forEach((val,j)=>{
+    if(val===null||!isFinite(val))return;
+    const dx=(j-(n-1)/2)*4;
+    if(val<=0&&isLog){nz++;
+     const tri=E('path',{d:'M'+(X(q.dose)+dx-4)+' '+(FY-7)+'h8l-4 7z',fill:'none',stroke:col,'stroke-width':1.1,opacity:.65});
+     hov(tri,'<b>'+(q.plates?q.plates[j]:'plate')+'</b><br>'+dl(q.dose)+' · 0% — no colonies<br><i>zero cannot sit on a log axis</i>');
+     svg.appendChild(tri);return;}
+    if(val<=0)nz++;
+    const dot=E('circle',{cx:X(q.dose)+dx,cy:Y(val),r:2.3,fill:col,opacity:.5,
+      stroke:v('--surface-1'),'stroke-width':.8});
+    hov(dot,'<b>'+(q.plates?q.plates[j]:'plate')+'</b><br>'+s.strain+' · '+dl(q.dose)+'<br>'+num(val,1)+'% of untreated');
+    svg.appendChild(dot);});});
+  const pts=[];
+  (s.pts||[]).forEach(q=>{
+   if(q.mean===null||!isFinite(q.mean))return;
+   if(isLog&&q.mean<=0)return;
+   pts.push([X(q.dose),Y(q.mean)]);
+   if(q.sd){const hiY=Y(q.mean+q.sd), loY=Y(Math.max(q.mean-q.sd,isLog?fl:0));
+    svg.appendChild(E('path',{d:'M'+X(q.dose)+' '+hiY+'V'+loY,stroke:col,'stroke-width':1.3}));}
+   const mk=E('circle',{cx:X(q.dose),cy:Y(q.mean),r:3.8,fill:col,stroke:v('--surface-1'),'stroke-width':1.5});
+   hov(mk,'<b>'+s.strain+' · '+dl(q.dose)+'</b><br>'+num(q.mean,1)+'% ± '+num(q.sd,1)+
+       ' of untreated<br>'+(q.vals||[]).length+' plate(s)'+
+       (q.dose===s.ctrl_dose?'<br><i>the control: 100% by construction, the bar is its own spread</i>':''));
+   svg.appendChild(mk);});
+  if(pts.length>1)svg.appendChild(E('path',{d:pts.map((q,i)=>(i?'L':'M')+q[0]+' '+q[1]).join(' '),
+    fill:'none',stroke:col,'stroke-width':2,'stroke-linejoin':'round'}));
+  let lx=pts.length?pts[pts.length-1][0]:X(dmin), ly=pts.length?pts[pts.length-1][1]:Y(100);
+  if(isLog){
+   const zs=(s.pts||[]).filter(q=>q.mean!==null&&isFinite(q.mean)&&q.mean<=0).map(q=>q.dose).sort((a,b)=>a-b);
+   if(zs.length&&pts.length){
+    svg.appendChild(E('path',{d:'M'+pts[pts.length-1][0]+' '+pts[pts.length-1][1]+'L'+X(zs[0])+' '+FY,
+      fill:'none',stroke:col,'stroke-width':1.5,'stroke-dasharray':'3 3'}));
+    zs.forEach(z=>{const tri=E('path',{d:'M'+(X(z)-6)+' '+(FY-10)+'h12l-6 10z',fill:v('--surface-1'),
+      stroke:col,'stroke-width':1.7});
+     hov(tri,'<b>'+s.strain+' · '+dl(z)+'</b><br>every plate scored zero<br><i>the floor is a margin, not a value</i>');
+     svg.appendChild(tri);});
+    lx=X(zs[zs.length-1]); ly=FY;}}
+  labs.push({x:lx,y:ly,txt:s.strain});
+ });
+ /* Curves that end close together would print their labels on top of each
+    other; nudge them apart rather than lose one. */
+ labs.sort((a,b)=>a.y-b.y);
+ for(let i=1;i<labs.length;i++)if(labs[i].y-labs[i-1].y<13)labs[i].y=labs[i-1].y+13;
+ labs.forEach(l=>svg.appendChild(E('text',{x:l.x+8,y:Math.min(l.y,oy+ph+9)+3.5,fill:v('--ink'),
+   'font-size':11,'font-weight':600},[T(l.txt)])));
+ svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+ ds.forEach(d=>svg.appendChild(E('text',{x:X(d),y:oy+ph+16,'text-anchor':'middle',fill:v('--mut'),'font-size':10},[T(String(d))])));
+ svg.appendChild(E('text',{x:ox+pw/2,y:H-8,'text-anchor':'middle',fill:v('--mut'),'font-size':10.5},
+   [T('Dose'+(D.dose_unit?' ('+D.dose_unit+')':''))]));
+ svg.appendChild(E('text',{x:13,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink'),'font-size':11,
+   'font-weight':600,transform:'rotate(-90 13 '+(oy+ph/2)+')'},[T(P.label+', % of untreated')]));
+ $('surv').innerHTML='';$('surv').appendChild(svg);
+ $('survlg').innerHTML=S.map(s=>'<span><i style="background:'+v(CAT[slot[s.strain]%CAT.length])+'"></i>'+s.strain+'</span>').join('')
+  +'<span style="color:var(--mut)">dashed line: the untreated control at 100%</span>';
+ const notes=[];
+ if(nz)notes.push(nz+' plate(s) scored zero'+(isLog?' — open triangles on the floor, reached by a dotted drop; the floor is a margin, not a value':' — drawn at 0%, which only the linear scale can show'));
+ if(P.capped)notes.push(P.capped+' further strain(s) are not drawn: eight is as far as the colours stay distinguishable');
+ (P.notes||[]).forEach(n=>notes.push(n));
+ $('survnote').innerHTML=notes.join('<br>');
+}
 
 /* ---------- 1. dose-response grid: rows = metric, cols = strain ---------- */
 function drawDR(){
@@ -284,6 +405,11 @@ function boot(){
  $('drt').textContent=D.has_dose?'Dose–response':'By condition';
  $('drcap').innerHTML=D.dr_caption||'';
  if(D.dist){$('distt').textContent=D.dist.title||'Distribution';$('distcap').innerHTML=D.dist.caption||'';}
+ if(D.survival){$('survcap').innerHTML=D.survival.caption||'';
+  ['Linear','Log'].forEach((lab,i)=>chip($('survk'),lab,i===0,b=>{SLOG=i;
+    [...$('survk').querySelectorAll('button')].forEach((c,j)=>c.setAttribute('aria-pressed',j===i?'true':'false'));
+    drawSurv();}));}
+ else $('survcard').style.display='none';
  $('tblcap').innerHTML='Every number behind the panels. Condition rows are mean ± SD across plates; '
   +'plate rows are that plate’s own summary.';
  $('fillab').textContent=D.has_dose?'Strains':'Conditions';
@@ -301,6 +427,6 @@ function boot(){
    redraw();}));
  redraw();
 }
-function redraw(){drawDR();drawDist();drawQC();drawTable();}
+function redraw(){drawSurv();drawDR();drawDist();drawQC();drawTable();}
 boot();
 </script></body></html>
