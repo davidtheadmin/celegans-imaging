@@ -53,6 +53,13 @@ class Settings:
     # "otsu" so existing configs are unchanged.
     counting_threshold_mode: str = "otsu"
     counting_od_threshold: float = 0.05
+    # Where the well circle comes from. "aim" uses the capture UI's aim circle
+    # — centred, radius 0.35 x the frame's short side — which is the circle the
+    # operator framed the well to, so it cannot slip and is identical on every
+    # plate of a dose series. "auto" detects the rim in each image, which is
+    # what to use for stills that were not captured through the guided colony
+    # screen.
+    counting_well_mode: str = "aim"
     # Worm survival: per-class staging confidence, {stage_name: floor}. Empty
     # means "use launcher/vision/stage_conf.json", the same file infer_stage.py
     # falls back to, so an untouched install and the capture UI's "Analyze on

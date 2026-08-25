@@ -13,7 +13,7 @@ import sys
 import threading
 import tkinter as tk
 import webbrowser
-from dataclasses import replace
+from dataclasses import MISSING as _MISSING, fields as _dc_fields, replace
 from urllib.parse import quote
 from datetime import datetime
 from pathlib import Path
@@ -838,6 +838,7 @@ class AnalysisDialog(ctk.CTkToplevel):
             justify="left", wraplength=360,
         )
         self._threshold_help.pack(anchor="w", pady=(2, 0))
+        self._reset_button(render_frame, self._reset_motility)
 
         # Row 5 — render options (crawling): tracking, side-by-side, path traces
         self._crawling_render_frame = widgets.Card(form, title="Video render options")
@@ -889,6 +890,7 @@ class AnalysisDialog(ctk.CTkToplevel):
             font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
             justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
+        self._reset_button(crawl_frame, self._reset_crawling)
 
         # Row 5 — counting options: the two prominent tuning knobs. Everything
         # else uses counting.py defaults.
@@ -1001,6 +1003,23 @@ class AnalysisDialog(ctk.CTkToplevel):
             from_=0.005, to=1.0, increment=0.01, fmt="%.3f",
         ).pack(side="left", padx=(6, 0))
 
+        # Where the well comes from. The colony screen in the capture UI draws
+        # an aim circle and the operator frames the well to it, so by analysis
+        # time the well's position is already known: centred, radius 0.35 x the
+        # short side. Detecting it again from a stained image is re-deriving
+        # something we know from the least reliable part of the picture, and a
+        # slipped fit corrupts both the mask and the micrometre scale at once.
+        self._count_autowell = tk.BooleanVar(
+            value=(getattr(self._settings, "counting_well_mode", "aim")
+                   == "auto")
+        )
+        ctk.CTkCheckBox(
+            count_frame,
+            text="Find the well in the image instead (older behaviour)",
+            variable=self._count_autowell,
+            **chk_kw,
+        ).pack(anchor="w", pady=(8, 0))
+
         widgets.HairlineSeparator(count_frame).pack(fill="x", pady=(10, 8))
         widgets.HelpBlock(count_frame, [
             ("Split sensitivity",
@@ -1027,10 +1046,18 @@ class AnalysisDialog(ctk.CTkToplevel):
              "reference — fine for reading one image, wrong for a dose series, "
              "because a sparse plate and a dense one are then measured against "
              "different cuts and their numbers do not compare."),
+            ("Find the well in the image instead",
+             "Leave this OFF for plates captured through the colony screen. "
+             "The aim circle you framed the well to IS the well — centred, and "
+             "the same size on every plate — so the mask and the µm scale "
+             "cannot drift between plates. Tick it only for stills that were "
+             "not captured that way; then the rim is fitted per image, and a "
+             "plate whose rim cannot be found is skipped entirely."),
             (None,
              "After any run, open overlays/ and check that what was outlined "
              "is what you would have counted."),
         ], wraplength=440).pack(anchor="w", fill="x")
+        self._reset_button(count_frame, self._reset_counting)
         self._sync_counting_mode()
 
         # Row 5 — Development options: the folder list, one confidence
@@ -1150,7 +1177,7 @@ class AnalysisDialog(ctk.CTkToplevel):
                 self._surv_conf_labels[stage] = val_label
 
             widgets.secondary_button(
-                sliders, "Reset to defaults", self._reset_survival_conf,
+                sliders, "Reset stage confidences", self._reset_survival_conf,
             ).pack(anchor="w", pady=(6, 2))
 
         widgets.HairlineSeparator(surv_frame).pack(fill="x", pady=(8, 6))
@@ -1243,6 +1270,7 @@ class AnalysisDialog(ctk.CTkToplevel):
              "and condition. Survival % is in the workbook but in none of the "
              "figures — its denominator collapses in a dose experiment."),
         ], wraplength=_WRAP).pack(anchor="w", fill="x")
+        self._reset_button(surv_frame, self._reset_development)
 
         # Show the render frame matching the selected analysis type.
         self._mode.trace_add("write", self._on_mode_change)
@@ -1260,6 +1288,87 @@ class AnalysisDialog(ctk.CTkToplevel):
             self._count_od_row.pack(anchor="w", fill="x", pady=(4, 0))
         else:
             self._count_od_row.pack_forget()
+
+    # -- Reset to defaults --------------------------------------------------
+    #
+    # Every options card carries this button. These knobs persist between runs,
+    # which is right for a setting and dangerous for a value nudged once during
+    # one experiment: without a way back it is still there weeks later, quietly
+    # shaping a run nobody meant to tune, and the only record of it is a number
+    # in a dialog that looks like it has always said that.
+    #
+    # Defaults come from the Settings dataclass itself, not from config.json, so
+    # this restores what a fresh install does rather than whatever was last
+    # saved. Like every other control here it changes the dialog only — the
+    # values are written to config.json when the run starts.
+    def _default(self, name: str, fallback):
+        for f in _dc_fields(type(self._settings)):
+            if f.name != name:
+                continue
+            if f.default is not _MISSING:
+                return f.default
+            if f.default_factory is not _MISSING:      # noqa: B009
+                return f.default_factory()
+        return fallback
+
+    def _reset_button(self, parent, command) -> None:
+        widgets.HairlineSeparator(parent).pack(fill="x", pady=(10, 6))
+        btn = widgets.secondary_button(parent, "Reset to defaults", command)
+        btn.pack(anchor="w", pady=(0, 2))
+        widgets.Tooltip(
+            btn,
+            "Puts every option on this card back to the value a fresh install "
+            "starts with. Applies to this run; the values are saved when you "
+            "start the analysis.",
+        )
+
+    def _reset_motility(self) -> None:
+        self._threshold_var.set(
+            str(self._default("motility_long_threshold_s", 5.0)))
+        for var in (self._want_tracked, self._want_curvature,
+                    self._want_sidebyside, self._want_per_worm_traces):
+            var.set(False)
+
+    def _reset_crawling(self) -> None:
+        self._crawl_min_track.set(
+            str(int(self._default("crawling_min_track_s", 30))))
+        for var in (self._crawl_tracked, self._crawl_sidebyside,
+                    self._crawl_path_traces):
+            var.set(False)
+
+    def _reset_counting(self) -> None:
+        self._count_split.set(
+            f"{float(self._default('counting_split_sensitivity', 3.0)):.1f}")
+        self._count_min_um.set(
+            f"{float(self._default('counting_min_colony_um', 200.0)):.0f}")
+        sens = float(self._default("counting_sensitivity", 5.0))
+        self._count_sens.set(sens)
+        self._count_sens_label.configure(text=f"{sens:.1f}")
+        self._count_smooth.set(
+            f"{float(self._default('counting_smooth_um', 0.0)):.0f}")
+        self._count_fixed.set(
+            self._default("counting_threshold_mode", "otsu") == "fixed")
+        self._count_od.set(
+            f"{float(self._default('counting_od_threshold', 0.05)):.3f}")
+        self._count_autowell.set(
+            self._default("counting_well_mode", "aim") == "auto")
+        # The OD box is only on screen while the fixed threshold is ticked, and
+        # the reset can untick it.
+        self._sync_counting_mode()
+
+    def _reset_development(self) -> None:
+        """Sliders back to stage_conf.json, switches back to their defaults.
+
+        Save-preview is not a saved setting — it is a per-run choice that always
+        starts unticked — so it resets to off with the rest.
+        """
+        self._reset_survival_conf()
+        self._surv_rescore.set(bool(self._default("survival_rescore", True)))
+        self._surv_count_eggs.set(
+            bool(self._default("survival_count_eggs", False)))
+        self._surv_save_preview.set(False)
+        self._surv_force.set(
+            bool(self._default("survival_force_reanalyze", False)))
 
     def _reset_survival_conf(self) -> None:
         """Put every per-stage slider back to the shared stage_conf.json value.
@@ -1576,6 +1685,7 @@ class AnalysisDialog(ctk.CTkToplevel):
 
             sensitivity = round(float(self._count_sens.get()), 1)
             threshold_mode = "fixed" if self._count_fixed.get() else "otsu"
+            well_mode = "auto" if self._count_autowell.get() else "aim"
             try:
                 od_threshold = float(self._count_od.get())
                 if not (0.0 < od_threshold <= 1.0):
@@ -1618,6 +1728,7 @@ class AnalysisDialog(ctk.CTkToplevel):
                 counting_smooth_um=smooth_um,
                 counting_threshold_mode=threshold_mode,
                 counting_od_threshold=od_threshold,
+                counting_well_mode=well_mode,
             ))
 
             AnalysisProgressDialog(
@@ -1632,6 +1743,7 @@ class AnalysisDialog(ctk.CTkToplevel):
                 smooth_um=smooth_um,
                 threshold_mode=threshold_mode,
                 od_threshold=od_threshold,
+                well_mode=well_mode,
             )
             self.destroy()
             return
