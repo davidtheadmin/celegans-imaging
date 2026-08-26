@@ -166,7 +166,12 @@ PER_WORM_COLS: list[str] = _interleave_extra_cols(
 ) + [QUALITY_COL]
 
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
-_PAUSED_FRACTION_OF_MEDIAN = 0.10
+_PAUSED_FRACTION_OF_MEDIAN = 0.10   # legacy, only the no-length fallback
+
+# "Moving" starts here, in body-lengths per second. Fixed across videos and
+# conditions on purpose — see the paused-threshold note in
+# compute_crawling_metrics.
+PAUSED_BL_PER_S: float = 0.01
 
 # A worm typically PAUSES briefly (measured motion_mode == 0) between forward and
 # backward motion during a real reversal — that pause is part of the reversal
@@ -229,7 +234,9 @@ LONGEST_RUN_BRIDGE_FRAMES: int = 30
 # run (e.g. from the UI "Min track span (s)" input) by passing min_span_s through
 # compute_crawling_metrics / aggregate_per_condition.
 # ---------------------------------------------------------------------------
-MIN_SPAN_S: float = 30.0
+MIN_SPAN_S: float = 10.0
+# Retained for reference and for anything that still imports it. NOT a gate any
+# more — see _passes_filter.
 SKELETON_COVERAGE_MIN: float = 0.70
 
 # ---------------------------------------------------------------------------
@@ -246,18 +253,33 @@ BL_CALIB_MIN_WORMS: int = 5         # below this many, fall back to all worms' l
 BL_CALIB_TRIM_FRAC: float = 0.10    # drop bottom/top 10% before averaging
 
 
-def _passes_filter(track_duration_s, skeleton_coverage,
+def _passes_filter(track_duration_s, skeleton_coverage=None,
                    min_span_s: float | None = None) -> bool:
     """
-    Return True if a worm track is high-quality enough to enter the aggregate.
+    Return True if a track is long enough to enter the aggregate.
 
-    The gate is: track span >= min_span_s AND skeleton_coverage >=
-    SKELETON_COVERAGE_MIN. min_span_s overrides the minimum-span threshold; when
-    None (or non-finite) the module-level MIN_SPAN_S fallback is used.
+    LENGTH ONLY. skeleton_coverage is accepted and ignored — it stays in the
+    per-worm sheet as an information column.
+
+    The old gate also required skeleton_coverage >= 0.70. On the day-1 N2 10J
+    reference video the plate-wide coverage was 0.692, so that floor sat
+    exactly on the middle of the distribution and behaved as a coin flip: it
+    cut 40 qualifying tracks to 15 and 2153 worm-seconds to 1084. Worse, it was
+    not random — coverage fell with distance from the frame centre, because the
+    illumination gradient cost skeletons at the rim, so the gate preferentially
+    deleted worms for where they were standing rather than for anything about
+    them. The gradient is now corrected at transcode (see analysis/flatfield.py)
+    and coverage runs ~0.91, but a coverage floor would still throw away worms
+    for coiling and for passing a neighbour, which are behaviours and not
+    defects.
+
+    Metrics never impute across gaps — speed fractions average observed frames
+    only, path length sums frame-adjacent steps only, bpm divides by
+    valid-skeleton seconds — so a low-coverage track is noisier but not biased,
+    and its coverage is on the row for anyone who wants to filter on it.
     """
     try:
         span = float(track_duration_s)
-        sc = float(skeleton_coverage)
     except (TypeError, ValueError):
         return False
     try:
@@ -266,10 +288,7 @@ def _passes_filter(track_duration_s, skeleton_coverage,
             threshold = MIN_SPAN_S
     except (TypeError, ValueError):
         threshold = MIN_SPAN_S
-    return bool(
-        np.isfinite(span) and span >= threshold
-        and np.isfinite(sc) and sc >= SKELETON_COVERAGE_MIN
-    )
+    return bool(np.isfinite(span) and span >= threshold)
 
 
 def _mean_finite(arr: np.ndarray) -> float:
@@ -447,24 +466,6 @@ def _count_reversals_with_pause_tolerance(
     return n_rev, rev_idx
 
 
-def _linker_log(n_fragments: int, n_groups: int, ambig_skips: int) -> dict:
-    """
-    Build an analysis_log compatible with the shared-engine sidecar that
-    crawling.py expects.
-
-    The position linker neither classifies groups (curl/collision) nor drops
-    fragments — the downstream quality gate does the dropping — so those fields
-    are zero/empty. ambiguity_skips is a linker-specific diagnostic: how often the
-    ambiguity rule refused a link (a genuine crossing left deliberately broken).
-    """
-    return {
-        "input_track_count": int(n_fragments),
-        "groups_formed": {"total": int(n_groups), "curl": 0, "collision": 0},
-        "worms_dropped": {"total": 0, "by_reason": {}},
-        "ambiguity_skips": int(ambig_skips),
-    }
-
-
 def _skel_coverage_and_run(
     skel_by_worm: dict, member_ids: list[int], fps: float, has_skel_col: bool,
 ) -> tuple[float, float]:
@@ -488,7 +489,7 @@ def _skel_coverage_and_run(
     longest_run_s = 0.0
     have_any = False
     for mid in member_ids:
-        sub = skel_by_worm.get(int(mid))
+        sub = skel_by_worm.get(mid)
         if sub is None:
             continue
         have_any = True
@@ -528,7 +529,7 @@ def _combined_path_geometry(member_ids: list[int],
     """
     fxy: list[tuple[float, float, float]] = []
     for mid in member_ids:
-        tdf = traj_by_worm.get(int(mid))
+        tdf = traj_by_worm.get(mid)
         if tdf is None or "coord_x" not in tdf.columns or "coord_y" not in tdf.columns:
             continue
         fcol = ("frame_number" if "frame_number" in tdf.columns
@@ -576,7 +577,7 @@ def _combined_centroid_track(
     """
     fxy: list[tuple[int, float, float]] = []
     for mid in member_ids:
-        sub = skel_by_worm.get(int(mid))
+        sub = skel_by_worm.get(mid)
         if sub is None or "coord_x" not in sub.columns or "coord_y" not in sub.columns:
             continue
         fr = sub["frame_number"].values.astype(float)
@@ -771,23 +772,34 @@ def compute_crawling_metrics(
         log.warning("crawling: %s trajectories_data empty or missing columns", skeletons_path)
         return []
 
-    groups, ambig_skips = link_fragments(skel_traj, fps)
+    groups, refused, linker_log, traj_split = link_fragments(skel_traj, fps)
     n_fragments = int(skel_traj["worm_index_joined"].nunique())
     if not groups:
         log.warning("crawling: linker produced no groups for %s", skeletons_path)
         if engine_log_out is not None:
-            engine_log_out.update(_linker_log(n_fragments, 0, ambig_skips))
+            engine_log_out.update(linker_log)
         return []
     if engine_log_out is not None:
-        engine_log_out.update(_linker_log(n_fragments, len(groups), ambig_skips))
+        engine_log_out.update(linker_log)
 
     has_skel_col = "has_skeleton" in skel_traj.columns
     if not has_skel_col:
         log.warning("crawling: %s trajectories_data has no has_skeleton column", skeletons_path)
-    skel_by_worm: dict[int, "pd.DataFrame"] = {
-        int(wid): sub.sort_values("frame_number")
-        for wid, sub in skel_traj.groupby("worm_index_joined")
+
+    # Everything downstream is keyed on frag_id, not on worm_index_joined: a
+    # fragment cut at a merge episode yields two pieces that share one Tierpsy
+    # id but are different tracks, so indexing by the Tierpsy id would splice
+    # them back together and re-admit the merged frames we just removed.
+    skel_by_worm: dict[str, "pd.DataFrame"] = {
+        fid: sub.sort_values("frame_number")
+        for fid, sub in traj_split.groupby("frag_id")
     }
+    # frag_id -> (originating Tierpsy worm_index_joined, first frame, last frame)
+    frag_meta: dict[str, tuple] = {}
+    for fid, sub in skel_by_worm.items():
+        frag_meta[fid] = (int(sub["worm_index_joined"].iloc[0]),
+                          int(sub["frame_number"].iloc[0]),
+                          int(sub["frame_number"].iloc[-1]))
 
     # ---- timeseries_data (speed / motion_mode / length / width) ----
     try:
@@ -817,49 +829,109 @@ def compute_crawling_metrics(
     has_motion_mode = "motion_mode" in ts.columns
     ts_frame_col = "timestamp" if "timestamp" in ts.columns else "frame_number"
 
-    # Video-wide paused threshold = 10% of median |speed| across all worms.
-    if "speed" in ts.columns:
-        all_speeds = np.abs(ts["speed"].values.astype(float))
-        all_speeds = all_speeds[np.isfinite(all_speeds)]
-        median_abs_speed = float(np.median(all_speeds)) if len(all_speeds) else 0.0
+    # Paused threshold: a FIXED speed in body-lengths per second, scaled only by
+    # the worms' apparent size on this plate.
+    #
+    # This used to be 10% of the median |speed| across all worms in THIS video.
+    # Every video therefore re-normalised to itself, and conditions live in
+    # different videos — so if a UV dose halved every worm's speed, the
+    # threshold halved with it and fraction_paused came out unchanged. The same
+    # scalar drives fraction_forward, fraction_backward and
+    # mean_speed_when_moving, so the whole activity block was blind to exactly
+    # the effect it was there to measure.
+    #
+    # Dividing by worm length instead keeps the magnification correction (a
+    # property of the optics) while dropping the behaviour normalisation (a
+    # property of the treatment). PAUSED_BL_PER_S = 0.01 reproduces the old
+    # threshold on the day-1 N2 10J reference video (median |speed| 12.98 px/s,
+    # median length 136.9 px -> old threshold 1.298 px/s = 0.0095 BL/s), so
+    # existing numbers are comparable while dose effects can now show through.
+    if "length" in ts.columns:
+        _len = ts["length"].values.astype(float)
+        _len = _len[np.isfinite(_len) & (_len > 0)]
+        _plate_len = float(np.median(_len)) if len(_len) else float("nan")
     else:
-        median_abs_speed = 0.0
-    paused_threshold = _PAUSED_FRACTION_OF_MEDIAN * median_abs_speed
+        _plate_len = float("nan")
+    if np.isfinite(_plate_len) and _plate_len > 0:
+        paused_threshold = PAUSED_BL_PER_S * _plate_len
+    else:
+        # No length anywhere: fall back to the old self-normalising rule rather
+        # than to a pixel constant that would be meaningless at another
+        # magnification. Logged, because the activity columns are then
+        # dose-insensitive for this video.
+        if "speed" in ts.columns:
+            _sp = np.abs(ts["speed"].values.astype(float))
+            _sp = _sp[np.isfinite(_sp)]
+            paused_threshold = _PAUSED_FRACTION_OF_MEDIAN * (
+                float(np.median(_sp)) if len(_sp) else 0.0)
+        else:
+            paused_threshold = 0.0
+        log.warning("crawling: no worm length in %s; paused threshold fell back "
+                    "to the per-video self-normalising rule", hdf5_path)
 
     # Pre-index timeseries + featuresN trajectory rows by Tierpsy worm_index
     # (worm_index == trajectories worm_index_joined == linker member id).
-    ts_by_worm: dict[int, "pd.DataFrame"] = {
+    _ts_by_tid: dict[int, "pd.DataFrame"] = {
         int(wi): g.sort_values(ts_frame_col) for wi, g in ts.groupby("worm_index")
     }
-    traj_by_worm: dict[int, "pd.DataFrame"] = {}        # path geometry (coords)
-    feat_traj_by_worm: dict[int, "pd.DataFrame"] = {}   # head-angle (needs skeleton_id)
+    _traj_by_tid: dict[int, "pd.DataFrame"] = {}
+    traj_frame_col = "frame_number"
     if feat_traj is not None and "worm_index_joined" in feat_traj.columns:
-        traj_frame_col = "timestamp_raw" if "timestamp_raw" in feat_traj.columns else "frame_number"
+        traj_frame_col = ("timestamp_raw" if "timestamp_raw" in feat_traj.columns
+                          else "frame_number")
         for wi, g in feat_traj.groupby("worm_index_joined"):
-            gs = g.sort_values(traj_frame_col).reset_index(drop=True)
-            traj_by_worm[int(wi)] = gs
-            feat_traj_by_worm[int(wi)] = gs
+            _traj_by_tid[int(wi)] = g.sort_values(traj_frame_col).reset_index(drop=True)
+
+    # Re-key onto frag_id, clipped to each piece's own frame window so a split
+    # fragment's two tracks never see each other's rows (nor the merged frames
+    # between them).
+    def _slice(by_tid: dict, frame_col: str) -> dict:
+        out: dict[str, "pd.DataFrame"] = {}
+        for fid, (tid, f0, f1) in frag_meta.items():
+            src = by_tid.get(tid)
+            if src is None or frame_col not in src.columns:
+                continue
+            fr = src[frame_col].values.astype(float)
+            sel = src[(fr >= f0) & (fr <= f1)]
+            if len(sel):
+                out[fid] = sel.reset_index(drop=True)
+        return out
+
+    ts_by_worm = _slice(_ts_by_tid, ts_frame_col)
+    traj_by_worm = _slice(_traj_by_tid, traj_frame_col)   # path geometry (coords)
+    feat_traj_by_worm = traj_by_worm                       # head-angle (skeleton_id)
 
     # Order groups by their earliest fragment start so worm_index / row order is
     # stable run-to-run (the union-find group id is otherwise arbitrary). Each
     # group's members are ordered by start frame; member[0] is the representative.
-    def _member_fstart(m: int) -> int:
-        sub = skel_by_worm.get(int(m))
+    def _member_fstart(m) -> int:
+        sub = skel_by_worm.get(m)
         return int(sub["frame_number"].iloc[0]) if sub is not None and len(sub) else (1 << 60)
 
-    group_list: list[tuple[int, int, list[int]]] = []
+    # Group ids from the linker are opaque frag_ids. Order groups by their
+    # earliest fragment so worm_index is stable run to run, then number them.
+    _tmp: list[tuple[int, str, list]] = []
     for gid, members in groups.items():
-        members_sorted = sorted((int(m) for m in members), key=_member_fstart)
-        group_list.append((_member_fstart(members_sorted[0]), int(gid), members_sorted))
-    group_list.sort(key=lambda t: (t[0], t[1]))
+        members_sorted = sorted(members, key=_member_fstart)
+        _tmp.append((_member_fstart(members_sorted[0]), str(gid), members_sorted))
+    _tmp.sort(key=lambda t: (t[0], t[1]))
+    group_list: list[tuple[int, int, list]] = [
+        (fs, i, mem) for i, (fs, _g, mem) in enumerate(_tmp)
+    ]
 
     rows: list[dict] = []
     abs_speed_by_row: list[np.ndarray] = []
     for _first_fstart, gid, member_ids in group_list:
-        repr_id = member_ids[0]
+        # Reported ids stay Tierpsy's, so the renders and the worm_index_map in
+        # crawling.py keep working; deduped because a split fragment's pieces
+        # share one id.
+        _tids = [frag_meta[m][0] for m in member_ids if m in frag_meta]
+        _seen: set = set()
+        member_tids = [t for t in _tids if not (t in _seen or _seen.add(t))]
+        repr_id = member_tids[0] if member_tids else -1
 
         # --- combined timeseries track over all members ---
-        member_ts = [ts_by_worm[m] for m in member_ids if m in ts_by_worm]
+        member_ts = [ts_by_worm[m] for m in member_ids if m in ts_by_worm]  # frag-sliced
         if member_ts:
             g = pd.concat(member_ts).sort_values(ts_frame_col)
         else:
@@ -904,8 +976,15 @@ def compute_crawling_metrics(
         # --- pixel speed scalars (BL companions are filled in a second pass once
         # the per-video plate_mean_length_px is known — see below the loop). ---
         mean_speed_pxs = _mean_finite(abs_speed)
-        mean_forward_speed_pxs = float(np.mean(fwd)) if len(fwd) else 0.0
-        mean_backward_speed_pxs = float(np.mean(np.abs(bwd))) if len(bwd) else 0.0
+        # nan, NOT 0.0, when the worm contributed no frames of that sign.
+        # aggregate_per_condition filters non-finite values but not zeros, so a
+        # zero here is averaged in as "this worm crawled at 0 px/s" — a
+        # mechanical downward bias, worst in exactly the conditions where
+        # tracking is worst, which manufactures a dose response out of a
+        # tracking artefact.
+        mean_forward_speed_pxs = float(np.mean(fwd)) if len(fwd) else float("nan")
+        mean_backward_speed_pxs = (float(np.mean(np.abs(bwd))) if len(bwd)
+                                   else float("nan"))
 
         # --- reversal_count + reversal_frames: forward->backward transitions ---
         # Build a per-FRAME motion_mode array over the worm's [f0, f1] span:
@@ -914,7 +993,10 @@ def compute_crawling_metrics(
         # gaps. A brief MEASURED pause between forward and backward is part of the
         # reversal (tolerated up to REVERSAL_PAUSE_TOLERANCE_FRAMES); a data gap
         # is not (we cannot know what happened across it).
-        reversal_count = 0
+        # A worm that WAS measured and did not reverse genuinely scores 0; a
+        # worm with no measured frames at all must not, so this starts as nan
+        # and only becomes a real count once there is something to count.
+        reversal_count: float = float("nan")
         reversal_frames: list[int] = []
         frames_ts = (g[ts_frame_col].values.astype(float)
                      if ts_frame_col in g.columns else np.array([], dtype=float))
@@ -1032,7 +1114,15 @@ def compute_crawling_metrics(
             "video_name": video_name,
             "worm_index": gid,
             "repr_tierpsy_id": repr_id,
-            "member_tierpsy_ids": ";".join(str(m) for m in member_ids),
+            "member_tierpsy_ids": ";".join(str(m) for m in member_tids),
+            # Renderer-only (absent from PER_WORM_COLS): which frame window of
+            # which Tierpsy fragment belongs to THIS track. Needed because a
+            # fragment cut at a collision yields two tracks sharing one Tierpsy
+            # id, so the renders cannot key on the id alone.
+            "member_spans": [
+                (frag_meta[m][0], frag_meta[m][1], frag_meta[m][2])
+                for m in member_ids if m in frag_meta
+            ],
             "group_classification": "linked",
             "bpm": bpm,
             "bend_interval_cv": bend_cv,
@@ -1126,7 +1216,8 @@ def compute_crawling_metrics(
 
 
 def aggregate_per_condition(per_worm_rows: list[dict],
-                            min_span_s: float | None = None) -> list[dict]:
+                            min_span_s: float | None = None,
+                            by_timepoint: bool = False) -> list[dict]:
     """
     Aggregate per-worm rows into one row per condition.
 
@@ -1137,6 +1228,9 @@ def aggregate_per_condition(per_worm_rows: list[dict],
     per_worm table without re-running Tierpsy. min_span_s overrides the
     minimum-span threshold (must match the value used to build the
     per_worm passed_filter column); None falls back to MIN_SPAN_S.
+
+    ``by_timepoint`` groups on (timepoint_h, condition) instead of condition
+    alone, for a multi-folder timecourse.
 
     Each condition row reports n_worms_total (before filtering),
     n_worms_kept (after filtering), and mean / median / std of every AGG_COLS
@@ -1150,8 +1244,25 @@ def aggregate_per_condition(per_worm_rows: list[dict],
 
     df = pd.DataFrame(per_worm_rows)
     out: list[dict] = []
-    for cond in sorted(df["condition"].astype(str).unique()):
-        cdf = df[df["condition"].astype(str) == cond]
+
+    # In a timecourse a condition exists once per timepoint. Pooling across
+    # timepoints would average away the change the timecourse is measuring, so
+    # the group key gains the timepoint and every row carries it.
+    if by_timepoint and "timepoint_h" in df.columns:
+        tps = sorted({t for t in pd.to_numeric(df["timepoint_h"],
+                                               errors="coerce").tolist()
+                      if t == t})
+        groups = [((tp, cond),
+                   df[(pd.to_numeric(df["timepoint_h"], errors="coerce") == tp)
+                      & (df["condition"].astype(str) == cond)])
+                  for tp in tps
+                  for cond in sorted(df["condition"].astype(str).unique())]
+        groups = [(k, g) for k, g in groups if len(g)]
+    else:
+        groups = [((None, cond), df[df["condition"].astype(str) == cond])
+                  for cond in sorted(df["condition"].astype(str).unique())]
+
+    for (tp, cond), cdf in groups:
         passed_mask = cdf.apply(
             lambda r: _passes_filter(
                 r.get("track_duration_s"), r.get("skeleton_coverage"),
@@ -1165,6 +1276,8 @@ def aggregate_per_condition(per_worm_rows: list[dict],
             "n_worms_total": int(len(cdf)),
             "n_worms_kept": int(len(kept)),
         }
+        if tp is not None:
+            agg = {"timepoint_h": tp, **agg}
         for col in AGG_COLS:
             if col in kept.columns:
                 vals = pd.to_numeric(kept[col], errors="coerce").values.astype(float)

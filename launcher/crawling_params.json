@@ -16,8 +16,8 @@
     ],
     "mask_min_area": 500,
     "mask_max_area": 100000000,
-    "thresh_C": 5,
-    "thresh_block_size": 31,
+    "thresh_C": 10,
+    "thresh_block_size": 61,
     "dilation_size": 5,
     "save_full_interval": -1,
     "compression_buff": -1,
@@ -67,5 +67,5 @@
     "MWP_whichsideup": "upright",
     "MWP_well_shape": "square",
     "MWP_well_masked_edge": 0.1,
-    "head_angle_prominence": 0.50
+    "head_angle_prominence": 0.5
 }

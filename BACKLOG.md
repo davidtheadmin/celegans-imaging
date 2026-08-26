@@ -109,6 +109,51 @@ per-plate delete so retention can clean up later.
 
 ## Crawling & analysis
 
+- **RESOLVED 2026-08-26 — the crawling under-count was an illumination gradient.**
+  Everything below this entry was chasing the wrong cause. Measured on
+  `20260530T153913` (N2 10J day1): detection was already essentially complete
+  (145 fragments summing 2075.7 worm-seconds against ~2160 available), blob area
+  p1 was 1134 against `mask_min_area` 500 so the area floors never bit on that
+  video, and `filt_min_displacement = 100` ate nothing. What was failing was
+  SKE_CREATE: where `has_skeleton == 0`, `contour_area` and `skeleton_length`
+  were NaN too, every single time — the ROI never produced a contour.
+
+  Cause: the background runs 106 counts at the frame centre to 169 in the
+  corners (+60%), and skeleton yield tracks it — 99.3% at r<200 px, 51.4% at
+  r 800-1000, 31.2% beyond 1000, with 63% of all lost frames within 200 px of a
+  border. The mechanism is the brightness ramp *inside* one worm's ROI (1.6
+  counts at the centre, 8.7 at the rim) smearing the histogram the per-ROI
+  threshold depends on, so it admits the bright half of the ramp and the blob
+  inflates from 1392 to 2139 px with no clean head/tail. No Tierpsy parameter
+  fixes this: the per-ROI threshold is already locally adaptive, which is
+  exactly why it follows the background from 113 to 161.
+
+  Correction is a SUBTRACTION, not a division — background climbs 1.45x while
+  absolute worm contrast barely moves (50 -> 59 counts), so the gradient is
+  additive stray light. Verified: subtracting holds contrast rim/centre at 1.02,
+  dividing drops it to 0.67 (worse at the rim than doing nothing).
+
+  Nine arms were run on the reference video (`dev/tools/skeleton_arm_test.py`).
+  Adopted: flat-field subtraction at transcode (`analysis/flatfield.py`) plus
+  `thresh_block_size` 61 / `thresh_C` 10. Result: skeleton yield 0.692 -> 0.909,
+  corners 0.312 -> 0.835, skeletons surviving SKE_FILT 0.573 -> 0.868, tracked
+  worm-seconds unchanged. `worm_bw_thresh_factor 1.05` scored a higher raw yield
+  but was rejected: it erodes the animal — 12% shorter, 26% thinner, 40% less
+  area, with 86% of skeleton endpoints landing >=2 of 49 points inside the
+  untouched arm's tip, and SKE_FILT rejecting 3x as many of its skeletons.
+
+  Also resolved by the same work: the linker was rewritten to reconnect on an
+  occupancy test rather than a relative-distance ambiguity ratio, merge episodes
+  are now cut out of fragments, and the quality gate is track length only
+  (default 10 s, set per run in the dialog). On the reference video the old
+  pipeline kept 15 worms / 1084 worm-seconds; the new one keeps 44 tracks /
+  2052 track-seconds from the same uncorrected cache.
+
+  Still open: `mask_min_area` / `traj_min_area` = 500 were never swept. They did
+  not bite on this video, but the day-0 601 diagnostic that motivated them
+  (p1 = 504, median = 612) came from a video with different worm sizes, so the
+  floors may still bite there. Re-check once the corrected data is in.
+
 - **Crawling under-count — Tierpsy segmentation fragmentation.** Worms visible
   all 180s are tracked by Tierpsy in only ~16–60s pieces. The 30s gate is the
   current pragmatic baseline (7 kept on 601 0J day-0 — note no denominator was

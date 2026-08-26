@@ -375,7 +375,11 @@ def _fmt_hours(h: float) -> str:
     return f"{h:g} h"
 
 
-def resolve_timepoints(entries: list[tuple[Path, str]]) -> list[FolderPlan]:
+def resolve_timepoints(entries: list[tuple[Path, str]],
+                       discover: "Optional[Callable[[Path], list]]" = None,
+                       kind: str = "image",
+                       example: str = "20260805T075438_NW.tif"
+                       ) -> list[FolderPlan]:
     """Resolve each (folder, typed_text) pair to a timepoint in hours.
 
     Rules, in order:
@@ -393,10 +397,18 @@ def resolve_timepoints(entries: list[tuple[Path, str]]) -> list[FolderPlan]:
     * A folder with neither a typed value nor a stamp errors, naming itself.
 
     Never raises. The caller reports ``error`` on any returned plan.
+
+    ``discover`` finds the timestamped files in a folder (default: images).
+    Motility and crawling pass ``analysis.ffmpeg_utils.find_videos`` and their
+    own ``kind``/``example`` so the error messages name videos rather than
+    images — the stamp format and every rule above are identical, and having
+    one implementation means the three assays can never drift on what "24 h"
+    means.
     """
+    discover = discover or find_images
     plans: list[FolderPlan] = []
     for folder, typed in entries:
-        images = find_images(folder)
+        images = discover(folder)
         cap, n_stamped, n_images = folder_capture_time(images)
         plan = FolderPlan(folder=folder, n_images=n_images,
                           n_stamped=n_stamped, capture_time=cap)
@@ -408,7 +420,7 @@ def resolve_timepoints(entries: list[tuple[Path, str]]) -> list[FolderPlan]:
                 plan.error = (
                     f"{folder.name}: timepoint \"{text}\" is not a number. "
                     "Enter elapsed hours (e.g. 0, 24, 48.5) or clear the box to "
-                    "derive it from the image capture times."
+                    "derive it from the %s capture times." % kind
                 )
                 plans.append(plan)
                 continue
@@ -433,8 +445,8 @@ def resolve_timepoints(entries: list[tuple[Path, str]]) -> list[FolderPlan]:
         for p in todo:
             p.error = (
                 f"{p.folder.name}: no timepoint typed and no capture time in the "
-                f"image filenames ({p.n_images} image(s) checked; expecting a "
-                "stamp like 20260805T075438_NW.tif). Type the elapsed hours for "
+                f"{kind} filenames ({p.n_images} {kind}(s) checked; expecting a "
+                f"stamp like {example}). Type the elapsed hours for "
                 "this folder."
             )
         return plans
@@ -464,8 +476,8 @@ def resolve_timepoints(entries: list[tuple[Path, str]]) -> list[FolderPlan]:
             if p.capture_time is None:
                 p.error = (
                     f"{p.folder.name}: no timepoint typed and no capture time in "
-                    f"the image filenames ({p.n_images} image(s) checked; "
-                    "expecting a stamp like 20260805T075438_NW.tif). Type the "
+                    f"the {kind} filenames ({p.n_images} {kind}(s) checked; "
+                    f"expecting a stamp like {example}). Type the "
                     "elapsed hours for this folder."
                 )
                 continue
@@ -476,7 +488,7 @@ def resolve_timepoints(entries: list[tuple[Path, str]]) -> list[FolderPlan]:
             p.hours = round(raw_hours(p) + offset, 1)
             p.method = "filenames"
             p.detail = (
-                f"derived from image capture times "
+                f"derived from {kind} capture times "
                 f"({p.n_stamped}/{p.n_images} filenames stamped, median "
                 f"{p.capture_time.isoformat(sep=' ', timespec='minutes')}) "
                 f"→ {_fmt_hours(p.hours)}"

@@ -36,7 +36,12 @@ class Settings:
     docker_command: str = "docker"
     analysis_video_timeout_s: int = 600
     motility_long_threshold_s: float = 5.0
-    crawling_min_track_s: int = 30
+    crawling_min_track_s: int = 10
+    # Subtract each video's own illumination field during the mp4 -> AVI
+    # transcode. The capture head lights the frame unevenly, which cost
+    # roughly two thirds of the skeletons at the frame edges; see
+    # analysis/flatfield.py. Applies to motility and crawling alike.
+    flat_field_correction: bool = True
     counting_split_sensitivity: float = 3.0
     counting_min_colony_um: float = 200.0
     # Colony Survival detection: 0-10 dial on the automatic threshold (5 =

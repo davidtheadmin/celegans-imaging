@@ -315,13 +315,47 @@ def _draw_skeleton(
 # Public render functions
 # ---------------------------------------------------------------------------
 
+def resolve_worm_id(worm_index_map, tid: int, frame_num: int):
+    """
+    Which track does Tierpsy fragment `tid` belong to at `frame_num`?
+
+    A worm_index_map value is either
+
+        int                          - the whole fragment is that track
+                                       (motility, and any crawling fragment
+                                       that was never split)
+        [(f0, f1, worm_index), ...]  - the fragment was cut at a collision, so
+                                       different frame windows belong to
+                                       different tracks (crawling)
+
+    The second form exists because crawling's linker splits a fragment when two
+    animals merge into one blob: the pieces either side become separate tracks
+    with separate rows in the per_worm sheet, but they still share one Tierpsy
+    worm_index_joined. Keying the render on the id alone would draw both halves
+    under whichever track was written last, so the number on screen would not
+    match the number in the spreadsheet.
+
+    Returns None when the fragment is not drawn at this frame - filtered out,
+    or inside a dropped merge episode.
+    """
+    v = worm_index_map.get(tid)
+    if v is None:
+        return None
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    for f0, f1, wi in v:
+        if f0 <= frame_num <= f1:
+            return int(wi)
+    return None
+
+
 def render_tracked(
     avi_path: Path,
     skeletons_hdf5: Path,
     out_path: Path,
     fps: float,
     kept_ids: "set[int] | None" = None,
-    worm_index_map: "dict[int, int] | None" = None,
+    worm_index_map: "dict | None" = None,
     arrow_data: "dict[int, dict] | None" = None,
 ) -> None:
     """
@@ -375,7 +409,8 @@ def render_tracked(
                     break
                 for tid, skel_idx in frame_map.get(frame_num, []):
                     if worm_index_map is not None:
-                        worm_id = worm_index_map.get(tid)
+                        worm_id = resolve_worm_id(
+                            worm_index_map, tid, frame_num)
                         if worm_id is None:
                             pos = _skel_centroid(skel, skel_idx)
                             if pos is not None:
@@ -735,7 +770,7 @@ def render_sidebyside(
     out_path: Path,
     fps: float,
     kept_ids: "set[int] | None" = None,
-    worm_index_map: "dict[int, int] | None" = None,
+    worm_index_map: "dict | None" = None,
 ) -> None:
     """
     Render original frame (left) beside masked+tracked frame (right).
@@ -790,7 +825,8 @@ def render_sidebyside(
 
                     for tid, skel_idx in frame_map.get(frame_num, []):
                         if worm_index_map is not None:
-                            worm_id = worm_index_map.get(tid)
+                            worm_id = resolve_worm_id(
+                                worm_index_map, tid, frame_num)
                             if worm_id is None:
                                 pos = _skel_centroid(skel, skel_idx)
                                 if pos is not None:

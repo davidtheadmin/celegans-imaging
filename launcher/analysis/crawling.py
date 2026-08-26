@@ -91,7 +91,8 @@ def _hdf5_cache_valid(hdf5_path: Path) -> bool:
 _CACHE_STAMP = ".wormscan-cache.json"
 
 
-def _params_fingerprint(pipeline: str, params: dict) -> str:
+def _params_fingerprint(pipeline: str, params: dict,
+                        flat_field: bool = False) -> str:
     """Identify the Tierpsy run that produced a cache entry.
 
     Covers BOTH the parameter set and which pipeline ran, because motility and
@@ -109,7 +110,8 @@ def _params_fingerprint(pipeline: str, params: dict) -> str:
     """
     payload = {k: v for k, v in (params or {}).items()
                if k != "expected_fps" and k not in _WORMSCAN_ONLY_KEYS}
-    blob = json.dumps({"pipeline": pipeline, "params": payload},
+    blob = json.dumps({"pipeline": pipeline, "params": payload,
+                       "flat_field": bool(flat_field)},
                       sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -273,6 +275,51 @@ def _run_tierpsy_instrumented(
     return combined, ""
 
 
+
+def _drop_stale_avi(avi: Path, flat_field: bool) -> bool:
+    """
+    Delete a cached AVI that was produced under a different flat-field setting.
+
+    convert_to_avi() skips when the AVI already exists, which is right when the
+    AVI is still valid and wrong the moment the correction is switched on or
+    off: Tierpsy would faithfully re-run on the previous, differently-processed
+    video and the change would appear to do nothing.
+
+    The flat-field code path always caches its field beside the AVI, so the
+    presence of that file is the record of how this AVI was made. Returns True
+    if the AVI was removed.
+    """
+    if not avi.exists():
+        return False
+    try:
+        from analysis import flatfield
+    except Exception:
+        return False
+
+    # First: is it even a finished video? A run that was cancelled or crashed
+    # mid-transcode leaves a headerless, index-less AVI behind, and the
+    # existence check in convert_to_avi would happily reuse it forever.
+    reason = ""
+    try:
+        flatfield.verify_avi(avi)
+    except Exception as exc:
+        reason = str(exc)
+    if not reason and flatfield.field_path(avi).exists() == bool(flat_field):
+        return False
+    try:
+        avi.unlink()
+        return True
+    except OSError as exc:
+        if reason:
+            # Refusing to continue is the point. Returning False here would
+            # send us into convert_to_avi, which skips when the file exists —
+            # so the run would quietly proceed on the broken video we just
+            # identified.
+            raise RuntimeError(
+                f"{avi.name} is unusable ({reason}) and could not be deleted "
+                f"({exc}). Remove its _wormscan_cache folder and re-run.")
+        return False
+
 # ---------------------------------------------------------------------------
 # Per-video worker (runs on a ThreadPoolExecutor worker thread)
 # ---------------------------------------------------------------------------
@@ -289,6 +336,7 @@ def _process_one_video_crawling(
     threshold_s: float,
     min_span_s: float,
     clear_cache: bool,
+    flat_field: bool,
     want_tracked: bool,
     want_sidebyside: bool,
     want_path_traces: bool,
@@ -340,7 +388,7 @@ def _process_one_video_crawling(
 
         avi = cache_dir / (video.stem + ".avi")
         candidate_hdf5 = cache_dir / "Results" / (video.stem + "_featuresN.hdf5")
-        cache_fp = _params_fingerprint("crawling", params_template)
+        cache_fp = _params_fingerprint("crawling", params_template, flat_field)
         stamp_ok, stamp_why = _cache_stamp_check(cache_dir, "crawling", cache_fp)
         cache_hit = (not clear_cache and _hdf5_cache_valid(candidate_hdf5)
                      and stamp_ok)
@@ -357,13 +405,18 @@ def _process_one_video_crawling(
             elif needs_avi:
                 plog(f"[CACHE HIT] Skipping Tierpsy; converting AVI for rendering: {video.name}")
                 cache_dir.mkdir(parents=True, exist_ok=True)
-                convert_to_avi(video, avi, threads=ffmpeg_threads)
+                convert_to_avi(video, avi, threads=ffmpeg_threads,
+                           flat_field=flat_field)
                 plog(f"AVI ready: {avi}")
             else:
                 plog(f"[CACHE HIT] Skipping Tierpsy + AVI: {video.name}")
         else:
             cache_dir.mkdir(parents=True, exist_ok=True)
-            convert_to_avi(video, avi, threads=ffmpeg_threads)
+            if _drop_stale_avi(avi, flat_field):
+                plog("[CACHE] Dropped a cached AVI made under a different "
+                     "flat-field setting; re-transcoding.")
+            convert_to_avi(video, avi, threads=ffmpeg_threads,
+                           flat_field=flat_field)
             plog(f"AVI ready: {avi}")
 
             params = copy.deepcopy(params_template)
@@ -410,14 +463,15 @@ def _process_one_video_crawling(
         # Surface the shared engine's pre-grouping drop reasons so we
         # can see how many tracks die before the 60s gate vs at it.
         if engine_log:
-            gf = engine_log.get("groups_formed", {})
-            dr = engine_log.get("worms_dropped", {})
             plog(
-                f"Engine: input_tracks={engine_log.get('input_track_count')}"
-                f" groups_formed={gf.get('total')}"
-                f" (curl={gf.get('curl')}, collision={gf.get('collision')})"
-                f" | dropped_total={dr.get('total')}"
-                f" by_reason={dr.get('by_reason')}"
+                f"Linker: fragments={engine_log.get('input_track_count')}"
+                f" -> after merge-split={engine_log.get('fragments_after_split')}"
+                f" -> tracks={engine_log.get('groups_formed')}"
+                f" | links short-gap={engine_log.get('links_made_short_gap')}"
+                f" isolated={engine_log.get('links_made_isolated')}"
+                f" | refused occupied={engine_log.get('links_refused_occupied')}"
+                f" | merge episodes={engine_log.get('merge_episodes')}"
+                f" (frames dropped={engine_log.get('merge_frames_dropped')})"
             )
             sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
             sidecar.write_text(
@@ -429,17 +483,26 @@ def _process_one_video_crawling(
         # to its stable grouped worm_index, and collect that worm's
         # reversal frames. Members absent from the map were filtered
         # out and the renders mark them faintly (motility-style).
-        worm_index_map: dict[int, int] = {}
+        worm_index_map: dict = {}
         reversal_frames_by_worm: dict[int, list] = {}
         arrow_data_by_worm: dict[int, dict] = {}
         for r in worm_rows:
             if not r.get("passed_filter"):
                 continue
             gi = int(r["worm_index"])
-            for mid in str(r.get("member_tierpsy_ids", "")).split(";"):
-                mid = mid.strip()
-                if mid:
-                    worm_index_map[int(mid)] = gi
+            # Frame-windowed, so a fragment split at a collision is drawn under
+            # the right track number in each half. Falls back to the whole-
+            # fragment form when member_spans is absent.
+            spans = r.get("member_spans") or []
+            if spans:
+                for tid, f0, f1 in spans:
+                    worm_index_map.setdefault(int(tid), []).append(
+                        (int(f0), int(f1), gi))
+            else:
+                for mid in str(r.get("member_tierpsy_ids", "")).split(";"):
+                    mid = mid.strip()
+                    if mid:
+                        worm_index_map[int(mid)] = gi
             reversal_frames_by_worm[gi] = r.get("reversal_frames") or []
             # Velocity-arrow overlay payload (dense per-frame centroid/velocity
             # arrays + event frames) — see crawling_metrics renderer-only keys.
@@ -454,7 +517,7 @@ def _process_one_video_crawling(
             }
         n_kept = sum(1 for r in worm_rows if r.get("passed_filter"))
         plog(
-            f"Worms passing filter (span >= {min_span_s:.1f}s, coverage >= 70%): "
+            f"Tracks passing filter (length >= {min_span_s:.1f}s): "
             f"{n_kept}/{len(worm_rows)}"
         )
 
@@ -640,9 +703,10 @@ class CrawlingAgent(threading.Thread):
         self._stop = threading.Event()
         self._cancel = threading.Event()
         self._wake = threading.Event()
-        self._folder: Optional[Path] = None
+        self._plans: Optional[list] = None
         self._threshold_s: float = 5.0
-        self._min_span_s: float = 30.0
+        self._min_span_s: float = 10.0
+        self._force_reanalyze: bool = False
         self._clear_cache: bool = False
         self._want_tracked: bool = False
         self._want_sidebyside: bool = False
@@ -676,23 +740,34 @@ class CrawlingAgent(threading.Thread):
 
     def start_analysis(
         self,
-        folder: Path,
+        plans: list,
         threshold_s: float = 5.0,
         clear_cache: bool = False,
         want_tracked: bool = False,
         want_sidebyside: bool = False,
         want_path_traces: bool = False,
-        min_span_s: float = 30.0,
+        min_span_s: float = 10.0,
+        force_reanalyze: bool = False,
     ) -> None:
-        """UI thread: trigger an analysis run on the given folder."""
+        """UI thread: trigger a run over one or more folders.
+
+        ``plans`` is a list of survival.FolderPlan (folder + resolved
+        timepoint), already checked for errors by the caller. A bare Path is
+        accepted for convenience and treated as a single folder at 0 h.
+        """
+        if not isinstance(plans, (list, tuple)):
+            from survival import FolderPlan
+            plans = [FolderPlan(folder=Path(plans), hours=0.0,
+                                method="single folder", detail="single folder")]
         with self._lock:
-            self._folder = folder
+            self._plans = list(plans)
             self._threshold_s = threshold_s
             self._min_span_s = min_span_s
             self._clear_cache = clear_cache
             self._want_tracked = want_tracked
             self._want_sidebyside = want_sidebyside
             self._want_path_traces = want_path_traces
+            self._force_reanalyze = force_reanalyze
         self.status.update(
             running=True,
             total=0,
@@ -711,21 +786,22 @@ class CrawlingAgent(threading.Thread):
             if self._stop.is_set():
                 break
             with self._lock:
-                folder = self._folder
+                plans = self._plans
                 threshold_s = self._threshold_s
                 min_span_s = self._min_span_s
                 clear_cache = self._clear_cache
                 want_tracked = self._want_tracked
                 want_sidebyside = self._want_sidebyside
                 want_path_traces = self._want_path_traces
-                self._folder = None
-            if folder is not None:
+                force_reanalyze = self._force_reanalyze
+                self._plans = None
+            if plans:
                 self._cancel.clear()
                 try:
                     self._run_analysis(
-                        folder, threshold_s, clear_cache,
+                        plans, threshold_s, clear_cache,
                         want_tracked, want_sidebyside, want_path_traces,
-                        min_span_s,
+                        min_span_s, force_reanalyze,
                     )
                 except Exception as exc:
                     log.exception("CrawlingAgent crashed")
@@ -747,18 +823,32 @@ class CrawlingAgent(threading.Thread):
 
     def _run_analysis(
         self,
-        folder: Path,
+        plans: list,
         threshold_s: float,
         clear_cache: bool,
         want_tracked: bool = False,
         want_sidebyside: bool = False,
         want_path_traces: bool = False,
         min_span_s: float = 30.0,
+        force_reanalyze: bool = False,
     ) -> None:
+        """Analyse one or more folders as one run.
+
+        ``plans`` is a list of survival.FolderPlan — each a folder plus its
+        resolved timepoint in hours. One folder is the ordinary case and behaves
+        as it always did; several make a timecourse, and every per-worm row is
+        stamped with its folder's timepoint so the aggregation and the figures
+        can use time as an axis.
+
+        Folders already analysed under identical settings are reused rather than
+        re-analysed (analysis.run_cache), which is the whole point of being able
+        to add a day and re-run.
+        """
         from analysis.ffmpeg_utils import find_videos
         from analysis.crawling_metrics import (
             aggregate_per_condition, PER_WORM_COLS,
         )
+        from analysis import run_cache
         from analysis.concurrency import resolve_workers, ffmpeg_threads_per_worker
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import pandas as pd
@@ -766,6 +856,9 @@ class CrawlingAgent(threading.Thread):
         s = self._get_settings()
         t_start = time.monotonic()
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        # Everything lands under the FIRST folder — with several folders
+        # there is no neutral place to put it (same rule as Development).
+        folder = Path(plans[0].folder)
         out_dir = folder / f"{_ANALYSIS_PREFIX}_{timestamp}"
         out_dir.mkdir(parents=True, exist_ok=True)
         # the crash handler in run() needs this to point the
@@ -800,19 +893,38 @@ class CrawlingAgent(threading.Thread):
                 except Exception:                             # noqa: BLE001
                     pass
 
-            if clear_cache:
-                write_log("Clearing cache folders…")
-                for cache in folder.rglob(_CACHE_DIR):
-                    if cache.is_dir():
-                        shutil.rmtree(cache, ignore_errors=True)
-                        write_log(f"  Removed: {cache}")
+            videos_by_folder = {Path(pl.folder): find_videos(Path(pl.folder))
+                                for pl in plans}
+            total = sum(len(v) for v in videos_by_folder.values())
+            multi = len(plans) > 1
 
-            videos = find_videos(folder)
-            total = len(videos)
             write_log(f"Run: {timestamp}")
-            write_log(f"Folder: {folder}")
+            if multi:
+                write_log(f"Folders: {len(plans)} (timecourse)")
+                for pl in plans:
+                    write_log(f"  {pl.hours:g} h  {pl.folder}  "
+                              f"({len(videos_by_folder[Path(pl.folder)])} videos)"
+                              f"  [{pl.detail}]")
+            else:
+                write_log(f"Folder: {folder}")
             write_log(f"Videos found: {total}")
-            write_log(f"Min track span: {min_span_s:.1f}s")
+            write_log(f"Min track length: {min_span_s:.1f}s")
+
+            flat_field = bool(getattr(s, "flat_field_correction", True))
+            want_renders = bool(want_tracked or want_sidebyside or want_path_traces)
+            digest = run_cache.settings_digest(
+                "crawling", self._params_template, flat_field,
+                {"min_span_s": min_span_s, "threshold_s": threshold_s})
+            reuse = run_cache.plan_reuse(
+                list(videos_by_folder), videos_by_folder, digest,
+                pipeline="crawling", prefix=_ANALYSIS_PREFIX,
+                want_renders=want_renders,
+                force=bool(force_reanalyze or clear_cache),
+                write_log=write_log)
+            write_log(f"Reuse: {reuse.n_reused}/{reuse.n_folders} folder(s) "
+                      f"already analysed with these settings")
+            for line in reuse.lines():
+                write_log(line)
 
             self.status.update(
                 color="yellow",
@@ -832,10 +944,12 @@ class CrawlingAgent(threading.Thread):
             write_log(f"Container engine: {engine}")
             write_log(f"Tierpsy image: {image}")
             write_log(paths.describe())
-            head_angle_prominence = float(self._params_template.get("head_angle_prominence", 0.30))
+            head_angle_prominence = float(
+                self._params_template.get("head_angle_prominence", 0.30))
             all_worm_rows: list[dict] = []
             n_ok = 0
             n_fail = 0
+            folder_meta: list[dict] = []
 
             workers, cpus, mem_gb = resolve_workers(
                 getattr(s, "concurrent_videos", "auto"), engine
@@ -848,10 +962,13 @@ class CrawlingAgent(threading.Thread):
                 f"ffmpeg threads/worker={ff_threads}"
             )
 
-            def _publish_progress(done: int, last_name: str) -> None:
+            done = 0
+
+            def _publish_progress(last_name: str) -> None:
                 self.status.update(
                     color="yellow",
-                    label=f"{last_name} ({done}/{total})" if last_name else "Analysing…",
+                    label=(f"{last_name} ({done}/{total})" if last_name
+                           else "Analysing…"),
                     running=True,
                     current_index=done,
                     total=total,
@@ -859,86 +976,156 @@ class CrawlingAgent(threading.Thread):
                     current_stage=f"{done}/{total} done",
                 )
 
-            _publish_progress(0, "")
+            _publish_progress("")
 
-            done = 0
-            if videos:
-                with ThreadPoolExecutor(
-                    max_workers=workers, thread_name_prefix="crawling"
-                ) as ex:
-                    futures = {}
-                    for video in videos:
-                        if self._cancel.is_set() or self._stop.is_set():
-                            write_log("Run cancelled before submitting remaining videos")
-                            break
-                        fut = ex.submit(
-                            _process_one_video_crawling,
-                            video, folder,
-                            image=image,
-                            engine=engine,
-                            timeout_s=_TIERPSY_TIMEOUT_S,
-                            params_template=self._params_template,
-                            head_angle_prominence=head_angle_prominence,
-                            threshold_s=threshold_s,
-                            min_span_s=min_span_s,
-                            clear_cache=clear_cache,
-                            want_tracked=want_tracked,
-                            want_sidebyside=want_sidebyside,
-                            want_path_traces=want_path_traces,
-                            per_video_dir=per_video_dir,
-                            ffmpeg_threads=ff_threads,
-                            cancel_event=self._cancel,
-                        )
-                        futures[fut] = video
+            for pl in plans:
+                if self._cancel.is_set() or self._stop.is_set():
+                    write_log("Run cancelled before the remaining folders")
+                    break
+                pfolder = Path(pl.folder)
+                videos = videos_by_folder[pfolder]
+                tp = float(pl.hours) if pl.hours is not None else None
+                if multi:
+                    write_log(f"\n{'=' * 60}\nFOLDER {pfolder.name} "
+                              f"({tp:g} h) — {len(videos)} video(s)\n{'=' * 60}")
 
-                    # Collect on the agent thread: flush each video's buffered
-                    # log block contiguously (in completion order, for liveness)
-                    # and advance the bar as each finishes. Data rows are NOT
-                    # accumulated here — see the ordered pass below.
-                    results_by_video: dict[Path, dict] = {}
-                    for fut in as_completed(futures):
-                        video = futures[fut]
-                        try:
-                            result = fut.result()
-                        except Exception as exc:
-                            # One video's failure must not abort the batch.
-                            write_log(f"\n--- {video.name} ---")
-                            write_log(f"ERROR (worker crashed): {exc}")
-                            log.exception("Worker crashed for %s", video.name)
-                            results_by_video[video] = {"crashed": True}
+                cache = reuse.caches.get(pfolder)
+                if cache is not None and cache.hit:
+                    rows = run_cache.read_rows(cache.rows_csv, pfolder)
+                    for r in rows:
+                        r["timepoint_h"] = tp
+                        r["source_folder"] = str(pfolder)
+                    all_worm_rows.extend(rows)
+                    n_ok += len(videos)
+                    done += len(videos)
+                    _publish_progress(pfolder.name)
+                    write_log(f"REUSED {len(rows)} track(s) from "
+                              f"{cache.source_dir.name if cache.source_dir else '?'} "
+                              f"— folder not re-analysed")
+                    folder_meta.append({
+                        "folder": str(pfolder), "timepoint_h": tp,
+                        "videos": run_cache.video_fingerprints(videos),
+                        "n_rows": len(rows), "n_videos_ok": len(videos),
+                        "n_videos_failed": 0})
+                    continue
+
+                if clear_cache:
+                    write_log("Clearing cache folders…")
+                    for cache_dir in pfolder.rglob(_CACHE_DIR):
+                        if cache_dir.is_dir():
+                            shutil.rmtree(cache_dir, ignore_errors=True)
+                            write_log(f"  Removed: {cache_dir}")
+
+                f_ok = f_fail = 0
+                f_rows: list[dict] = []
+                if videos:
+                    with ThreadPoolExecutor(
+                        max_workers=workers, thread_name_prefix="crawling"
+                    ) as ex:
+                        futures = {}
+                        for video in videos:
+                            if self._cancel.is_set() or self._stop.is_set():
+                                write_log("Run cancelled before submitting "
+                                          "remaining videos")
+                                break
+                            fut = ex.submit(
+                                _process_one_video_crawling,
+                                video, pfolder,
+                                image=image,
+                                engine=engine,
+                                timeout_s=_TIERPSY_TIMEOUT_S,
+                                params_template=self._params_template,
+                                head_angle_prominence=head_angle_prominence,
+                                threshold_s=threshold_s,
+                                min_span_s=min_span_s,
+                                clear_cache=clear_cache,
+                                flat_field=flat_field,
+                                want_tracked=want_tracked,
+                                want_sidebyside=want_sidebyside,
+                                want_path_traces=want_path_traces,
+                                per_video_dir=per_video_dir,
+                                ffmpeg_threads=ff_threads,
+                                cancel_event=self._cancel,
+                            )
+                            futures[fut] = video
+
+                        # Collect on the agent thread: flush each video's
+                        # buffered log block contiguously (in completion order,
+                        # for liveness) and advance the bar as each finishes.
+                        # Data rows are NOT accumulated here — see the ordered
+                        # pass below.
+                        results_by_video: dict[Path, dict] = {}
+                        for fut in as_completed(futures):
+                            video = futures[fut]
+                            try:
+                                result = fut.result()
+                            except Exception as exc:
+                                # One video's failure must not abort the batch.
+                                write_log(f"\n--- {video.name} ---")
+                                write_log(f"ERROR (worker crashed): {exc}")
+                                log.exception("Worker crashed for %s", video.name)
+                                results_by_video[video] = {"crashed": True}
+                                done += 1
+                                _publish_progress(video.name)
+                                continue
+
+                            for line in result["logbuf"]:
+                                write_log(line)
+                            results_by_video[video] = result
                             done += 1
-                            _publish_progress(done, video.name)
-                            continue
+                            _publish_progress(result["video"].name)
 
-                        for line in result["logbuf"]:
-                            write_log(line)
-                        results_by_video[video] = result
-                        done += 1
-                        _publish_progress(done, result["video"].name)
+                        # Accumulate in the original discovery order so the
+                        # outputs (incl. unsorted per_worm sheet row order) are
+                        # byte-identical to a serial run.
+                        for video in videos:
+                            result = results_by_video.get(video)
+                            if result is None:  # never submitted (cancel)
+                                continue
+                            if result.get("crashed"):
+                                f_fail += 1
+                                continue
+                            if result.get("cancelled"):
+                                continue
+                            f_rows.extend(result["worm_rows"])
+                            if result["status_str"] == "ok":
+                                f_ok += 1
+                            else:
+                                f_fail += 1
 
-                    # Accumulate in the original discovery order so the outputs
-                    # (incl. unsorted per_worm sheet row order) are byte-identical
-                    # to a serial run.
-                    for video in videos:
-                        result = results_by_video.get(video)
-                        if result is None:  # never submitted (cancel)
-                            continue
-                        if result.get("crashed"):
-                            n_fail += 1
-                            continue
-                        if result.get("cancelled"):
-                            continue
-                        all_worm_rows.extend(result["worm_rows"])
-                        if result["status_str"] == "ok":
-                            n_ok += 1
-                        else:
-                            n_fail += 1
+                for r in f_rows:
+                    r["timepoint_h"] = tp
+                    r["source_folder"] = str(pfolder)
+                all_worm_rows.extend(f_rows)
+                n_ok += f_ok
+                n_fail += f_fail
+                folder_meta.append({
+                    "folder": str(pfolder), "timepoint_h": tp,
+                    "videos": run_cache.video_fingerprints(videos),
+                    "n_rows": len(f_rows), "n_videos_ok": f_ok,
+                    "n_videos_failed": f_fail})
+
+            # The reusable artifact for the next run, written before the
+            # workbook so a failure in the report layer cannot cost it.
+            run_cache.write_rows(out_dir / run_cache.ROWS_NAME, all_worm_rows,
+                                 list(PER_WORM_COLS), write_log)
+            run_cache.write_manifest(
+                out_dir, pipeline="crawling", digest=digest,
+                folders=folder_meta, has_renders=want_renders,
+                write_log=write_log)
+            timepoints = sorted({r.get("timepoint_h") for r in all_worm_rows
+                                 if r.get("timepoint_h") is not None})
+            if len(timepoints) > 1:
+                write_log(f"Timecourse: {len(timepoints)} timepoints "
+                          f"({', '.join(f'{t:g} h' for t in timepoints)})")
 
         # ---- Build output: per_worm + per_condition sheets, CSV mirrors per_condition ----
         per_worm_df = (pd.DataFrame(all_worm_rows, columns=PER_WORM_COLS).round(4)
                        if all_worm_rows
                        else pd.DataFrame(columns=PER_WORM_COLS))
-        per_condition_rows = aggregate_per_condition(all_worm_rows, min_span_s=min_span_s)
+        by_tp = len(timepoints) > 1
+        per_condition_rows = aggregate_per_condition(
+            all_worm_rows, min_span_s=min_span_s, by_timepoint=by_tp)
         per_condition_df = (pd.DataFrame(per_condition_rows).round(4)
                             if per_condition_rows
                             else pd.DataFrame(columns=["condition", "n_worms"]))
@@ -955,7 +1142,7 @@ class CrawlingAgent(threading.Thread):
                 import assay_reports
                 assay_reports.crawling_report(
                     xw.book, all_worm_rows, out_dir, write_log,
-                    min_span_s=min_span_s)
+                    min_span_s=min_span_s, by_timepoint=by_tp)
             except Exception as exc:                              # noqa: BLE001
                 log.warning("crawling: report layer failed", exc_info=True)
                 write_log(f"WARNING: the plate/condition sheets, the figures and "

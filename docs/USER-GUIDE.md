@@ -145,17 +145,22 @@ The headline number is **BPM** — body bends per minute.
 ### Crawling — locomotion on a plate, from video
 
 Also needs the engine. Same videos, **different Tierpsy parameters** — tuned
-for larger, slower-moving objects — and a different track-linking method. The
-two pipelines are deliberately not interchangeable.
+for slower-moving objects that cross one another — and a different
+track-linking method. The two pipelines are deliberately not interchangeable.
 
-**Options:** minimum track span (default 30 s), renders.
+**Options:** minimum track length (default 10 s), renders.
 
-**There is a second filter you cannot see.** A worm must *also* carry a skeleton
-on at least 70% of the frames it was tracked in. That threshold is fixed in the
-code and is not on the dialog, so a worm visible for the whole video can still
-be excluded on skeleton quality alone. If your worm counts look low, this is the
-first thing to check — `per_worm` keeps every worm with a `passed_filter` column
-and both inputs, so you can see which of the two rejected it.
+**Track length is now the only filter.** The old hidden requirement that a worm
+carry a skeleton on at least 70% of its tracked frames has been removed.
+Skeleton coverage is still reported per track in `per_worm`, so you can filter
+on it yourself, but it no longer decides anything.
+
+**`n` counts tracks, not animals.** When two worms touch, the pipeline does not
+guess which was which afterwards — it ends both tracks and starts new ones. One
+animal can therefore contribute several tracks over a video. That is deliberate:
+a track that is certainly one animal for its whole length is worth more than a
+longer track that might be two animals spliced together. Since the readouts are
+averages, it costs nothing.
 
 **Output** in `_crawling_analysis_<timestamp>\`: `crawling_results.xlsx`
 (`per_worm` and `per_condition` sheets), `crawling_summary.csv`,
@@ -275,6 +280,60 @@ dialog asked for — so a saved result always states how it was produced.
 
 This section exists because several of these numbers are easy to misread, and
 one of them is currently known to be wrong in a specific way.
+
+### Motility and crawling take several folders as a timecourse
+
+Both video assays now use a folder LIST, the way Development already did.
+Add one folder per timepoint and leave the timepoint box blank to read it from
+the video filenames — a folder of `20260530T153913_video.mp4` files dates
+itself. Type a number instead if you want to override it. Results are written
+into the FIRST folder in the list.
+
+One folder is a list of one and behaves exactly as the single folder picker
+did, so nothing about a one-off run changes.
+
+With two or more timepoints you additionally get **`<assay>_timecourse.png`** —
+each metric against time, one line per condition, mean across plates with ±1 SD
+and the plates themselves as faint dots. A condition missing at one timepoint
+leaves a gap in its line rather than a straight line drawn through it. The
+`per_plate` and `per_condition` sheets gain a `timepoint_h` column and are
+split by it, so the same plate imaged on two days is two rows, not an average
+of the two.
+
+**Folders you have already analysed are reused, not re-analysed.** Add a new
+day to a list you have run before and only the new day is processed; the rest
+are read back from their previous run. A folder is only reused when every
+setting that changes the numbers is identical — the Tierpsy parameters, the
+flat-field flag and the thresholds — and when its videos are unchanged by name,
+size and modification time. The run log says per folder whether it was reused
+and why. Ticking **Clear cache** forces everything to be re-analysed.
+
+One asymmetry worth knowing: a reused folder produces no new render, so if you
+ask for renders and a cached folder has none, it is re-analysed rather than
+silently skipped.
+
+### Videos are flat-fielded before tracking
+
+The capture head does not light the field evenly — on a measured plate the
+background ran 106 counts at the frame centre and 169 in the corners. Tierpsy's
+skeleton yield followed that gradient exactly: 99% in the middle of the frame,
+31% in the corners, with 63% of all lost skeletons within 200 px of a border.
+Worms were being dropped for **where they were standing**, not for anything
+about them.
+
+Both video pipelines now subtract each video's own illumination field during
+the mp4-to-AVI conversion, so this costs no extra step and no extra
+re-compression. On the reference video it took skeleton yield from 0.69 to
+0.91, and the corner figure from 0.31 to 0.84.
+
+The field is measured from the video itself and cached beside the AVI in
+`_wormscan_cache` as `<name>_flatfield.npy`, with a `.png` you can look at. A
+video whose gradient is under 10% is left alone. It can be turned off with
+`flat_field_correction` in the config if you ever need the raw frames.
+
+Two consequences worth knowing: renders show the corrected image, because that
+is what Tierpsy saw; and results cached before this change are re-run
+automatically, since the correction is part of the cache fingerprint.
 
 ### Motility and crawling distances are in PIXELS, not microns
 

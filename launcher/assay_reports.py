@@ -152,6 +152,12 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
                              metrics, title, write_log)
     if f:
         written.append(f)
+    # The timecourse headline. Self-skipping below two timepoints, so this is
+    # unconditional and a single-folder run is unaffected.
+    f = AF.fig_timecourse(out_dir / f"{stem}_timecourse.png", agg, metrics,
+                          f"{title} over time", write_log)
+    if f:
+        written.append(f)
     if survival_metric is not None:
         f = AF.fig_survival(out_dir / f"{stem}_survival.png", agg,
                             survival_metric, f"{title} relative to untreated",
@@ -210,8 +216,13 @@ def _dist_by_strain_dose(items: Sequence[dict], key: str, log: bool,
 def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
                     write_log: Callable[[str], None], *,
                     long_threshold_s: Optional[float] = None,
-                    bend_method: str = "head_angle_peaks_v2") -> list:
-    """Motility: items are worms, the gate is is_long."""
+                    bend_method: str = "head_angle_peaks_v2",
+                    by_timepoint: bool = False) -> list:
+    """Motility: items are worms, the gate is is_long.
+
+    ``by_timepoint`` splits every plate and condition row by timepoint and adds
+    the metric-vs-time figure — a multi-folder timecourse.
+    """
     metrics = MOTILITY_METRICS
 
     write_log = _safe_log(write_log)
@@ -219,7 +230,8 @@ def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
     def keep(r):
         return bool(r.get("is_long"))
 
-    agg = AC.aggregate(worm_rows, metrics, keep=keep)
+    agg = AC.aggregate(worm_rows, metrics, keep=keep,
+                       by_timepoint=by_timepoint)
     dist = _dist_by_strain_dose(worm_rows, "bpm", log=False, keep=keep,
                                 write_log=write_log)
     return _finish(
@@ -273,8 +285,13 @@ def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
 
 def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
                     write_log: Callable[[str], None], *,
-                    min_span_s: Optional[float] = None) -> list:
-    """Crawling: items are worms, the gate is passed_filter."""
+                    min_span_s: Optional[float] = None,
+                    by_timepoint: bool = False) -> list:
+    """Crawling: items are worms, the gate is passed_filter.
+
+    ``by_timepoint`` splits every plate and condition row by timepoint and adds
+    the metric-vs-time figure — a multi-folder timecourse.
+    """
     metrics = CRAWLING_METRICS
 
     write_log = _safe_log(write_log)
@@ -282,7 +299,8 @@ def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
     def keep(r):
         return bool(r.get("passed_filter"))
 
-    agg = AC.aggregate(worm_rows, metrics, keep=keep)
+    agg = AC.aggregate(worm_rows, metrics, keep=keep,
+                       by_timepoint=by_timepoint)
     dist = _dist_by_strain_dose(worm_rows, "mean_speed_pxs", log=True,
                                 keep=keep, write_log=write_log)
     return _finish(

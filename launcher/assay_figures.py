@@ -483,3 +483,125 @@ def fig_survival(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
         log.warning("survival figure failed: %s", exc, exc_info=True)
         write_log(f"WARNING: {Path(out_png).name} was not written ({exc}).")
         return None
+
+
+def fig_timecourse(out_png: Path, agg: AC.Aggregation,
+                   metrics: Sequence[AC.Metric], title: str,
+                   write_log: Callable[[str], None]) -> Optional[Path]:
+    """Metric against time, one line per condition — the timecourse headline.
+
+    One row per metric, one column per strain, so the doses of a strain sit
+    together and can be read against each other. x is the timepoint in hours,
+    y is the condition mean across plates with +/-1 SD, and a faint dot per
+    plate sits behind it. A condition missing at one timepoint leaves a GAP in
+    its line rather than interpolating across it — an unimaged day is not a
+    measurement, and a straight line through it would claim otherwise.
+
+    Returns None, having said why in the log, when the run has fewer than two
+    timepoints. That is the ordinary single-folder case and not an error.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        cond, plates = agg.per_condition, agg.per_plate
+        tps = list(getattr(agg, "timepoints", []) or [])
+        if len(tps) < 2:
+            write_log("timecourse figure: fewer than two timepoints — skipped.")
+            return None
+        if not cond or not metrics:
+            write_log("timecourse figure: nothing to draw — skipped.")
+            return None
+
+        strains = sorted({c["strain"] for c in cond}, key=AC.strain_sort_key)
+        unit = AC.dose_unit_of(cond)
+        doses = sorted({c["dose"] for c in cond if c.get("dose") is not None})
+
+        def colour_for(dose):
+            if dose is None or not doses:
+                return _MARK
+            return _ramp(doses.index(dose), len(doses))
+
+        fig, axes = plt.subplots(
+            len(metrics), len(strains),
+            figsize=(2.9 * len(strains) + 1.6, 1.9 * len(metrics) + 1.6),
+            squeeze=False, sharex=True, sharey="row")
+
+        for ri, m in enumerate(metrics):
+            for ci, strain in enumerate(strains):
+                ax = axes[ri][ci]
+                _style(ax)
+                ax.grid(True, axis="y", color=_GRID, linewidth=0.8)
+                here = [c for c in cond if c["strain"] == strain]
+                names = sorted({(c.get("dose") is None, c.get("dose") or 0.0,
+                                 c["condition"]) for c in here})
+                for _nd, _d, cname in names:
+                    dose = next((c.get("dose") for c in here
+                                 if c["condition"] == cname), None)
+                    col = colour_for(dose)
+                    xs, ys, es = [], [], []
+                    for tp in tps:
+                        row = next((c for c in here
+                                    if c["condition"] == cname
+                                    and c.get("timepoint_h") == tp), None)
+                        if row is None:
+                            continue
+                        v = row.get(f"{m.key}_mean")
+                        if v is None or not np.isfinite(v):
+                            continue
+                        xs.append(tp)
+                        ys.append(v)
+                        e = row.get(f"{m.key}_sd")
+                        es.append(e if e is not None and np.isfinite(e) else 0.0)
+                        pv = [q.get(m.key) for q in plates
+                              if q.get("timepoint_h") == tp
+                              and q.get("condition") == cname
+                              and q.get(m.key) is not None
+                              and np.isfinite(q.get(m.key))]
+                        if pv:
+                            ax.plot([tp] * len(pv), pv, marker="o",
+                                    linestyle="none", markersize=2.6,
+                                    color=col, alpha=0.3, zorder=1)
+                    if xs:
+                        ax.errorbar(
+                            xs, ys, yerr=es, color=col, marker="o",
+                            markersize=4.2, linewidth=1.6, capsize=2.5,
+                            elinewidth=0.9, zorder=3,
+                            label=(f"{dose:g} {unit}".strip()
+                                   if dose is not None else str(cname)))
+                if ri == 0:
+                    ax.set_title(str(strain), fontsize=10, color=_INK)
+                if ci == 0:
+                    ax.set_ylabel(f"{m.label}\n({m.unit})" if m.unit else m.label,
+                                  fontsize=8.5, color=_INK)
+                if ri == len(metrics) - 1:
+                    ax.set_xlabel("time (h)", fontsize=8, color=_MUT)
+                if m.log:
+                    ax.set_yscale("log")
+                ax.tick_params(labelsize=7)
+
+        seen, handles, labels = set(), [], []
+        for axrow in axes:
+            for ax in axrow:
+                for h, lb in zip(*ax.get_legend_handles_labels()):
+                    if lb not in seen:
+                        seen.add(lb)
+                        handles.append(h)
+                        labels.append(lb)
+        if handles:
+            fig.legend(handles, labels, loc="lower center",
+                       ncol=min(len(labels), 6), frameon=False, fontsize=8)
+        fig.suptitle(title, fontsize=13, y=0.995, color=_INK)
+        fig.tight_layout(rect=(0, 0.06, 1, 0.97))
+        fig.savefig(out_png, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        write_log(f"Wrote {out_png} ({len(tps)} timepoints, "
+                  f"{len(cond)} condition-timepoint rows)")
+        return out_png
+    except Exception as exc:                                   # noqa: BLE001
+        write_log(f"WARNING: the timecourse figure could not be drawn ({exc}). "
+                  "Every other output of this run is unaffected.")
+        log.warning("timecourse figure failed", exc_info=True)
+        return None

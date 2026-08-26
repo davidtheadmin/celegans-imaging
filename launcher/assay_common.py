@@ -218,10 +218,26 @@ class Aggregation:
     metrics: Sequence[Metric] = ()
     n_items: int = 0
     n_kept: int = 0
+    # Sorted unique timepoints in hours, empty for a run that has none. A
+    # single-folder run leaves this empty rather than putting [0.0] in it, so
+    # downstream code can ask "is this a timecourse?" with a plain truth test.
+    timepoints: list = field(default_factory=list)
+
+
+def _tp_of(r: dict) -> Optional[float]:
+    """A row's timepoint in hours, or None when the run has no timepoints."""
+    v = r.get("timepoint_h")
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
-              keep: Optional[Callable[[dict], bool]] = None) -> Aggregation:
+              keep: Optional[Callable[[dict], bool]] = None,
+              by_timepoint: bool = False) -> Aggregation:
     """Items (worms, colonies) -> per-plate rows -> per-condition rows.
 
     ``items`` each need "condition" and "plate"; everything else is metric
@@ -236,8 +252,26 @@ def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
     Per-condition rows carry ``<key>_mean`` / ``<key>_sd`` ACROSS PLATE MEANS —
     n_plates is the n — plus ``<key>_pooled_median`` over every item in the
     condition, for comparison with the pre-existing worm-pooled numbers.
+
+    ``by_timepoint`` adds the timepoint to both grouping keys, so a multi-folder
+    timecourse yields one plate row per (timepoint, condition, plate) and one
+    condition row per (timepoint, condition). Items must then carry
+    ``timepoint_h``. This mirrors what survival.aggregate does for Development,
+    and it is opt-in so a single-folder run produces byte-identical output to
+    before. The same plate name at two timepoints is two different plates —
+    which is correct: it was imaged twice, and averaging across the two would
+    hide exactly the change the timecourse exists to measure.
     """
     keep = keep or (lambda r: True)
+
+    def key_of(r: dict) -> tuple:
+        base = (str(r.get("condition", "")), str(r.get("plate", "")))
+        return ((_tp_of(r),) + base) if by_timepoint else base
+
+    def cond_key_of(r: dict) -> tuple:
+        c = str(r.get("condition", ""))
+        return ((_tp_of(r), c) if by_timepoint else (c,))
+
     by_plate: dict[tuple, list] = {}
     n_items = n_kept = 0
     for r in items:
@@ -245,42 +279,63 @@ def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
         if not keep(r):
             continue
         n_kept += 1
-        by_plate.setdefault((str(r.get("condition", "")),
-                             str(r.get("plate", ""))), []).append(r)
+        by_plate.setdefault(key_of(r), []).append(r)
 
     # every plate that produced items, plus the ones the gate emptied — a plate
     # with zero surviving worms is a result, not an absence
-    seen_plates = {(str(r.get("condition", "")), str(r.get("plate", "")))
-                   for r in items}
+    seen_plates = {key_of(r) for r in items}
+    counts: dict[tuple, int] = {}
+    for r in items:
+        k = key_of(r)
+        counts[k] = counts.get(k, 0) + 1
+
+    def _sortable(k: tuple) -> tuple:
+        # None sorts before any number without raising
+        return tuple((v is not None, v) if isinstance(v, (int, float)) or v is None
+                     else (True, v) for v in k)
 
     per_plate = []
-    for cond, plate in sorted(seen_plates):
-        rows = by_plate.get((cond, plate), [])
+    for k in sorted(seen_plates, key=_sortable):
+        tp = k[0] if by_timepoint else None
+        cond, plate = (k[1], k[2]) if by_timepoint else (k[0], k[1])
+        rows = by_plate.get(k, [])
         info = split_condition(cond)
         out = {"condition": cond, "strain": info["strain"], "dose": info["dose"],
                "unit": info["unit"], "plate": plate,
-               "n_items": sum(1 for r in items
-                              if str(r.get("condition", "")) == cond
-                              and str(r.get("plate", "")) == plate),
+               "n_items": counts.get(k, 0),
                "n_kept": len(rows)}
+        if by_timepoint:
+            out = {"timepoint_h": tp, **out}
         for m in metrics:
             vals = [r.get(m.key) for r in rows]
             out[m.key] = median(vals) if m.agg == "median" else mean(vals)
             out[f"n_{m.key}"] = len(_finite(vals))
         per_plate.append(out)
 
+    pooled_by_cond: dict[tuple, list] = {}
+    for r in items:
+        if keep(r):
+            pooled_by_cond.setdefault(cond_key_of(r), []).append(r)
+
     per_condition = []
-    for cond in sorted({p["condition"] for p in per_plate}):
-        plates = [p for p in per_plate if p["condition"] == cond]
+    cond_keys = {((p.get("timepoint_h"), p["condition"]) if by_timepoint
+                  else (p["condition"],)) for p in per_plate}
+    for ck in sorted(cond_keys, key=_sortable):
+        cond = ck[1] if by_timepoint else ck[0]
+        tp = ck[0] if by_timepoint else None
+        plates = [p for p in per_plate
+                  if p["condition"] == cond
+                  and (not by_timepoint or p.get("timepoint_h") == tp)]
         info = split_condition(cond)
-        pooled = [r for r in items
-                  if str(r.get("condition", "")) == cond and keep(r)]
+        pooled = pooled_by_cond.get(ck, [])
         out = {"condition": cond, "strain": info["strain"], "dose": info["dose"],
                "unit": info["unit"], "parsed": info["parsed"],
                "n_plates": len(plates),
                "n_plates_with_data": sum(1 for p in plates if p["n_kept"]),
                "n_items": sum(p["n_items"] for p in plates),
                "n_kept": sum(p["n_kept"] for p in plates)}
+        if by_timepoint:
+            out = {"timepoint_h": tp, **out}
         for m in metrics:
             plate_vals = [p[m.key] for p in plates]
             out[f"{m.key}_mean"] = mean(plate_vals)
@@ -289,8 +344,11 @@ def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
                                                     for r in pooled])
         per_condition.append(out)
 
+    tps = sorted({t for t in (_tp_of(r) for r in items) if t is not None}) \
+        if by_timepoint else []
     return Aggregation(per_plate=per_plate, per_condition=per_condition,
-                       metrics=list(metrics), n_items=n_items, n_kept=n_kept)
+                       metrics=list(metrics), n_items=n_items, n_kept=n_kept,
+                       timepoints=tps)
 
 
 def survival_series(agg: "Aggregation", metric_key: str,

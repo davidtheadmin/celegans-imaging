@@ -142,7 +142,7 @@ def render_path_traces(
     out_path: Path,
     fps: float,
     window_s: float = 10.0,
-    worm_index_map: "dict[int, int] | None" = None,
+    worm_index_map: "dict | None" = None,
     reversal_frames: "dict[int, list] | None" = None,
     arrow_data: "dict[int, dict] | None" = None,
 ) -> None:
@@ -206,18 +206,25 @@ def render_path_traces(
     # trails to filter-passing worms.
     accum: dict[int, list[tuple[np.ndarray, np.ndarray, np.ndarray]]] = {}
     for w, g in df.groupby("wi"):
-        if worm_index_map is not None:
-            gi = worm_index_map.get(int(w))
-            if gi is None:
-                continue
-        else:
-            gi = int(w)
         g = g.sort_values("fn")
-        accum.setdefault(gi, []).append((
-            g["fn"].values.astype(np.int64),
-            g["x"].values.astype(np.float64),
-            g["y"].values.astype(np.float64),
-        ))
+        fn = g["fn"].values.astype(np.int64)
+        xs = g["x"].values.astype(np.float64)
+        ys = g["y"].values.astype(np.float64)
+        if worm_index_map is None:
+            accum.setdefault(int(w), []).append((fn, xs, ys))
+            continue
+        # A fragment cut at a collision belongs to different tracks in
+        # different frame windows, so its trail is split the same way — see
+        # render_video.resolve_worm_id.
+        v = worm_index_map.get(int(w))
+        if v is None:
+            continue
+        spans = ([(-1, 1 << 62, int(v))] if isinstance(v, (int, np.integer))
+                 else [(int(a), int(b), int(gi)) for a, b, gi in v])
+        for f0, f1, gi in spans:
+            m = (fn >= f0) & (fn <= f1)
+            if m.any():
+                accum.setdefault(gi, []).append((fn[m], xs[m], ys[m]))
 
     # Merge each grouped worm's member tracks into one frame-sorted track.
     worm_tracks: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}

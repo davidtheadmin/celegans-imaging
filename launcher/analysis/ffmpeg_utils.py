@@ -82,7 +82,8 @@ def probe_duration(video: Path) -> float:
         return 0.0
 
 
-def convert_to_avi(mp4: Path, avi: Path, threads: int | None = None) -> None:
+def convert_to_avi(mp4: Path, avi: Path, threads: int | None = None,
+                   flat_field: bool = False) -> None:
     """
     Convert mp4 to MJPEG AVI at quality 3. Skips if avi already exists.
     Raises RuntimeError on ffmpeg failure.
@@ -91,10 +92,42 @@ def convert_to_avi(mp4: Path, avi: Path, threads: int | None = None) -> None:
     transcodes run concurrently to avoid oversubscribing the CPU. None (the
     default) leaves ffmpeg's automatic threading unchanged. MJPEG (-q:v 3) is
     intra-frame, so the thread count does not affect the encoded output.
+
+    `flat_field` subtracts the video's own illumination field during this same
+    pass — see analysis.flatfield for why (the capture head lights the frame
+    unevenly, which was costing roughly two thirds of the skeletons at the
+    frame edges). Doing it here rather than as a second pass matters: the
+    correction then adds no extra generation of lossy compression over the
+    plain transcode it replaces. A video whose gradient is below
+    flatfield.MIN_GRADIENT is left alone and takes the plain path.
     """
     if avi.exists():
         log.info("AVI already exists, skipping conversion: %s", avi.name)
         return
+
+    if flat_field:
+        from analysis import flatfield
+        try:
+            field, ratio = flatfield.load_or_build_field(
+                mp4, flatfield.field_path(avi))
+            if ratio >= flatfield.MIN_GRADIENT:
+                log.info("flat-field: %s rim/centre %.2f -> correcting",
+                         mp4.name, ratio)
+                flatfield.transcode_corrected(mp4, avi, field, threads=threads)
+                return
+            log.info("flat-field: %s rim/centre %.2f is below %.2f -> "
+                     "leaving the video uncorrected",
+                     mp4.name, ratio, flatfield.MIN_GRADIENT)
+        except Exception:
+            # A correction failure must not cost the whole run: fall through to
+            # the plain transcode and say so loudly.
+            log.warning("flat-field correction failed for %s; falling back to "
+                        "an uncorrected transcode", mp4.name, exc_info=True)
+            if avi.exists():
+                try:
+                    avi.unlink()
+                except OSError:
+                    pass
     cmd = ["ffmpeg", "-y", "-i", str(mp4), "-vcodec", "mjpeg", "-q:v", "3"]
     if threads is not None:
         cmd += ["-threads", str(threads)]
@@ -106,3 +139,17 @@ def convert_to_avi(mp4: Path, avi: Path, threads: int | None = None) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {result.stderr.strip()[-500:]}")
+    # An AVI that exists is not an AVI that finished. A killed or timed-out
+    # ffmpeg leaves the RIFF size at its 0xFFFFFFFF placeholder and no idx1
+    # index, and both OpenCV and Tierpsy will open such a file and silently
+    # read it short — an entire analysis built on a truncated video, with
+    # nothing anywhere saying so. Two seeks to rule it out.
+    from analysis import flatfield
+    try:
+        flatfield.verify_avi(avi)
+    except Exception:
+        try:
+            avi.unlink()
+        except OSError:
+            pass
+        raise

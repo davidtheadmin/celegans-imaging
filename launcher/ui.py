@@ -643,13 +643,16 @@ class AnalysisDialog(ctk.CTkToplevel):
     _WIDTH = 520
     # Segment labels are capitalised for display; _on_segment maps each back to
     # the canonical mode string the agents/_start expect.
+    # Order here IS the left-to-right order of the segmented button. The three
+    # worm assays come first because they are what a run is usually about;
+    # Colony Survival is a mammalian-cell assay and sits last.
     _MODE_LABELS = {
         "Motility": "motility",
         "Crawling": "crawling",
-        "Colony Survival": "counting",
         # User-facing rename only. The canonical mode string, the agent class
         # and the config fields all still say "survival" — see survival.py.
         "Development": "survival",
+        "Colony Survival": "counting",
     }
 
     def __init__(
@@ -766,6 +769,37 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._browse_btn.configure(width=36)
         self._browse_btn.grid(row=1, column=2, **pad)
 
+        # Row 1 (alternate) — folder LIST for the two video assays. Several
+        # folders make a timecourse: each folder is one timepoint, every worm
+        # row is stamped with it, and the figures gain a time axis. One folder
+        # is a list of one and behaves exactly as the single picker did.
+        # Colony Survival keeps the single picker above.
+        self._video_folder_box = ctk.CTkFrame(form, fg_color="transparent")
+        ctk.CTkLabel(
+            self._video_folder_box,
+            text="Video folders — one per timepoint",
+            font=theme.body_bold(), text_color=theme.TEXT, anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        self._video_folders = widgets.FolderTimeList(
+            self._video_folder_box, max_rows=6)
+        self._video_folders.pack(fill="x", pady=(0, 4))
+        _vbtns = ctk.CTkFrame(self._video_folder_box, fg_color="transparent")
+        _vbtns.pack(anchor="w", fill="x", pady=(0, 2))
+        widgets.secondary_button(
+            _vbtns, "Add folder…", self._video_add_folder).pack(side="left")
+        widgets.secondary_button(
+            _vbtns, "Remove selected", self._video_remove_folder,
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkLabel(
+            self._video_folder_box,
+            text=("Leave the timepoint blank to read it from the video "
+                  "filenames. Results are written into the FIRST folder. "
+                  "Folders already analysed with the same settings are reused, "
+                  "not re-analysed."),
+            font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
+            justify="left", wraplength=440,
+        ).pack(anchor="w")
+
         # Min fragment length (s) is built inside the motility Card (see below)
         # so it shows/hides with that card. _start still reads _threshold_var.
         self._threshold_var = tk.StringVar(
@@ -869,16 +903,21 @@ class AnalysisDialog(ctk.CTkToplevel):
         _min_track_row = ctk.CTkFrame(crawl_frame, fg_color="transparent")
         _min_track_row.pack(anchor="w", fill="x", pady=(6, 0))
         _min_track_lbl = ctk.CTkLabel(
-            _min_track_row, text="Min track span (s)", font=theme.body(),
+            _min_track_row, text="Min track length (s)", font=theme.body(),
             text_color=theme.TEXT, anchor="w",
         )
         _min_track_lbl.pack(side="left")
         widgets.Tooltip(
             _min_track_lbl,
-            "Crawling worms tracked for less than this are dropped from aggregation.",
+            "Tracks shorter than this are dropped from aggregation. This is now "
+            "the ONLY quality gate — the old hidden 70% skeleton-coverage "
+            "requirement has been removed, and coverage is reported per track "
+            "in the per_worm sheet instead. One animal may yield several tracks "
+            "when it passes another worm, which is intended: n counts tracks, "
+            "not animals.",
         )
         self._crawl_min_track = tk.StringVar(
-            value=str(int(getattr(self._settings, "crawling_min_track_s", 30)))
+            value=str(int(getattr(self._settings, "crawling_min_track_s", 10)))
         )
         widgets.Spin(
             _min_track_row, self._crawl_min_track,
@@ -886,7 +925,7 @@ class AnalysisDialog(ctk.CTkToplevel):
         ).pack(side="left", padx=(6, 0))
         ctk.CTkLabel(
             crawl_frame,
-            text="Worms on the plate for less than this span are dropped from the aggregate and not drawn.",
+            text="Tracks shorter than this are dropped from the aggregate and not drawn. Coverage is reported, not gated.",
             font=theme.caption(), text_color=theme.TEXT_2, anchor="w",
             justify="left", wraplength=360,
         ).pack(anchor="w", pady=(2, 0))
@@ -1331,7 +1370,7 @@ class AnalysisDialog(ctk.CTkToplevel):
 
     def _reset_crawling(self) -> None:
         self._crawl_min_track.set(
-            str(int(self._default("crawling_min_track_s", 30))))
+            str(int(self._default("crawling_min_track_s", 10))))
         for var in (self._crawl_tracked, self._crawl_sidebyside,
                     self._crawl_path_traces):
             var.set(False)
@@ -1398,6 +1437,32 @@ class AnalysisDialog(ctk.CTkToplevel):
         if path:
             self._folder_var.set(path)
 
+    # -- Motility / crawling folder list -----------------------------------
+    def _video_add_folder(self) -> None:
+        """One askdirectory() per Add: Tk has no multi-directory picker."""
+        existing = self._video_folders.folders()
+        initial = existing[-1] if existing else (
+            self._folder_var.get() or self._settings.mirror_root)
+        path = filedialog.askdirectory(initialdir=initial, parent=self)
+        if not path:
+            return
+        if path in existing:
+            messagebox.showinfo(
+                "Already added",
+                "That folder is already in the list.", parent=self)
+            return
+        self._video_folders.add(path)
+
+    def _video_remove_folder(self) -> None:
+        idx = self._video_folders.selected_index()
+        if idx is None:
+            messagebox.showinfo(
+                "Nothing selected",
+                "Click a folder in the list first, then Remove selected.",
+                parent=self)
+            return
+        self._video_folders.remove(idx)
+
     # -- Development folder list -------------------------------------------
     def _surv_add_folder(self) -> None:
         """One askdirectory() per Add: Tk has no multi-directory picker."""
@@ -1439,9 +1504,13 @@ class AnalysisDialog(ctk.CTkToplevel):
         self._crawling_render_frame.grid_remove()
         self._counting_frame.grid_remove()
         self._survival_frame.grid_remove()
+        self._video_folder_box.grid_remove()
 
         if mode == "counting":
             self._clear_cache_check.grid_remove()
+            self._folder_label.grid(row=1, column=0, sticky="w", padx=12, pady=6)
+            self._folder_entry.grid(row=1, column=1, sticky="ew", padx=12, pady=6)
+            self._browse_btn.grid(row=1, column=2, padx=12, pady=6)
             self._counting_frame.grid(
                 row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2)
             )
@@ -1460,9 +1529,12 @@ class AnalysisDialog(ctk.CTkToplevel):
             )
             return
 
-        self._folder_label.grid(row=1, column=0, sticky="w", padx=12, pady=6)
-        self._folder_entry.grid(row=1, column=1, sticky="ew", padx=12, pady=6)
-        self._browse_btn.grid(row=1, column=2, padx=12, pady=6)
+        # motility / crawling: the folder LIST takes the row-1 slot
+        self._folder_label.grid_remove()
+        self._folder_entry.grid_remove()
+        self._browse_btn.grid_remove()
+        self._video_folder_box.grid(
+            row=1, column=0, columnspan=3, sticky="ew", padx=12, pady=(4, 2))
         self._clear_cache_check.grid()
         if mode == "crawling":
             self._crawling_render_frame.grid(
@@ -1650,12 +1722,47 @@ class AnalysisDialog(ctk.CTkToplevel):
             self._start_development()
             return
 
-        folder = Path(self._folder_var.get().strip())
-        if not folder.is_dir():
-            messagebox.showerror(
-                "Invalid folder", f"Folder not found:\n{folder}", parent=self
-            )
-            return
+        video_mode = self._mode.get() in ("motility", "crawling")
+        video_plans: list = []
+        if video_mode:
+            # The two video assays take a LIST of folders, one per timepoint.
+            entries = self._video_folders.entries()
+            if not entries:
+                messagebox.showerror(
+                    "No folders", "Add at least one video folder.", parent=self)
+                return
+            missing = [q for q, _t in entries if not Path(q).is_dir()]
+            if missing:
+                messagebox.showerror(
+                    "Invalid folder",
+                    "Folder not found:\n" + "\n".join(missing), parent=self)
+                return
+            from analysis.ffmpeg_utils import find_videos
+            empty = [q for q, _t in entries if not find_videos(Path(q))]
+            if empty:
+                messagebox.showerror(
+                    "No videos",
+                    "No .mp4 files were found in:\n" + "\n".join(empty),
+                    parent=self)
+                return
+            video_plans = resolve_timepoints(
+                [(Path(q), t) for q, t in entries],
+                discover=find_videos, kind="video",
+                example="20260530T153913_video.mp4")
+            tp_errors = [pl.error for pl in video_plans if pl.error]
+            if tp_errors:
+                messagebox.showerror(
+                    "Every folder needs a timepoint",
+                    "\n\n".join(tp_errors), parent=self)
+                return
+            folder = Path(video_plans[0].folder)
+        else:
+            folder = Path(self._folder_var.get().strip())
+            if not folder.is_dir():
+                messagebox.showerror(
+                    "Invalid folder", f"Folder not found:\n{folder}", parent=self
+                )
+                return
 
         # Counting is pure-Python image analysis: no Docker/ffmpeg/threshold.
         # It validates its own two knobs, runs its own pre-flight, and starts.
@@ -1760,7 +1867,7 @@ class AnalysisDialog(ctk.CTkToplevel):
             )
             return
 
-        min_span_s = 30.0
+        min_span_s = 10.0
         if self._mode.get() == "crawling":
             try:
                 min_span_s = float(self._crawl_min_track.get())
@@ -1798,7 +1905,7 @@ class AnalysisDialog(ctk.CTkToplevel):
 
         if self._mode.get() == "crawling":
             agent.start_analysis(
-                folder,
+                video_plans,
                 threshold_s=threshold_s,
                 clear_cache=self._clear_cache_var.get(),
                 want_tracked=self._crawl_tracked.get(),
@@ -1808,7 +1915,7 @@ class AnalysisDialog(ctk.CTkToplevel):
             )
         else:
             agent.start_analysis(
-                folder,
+                video_plans,
                 threshold_s=threshold_s,
                 clear_cache=self._clear_cache_var.get(),
                 want_tracked=self._want_tracked.get(),
@@ -2440,7 +2547,7 @@ class MainWindow(ctk.CTk):
         self._analysis_btn.pack(fill="x", pady=3)
         widgets.Tooltip(
             self._analysis_btn,
-            "Run motility, crawling, colony survival, or development",
+            "Run motility, crawling, development, or colony survival",
         )
 
         review_btn = widgets.IconButton(
@@ -2699,8 +2806,8 @@ class MainWindow(ctk.CTk):
         for kind, st, noun in (
             ("Motility", self._motility_status, "video"),
             ("Crawling", self._crawling_status, "video"),
-            ("Counting", self._counting_status, "plate"),
             ("Development", self._survival_status, "plate"),
+            ("Counting", self._counting_status, "plate"),
         ):
             result = st.pop_completed()
             if result:
