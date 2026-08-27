@@ -297,6 +297,7 @@ def _process_one_video_motility(
                  "re-running Tierpsy.")
 
         if cache_hit:
+            stage("Reusing cached tracking")
             hdf5_path = candidate_hdf5
             needs_avi = (want_tracked or want_curvature
                          or want_sidebyside or want_per_worm_traces)
@@ -375,6 +376,7 @@ def _process_one_video_motility(
         )
 
         if fragment_rows and hdf5_path:
+            stage("Drawing the summary plot")
             plot_path = per_video_dir / f"{_pv_prefix(condition, plate, timepoint_h)}.png"
             make_video_summary_png(fragment_rows, hdf5_path, fps, plot_path,
                                    head_angle_prominence)
@@ -403,17 +405,20 @@ def _process_one_video_motility(
                         worm_index_map[int(tid)] = int(wi)
 
             if want_tracked and skeletons_hdf5.exists() and avi.exists():
+                stage("Rendering the tracked video")
                 render_tracked(
                     avi, skeletons_hdf5,
                     per_video_dir / f"{prefix}_tracked.mp4", fps,
                     worm_index_map=worm_index_map,
                 )
             if want_curvature and skeletons_hdf5.exists() and hdf5_path and avi.exists():
+                stage("Rendering the curvature video")
                 render_curvature(
                     avi, skeletons_hdf5, hdf5_path,
                     per_video_dir / f"{prefix}_curvature.mp4", fps,
                 )
             if want_sidebyside and masked_hdf5.exists() and skeletons_hdf5.exists() and avi.exists():
+                stage("Rendering the side-by-side video")
                 render_sidebyside(
                     avi, masked_hdf5, skeletons_hdf5,
                     per_video_dir / f"{prefix}_sidebyside.mp4", fps,
@@ -426,7 +431,9 @@ def _process_one_video_motility(
                              if r.get("is_long")]
                 traces_dir = per_video_dir / f"{prefix}_traces"
                 traces_dir.mkdir(exist_ok=True)
-                for worm_row in long_rows:
+                for _i, worm_row in enumerate(long_rows, 1):
+                    stage(f"Rendering per-worm traces "
+                          f"({_i}/{len(long_rows)})")
                     wi = worm_row.get("repr_tierpsy_id", worm_row["worm_index"])
                     member_ids = worm_row.get("member_tierpsy_ids", [wi])
                     make_per_worm_trace_png(
