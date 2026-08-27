@@ -137,7 +137,7 @@ def test_motility_tuning() -> None:
     check(names >= {"DISTANCE_THRESHOLD_PIXELS", "TIME_GAP_THRESHOLD_SECONDS",
                     "MIN_OBSERVATION_TIME_SECONDS", "COLLISION_WORM_COUNT_CAP",
                     "DEBRIS_DISPLACEMENT_PIXELS", "DEBRIS_SPEED_MAX",
-                    "DEBRIS_STATIC_DISPLACEMENT_PX", "DEBRIS_OVERLONG_FACTOR"},
+                    "DEBRIS_BLOB_SOLIDITY_MIN"},
           "the tuning block is collected by scanning, not by a hand-kept list")
     for name in ac.tuning_constants():
         old = getattr(ac, name)

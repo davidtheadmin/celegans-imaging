@@ -31,16 +31,25 @@ DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
 DEBRIS_LENGTH_CV_MIN: float = 0.10         # debris filter: flickery if length_cv exceeds this
 DEBRIS_SOLIDITY_MIN: float = 0.6           # debris filter: blob-shaped if solidity_median exceeds this
 DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real worm (safety gate)
-# Plate-edge / rigid-structure debris. Flat-field correction lifted the
-# periphery enough that the plate edge now segments as an object, and it falls
-# between the first two rules: rule 1 misses it because skeleton flicker along
-# a static arc fakes a bend rate, and rule 2 misses it because a thin arc has
-# LOW solidity where that rule requires high.
-DEBRIS_STATIC_DISPLACEMENT_PX: float = 3.0   # rule 3: does not move at all
-DEBRIS_RIGID_LENGTH_CV_MAX: float = 0.03     # rule 3: shape never changes
-DEBRIS_RIGID_SOLIDITY_MAX: float = 0.35      # rule 3: thin arc, not a blob
-DEBRIS_OVERLONG_FACTOR: float = 1.8          # rule 4: x the video's median worm length
-DEBRIS_OVERLONG_MIN_REFERENCE: int = 5       # rule 4: worms needed before that median is trusted
+# Plate-edge debris. Flat-field correction lifted the periphery enough that
+# the plate edge segments as an object, and it lands between the first two
+# rules: rule 1 needs displacement under 8 px and the edge measured 11.9, and
+# rule 2 needs length_cv over 0.10 to call something flickery and the edge is
+# rock steady at 0.057.
+#
+# MEASURED, on the 27 Aug 260521_Motility run, 144 worms, 36 videos. Solidity
+# separates cleanly and nothing else does: real swimmers run 0.26-0.51
+# (p50 0.35, p95 0.44), then a gap, then 0.619 and 0.793 — the two plate-edge
+# objects, one of which is `601 0J plate 02` worm 0, the one David identified
+# by eye. A swimming worm is a thin curve and fills little of its convex hull;
+# the edge fragment is a compact blob.
+#
+# The threshold sits at 0.55, above every real worm by 0.04 and below both
+# suspects by 0.07. It is deliberately NOT a motion test: at 30 J the animals
+# ARE paralysed, so "does not move" is the phenotype, not the artefact —
+# `601 30J plate 01` worm 2 has bpm 0.00 and speed 3.94 and must survive. It
+# does: its solidity is 0.475.
+DEBRIS_BLOB_SOLIDITY_MIN: float = 0.55       # rule 3: a blob, not a worm
 
 
 # ---------------------------------------------------------------------------
@@ -592,15 +601,15 @@ def read_fragments(
             rows.extend(group_rows)
 
     # ---- Debris filter (applied after multi-collision expansion) ----
-    # Rule 4 needs the video's OWN worm-length distribution. With too few
-    # objects the median is not a population, it is one of the suspects, so the
-    # rule is skipped and the skip is recorded — the same guard the crawling
-    # skeleton floor uses when every fragment would be dropped.
+    # length_median is RECORDED but not gated on. An "it is far longer than any
+    # worm here" rule was written and then dropped: on the only real evidence we
+    # have, the plate-edge objects are compact blobs, not overlong arcs, so the
+    # rule had nothing behind it. The column is kept so the next run can say
+    # whether an overlong population exists at all.
     _ref_lengths = [r["length_median"] for r in rows
                     if r.get("length_median") is not None]
     overlong_ref = (float(np.median(_ref_lengths))
-                    if len(_ref_lengths) >= DEBRIS_OVERLONG_MIN_REFERENCE
-                    else None)
+                    if len(_ref_lengths) >= 5 else None)
     keep_rows: list[dict] = []
     for r in rows:
         # Rule 1: stationary debris (curl_count guard removed)
@@ -615,30 +624,23 @@ def read_fragments(
             and sol is not None and sol == sol and sol > DEBRIS_SOLIDITY_MIN
             and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
         )
-        # Rule 3: a rigid, static structure — the plate edge. It does not
-        # move, its shape does not change, and it is thin. A paralysed worm
-        # survives all three: a soft body's skeleton length still varies frame
-        # to frame, and a worm fills far more of its convex hull than an arc.
-        rule3 = (r["displacement_px"] < DEBRIS_STATIC_DISPLACEMENT_PX
-                 and lcv is not None and lcv == lcv
-                 and lcv < DEBRIS_RIGID_LENGTH_CV_MAX
-                 and sol is not None and sol == sol
-                 and sol < DEBRIS_RIGID_SOLIDITY_MAX)
-        # Rule 4: far longer than any worm on this plate, and going nowhere.
-        # Length is the one worm-shaped property an arc cannot fake.
+        # Rule 3: a blob that does not swim — the plate edge. Rule 2 without
+        # the flicker requirement: debris does not have to shimmer to be
+        # debris, it only has to be the wrong shape and going nowhere. Shape
+        # carries this rule on purpose; see the note on the constant.
+        rule3 = (sol is not None and sol == sol
+                 and sol > DEBRIS_BLOB_SOLIDITY_MIN
+                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
+                 and r["bpm"] < DEBRIS_BPM_THRESHOLD)
         lmed = r.get("length_median")
-        rule4 = (overlong_ref is not None
-                 and lmed is not None and lmed == lmed
-                 and lmed > overlong_ref * DEBRIS_OVERLONG_FACTOR
-                 and r["displacement_px"] < DEBRIS_DISPLACEMENT_PIXELS)
-        if rule1 or rule2 or rule3 or rule4:
+        if rule1 or rule2 or rule3:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
             dropped_tracks.append({
                 "tierpsy_id": tid,
                 "reason": "debris",
                 "debris_rule": ("rule1" if rule1 else "rule2" if rule2
-                                else "rule3" if rule3 else "rule4"),
+                                else "rule3"),
                 "longest_clean_duration_s": round(r["duration_s"], 3),
                 "total_flicker_frames": fl.get("total_flicker_frames", 0),
                 "n_fragments_in_group": r.get("fragment_count", 1),
@@ -684,9 +686,8 @@ def read_fragments(
             "debris_by_rule": debris_by_rule,
         },
         "plate_edge_filter": {
-            "overlong_reference_px": (round(overlong_ref, 2)
+            "median_worm_length_px": (round(overlong_ref, 2)
                                       if overlong_ref is not None else None),
-            "skipped_no_reference": overlong_ref is None,
             "reference_worms": len(_ref_lengths),
         },
         "flicker_stats": {
@@ -733,8 +734,7 @@ def _empty_log() -> dict:
             "debris_by_rule": {},
         },
         "plate_edge_filter": {
-            "overlong_reference_px": None,
-            "skipped_no_reference": True,
+            "median_worm_length_px": None,
             "reference_worms": 0,
         },
         "flicker_stats": {"total_flicker_frames": 0, "tracks_with_any_flicker": 0, "tracks_dropped_due_to_flicker": 0},
