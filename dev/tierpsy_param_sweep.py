@@ -87,6 +87,7 @@ import numpy as np                                                # noqa: E402
 import pandas as pd                                               # noqa: E402
 import h5py                                                       # noqa: E402
 from analysis.docker_utils import run_tierpsy                      # noqa: E402
+from analysis.motility import _WORMSCAN_ONLY_KEYS                  # noqa: E402
 
 FIELDS = ["cell", "traj_min_area", "mask_min_area", "worm_bw_thresh_factor",
           "n_tracks", "n_specks", "n_long", "n_wormlike", "n_good",
@@ -165,7 +166,18 @@ def run_cell(cell: dict, avi: Path, base: dict, outdir: Path, args) -> dict:
             shutil.rmtree(d, ignore_errors=True)
         d.mkdir(parents=True)
         shutil.copy2(avi, d / avi.name)
+        # Same preparation the pipeline does before handing the file to
+        # Tierpsy (motility.py, "params = copy.deepcopy(params_template)"):
+        # expected_fps is patched per video, and the WormScan-only keys are
+        # removed because Tierpsy rejects parameters it does not know and exits
+        # 1 before processing a single frame. Leaving head_angle_prominence in
+        # is what made the first run of this script fail all 12 cells in four
+        # seconds each.
         params = dict(base)
+        if "expected_fps" in params:
+            params["expected_fps"] = args.fps
+        for k in _WORMSCAN_ONLY_KEYS:
+            params.pop(k, None)
         params.update({k: cell[k] for k in
                        ("traj_min_area", "mask_min_area",
                         "worm_bw_thresh_factor")})
@@ -175,12 +187,21 @@ def run_cell(cell: dict, avi: Path, base: dict, outdir: Path, args) -> dict:
         log(f"  [{cell['cell']}] tierpsy: traj_min_area={cell['traj_min_area']} "
             f"mask_min_area={cell['mask_min_area']} "
             f"bw={cell['worm_bw_thresh_factor']}")
-        run_tierpsy(d / avi.name, pj, args.image, docker_cmd=args.docker,
-                    timeout_s=args.timeout)
+        out, _ = run_tierpsy(d / avi.name, pj, args.image,
+                             docker_cmd=args.docker, timeout_s=args.timeout)
+        (outdir / f"cell_{cell['cell']}.log").write_text(out, encoding="utf-8",
+                                                         errors="replace")
         row.update(measure(d / "Results", args.min_dur, args.area_min,
                            args.area_max, args.fps))
     except Exception as exc:                                       # noqa: BLE001
-        row["status"] = f"FAILED: {type(exc).__name__}: {exc}"[:300]
+        # The whole message goes to a file — a truncated traceback in a
+        # terminal is how the first failure of this script stayed a mystery
+        # for a round trip.
+        txt = f"{type(exc).__name__}: {exc}"
+        (outdir / f"cell_{cell['cell']}.error.log").write_text(
+            txt, encoding="utf-8", errors="replace")
+        first = next((ln for ln in reversed(txt.splitlines()) if ln.strip()), "")
+        row["status"] = f"FAILED: {first}"[:200]
     row["seconds"] = round(time.time() - t0, 1)
     if not args.keep:
         shutil.rmtree(d, ignore_errors=True)
