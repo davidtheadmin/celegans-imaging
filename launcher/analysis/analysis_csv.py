@@ -63,6 +63,21 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 EDGE_ASPECT_MIN: float = 15.0                # rule 3: major/minor, worms top out at 9.6
 EDGE_MINOR_AXIS_MAX: float = 4.0             # rule 3: px, the thinnest real worm is 6.5
 
+# Rule 4 — a NON-MOVING object with a worm's AREA but nothing like a worm's
+# LENGTH. David identified worm 7 of `601 10J plate 02` as debris; measured
+# under the adopted parameters it is the clearest separation in the file:
+#
+#                       area    length   solidity  compactness  skel cov
+#   the debris           646     43.7      0.832      0.550       0.14
+#   the five real worms 648-836 106-120  0.39-0.50  0.13-0.16   0.50-1.00
+#
+# Area is useless here — 646 against 648. Length is a 2.4x gap with nothing in
+# between. The rule is RELATIVE to the video's own median worm length, not an
+# absolute pixel count, because every absolute threshold in this file has had
+# to be refitted each time the binarisation moved. A ratio does not.
+# The debris sits at 0.38 of the median; the real worms at 0.92-1.03.
+DEBRIS_SHORT_LENGTH_FRAC: float = 0.55       # rule 4: x the video's median worm length
+
 
 # ---------------------------------------------------------------------------
 # What the run cache is allowed to reuse. See run_cache.settings_digest.
@@ -100,7 +115,7 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 4,   # 4: + minor_axis_median, aspect_median
+        "row_schema": 5,   # 5: rule 4 changes which rows survive
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -628,15 +643,16 @@ def read_fragments(
             rows.extend(group_rows)
 
     # ---- Debris filter (applied after multi-collision expansion) ----
-    # length_median is RECORDED but not gated on. An "it is far longer than any
-    # worm here" rule was written and then dropped: on the only real evidence we
-    # have, the plate-edge objects are compact blobs, not overlong arcs, so the
-    # rule had nothing behind it. The column is kept so the next run can say
-    # whether an overlong population exists at all.
+    # Rule 4's reference: this video's own median worm length. With too few
+    # objects the median is not a population, it is one of the suspects, so the
+    # rule is skipped and the skip is recorded — the same guard the crawling
+    # skeleton floor uses. Note the median is taken over ALL rows including the
+    # debris; with one short object among six the median is unmoved, and a
+    # video that is mostly debris has no reference worth having anyway.
     _ref_lengths = [r["length_median"] for r in rows
                     if r.get("length_median") is not None]
-    overlong_ref = (float(np.median(_ref_lengths))
-                    if len(_ref_lengths) >= 5 else None)
+    length_ref = (float(np.median(_ref_lengths))
+                  if len(_ref_lengths) >= 5 else None)
     keep_rows: list[dict] = []
     for r in rows:
         # Rule 1: stationary debris (curl_count guard removed)
@@ -660,14 +676,23 @@ def read_fragments(
                  and asp is not None and asp == asp and asp > EDGE_ASPECT_MIN
                  and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
                  and r["bpm"] < DEBRIS_BPM_THRESHOLD)
-        if rule1 or rule2 or rule3:
+        # Rule 4: a worm's area, nothing like a worm's length, and going
+        # nowhere. length_median is NaN for an object with under ten
+        # skeletonised frames, and the rule then cannot fire — a real worm that
+        # barely skeletonises is kept, which is the safe direction.
+        rule4 = (length_ref is not None
+                 and lmed is not None and lmed == lmed
+                 and lmed < length_ref * DEBRIS_SHORT_LENGTH_FRAC
+                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
+                 and r["bpm"] < DEBRIS_BPM_THRESHOLD)
+        if rule1 or rule2 or rule3 or rule4:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
             dropped_tracks.append({
                 "tierpsy_id": tid,
                 "reason": "debris",
                 "debris_rule": ("rule1" if rule1 else "rule2" if rule2
-                                else "rule3"),
+                                else "rule3" if rule3 else "rule4"),
                 "minor_axis_median": mnr,
                 "aspect_median": asp,
                 "longest_clean_duration_s": round(r["duration_s"], 3),
@@ -715,10 +740,13 @@ def read_fragments(
             "debris_by_rule": debris_by_rule,
         },
         "plate_edge_filter": {
-            "note": ("rule 3 drops non-moving edge-shaped objects — see "
-                     "EDGE_ASPECT_MIN in analysis_csv.py"),
-            "median_worm_length_px": (round(overlong_ref, 2)
-                                      if overlong_ref is not None else None),
+            "note": ("rules 3 and 4 drop non-moving objects that are not "
+                     "worm-shaped — see EDGE_ASPECT_MIN and "
+                     "DEBRIS_SHORT_LENGTH_FRAC in analysis_csv.py"),
+            "median_worm_length_px": (round(length_ref, 2)
+                                      if length_ref is not None else None),
+            "short_object_cutoff_px": (round(length_ref * DEBRIS_SHORT_LENGTH_FRAC, 2)
+                                       if length_ref is not None else None),
             "reference_worms": len(_ref_lengths),
         },
         "flicker_stats": {
@@ -765,8 +793,9 @@ def _empty_log() -> dict:
             "debris_by_rule": {},
         },
         "plate_edge_filter": {
-            "note": "rule 3 drops non-moving edge-shaped objects",
+            "note": "rules 3 and 4 drop non-moving non-worm-shaped objects",
             "median_worm_length_px": None,
+            "short_object_cutoff_px": None,
             "reference_worms": 0,
         },
         "flicker_stats": {"total_flicker_frames": 0, "tracks_with_any_flicker": 0, "tracks_dropped_due_to_flicker": 0},
