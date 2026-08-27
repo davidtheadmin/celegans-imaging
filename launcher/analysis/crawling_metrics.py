@@ -62,9 +62,31 @@ METRIC_COLS: list[str] = [
     "fraction_paused",
     "reversal_count",
     "reversal_rate_per_min",
+    # Same events over MOVING time rather than observed time. reversal_rate_per_min
+    # divides by every observed frame, so it falls whenever speed falls — a paused
+    # animal cannot reverse — and ends up restating the speed column instead of
+    # adding to it. Dividing by the moving frames asks the separable question:
+    # while it was moving, how often did it turn round.
+    "reversal_rate_moving_per_min",
     "path_length_px",
     "net_displacement_px",
     "tortuosity",
+    # net / path, bounded 0-1: 1 is a straight line, 0 is covering ground without
+    # leaving. Tortuosity is this upside down and unbounded — it has
+    # net_displacement in the DENOMINATOR, so it diverges exactly where the animal
+    # stops, which is the condition the assay exists to detect. One worm that
+    # finished where it started took the condition mean with it (values of 17 in a
+    # column whose healthy value is 2). Same information, arithmetic that survives
+    # a mean.
+    "directionality",
+    # 1.0 when this worm's whole-track mean speed is under IMMOBILE_BL_PER_S, else
+    # 0.0 (NaN when the speed is unknown). Per-worm it is a flag; averaged over a
+    # plate by the aggregation layer it is the FRACTION OF ANIMALS IMMOBILE, which
+    # is what it exists for. A mean speed cannot distinguish a plate where every
+    # animal halved its speed from one where half the animals stopped, and those
+    # are different findings; this column separates them. Written as a float and
+    # not a bool on purpose: assay_common._finite drops bools.
+    "is_immobile",
     "mean_length_px",
     "mean_width_midbody_px",
     "track_duration_s",
@@ -134,7 +156,7 @@ ARROW_COLS: list[str] = [
 # video) follows the per-worm mean_length_px it is contrasted with.
 # (anchor_col, [cols_inserted_after_it]).
 _EXTRA_AFTER: list[tuple[str, list[str]]] = [
-    ("reversal_rate_per_min", ARROW_COLS),
+    ("reversal_rate_moving_per_min", ARROW_COLS),
     ("mean_speed_pxs", ["mean_speed_bls"]),
     ("mean_forward_speed_pxs", ["mean_forward_speed_bls"]),
     ("mean_backward_speed_pxs", ["mean_backward_speed_bls"]),
@@ -158,6 +180,39 @@ def _interleave_extra_cols(base: list[str]) -> list[str]:
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# Fragment-level skeleton floor, applied BEFORE the linker.
+#
+# WHAT IT REMOVES. Tierpsy's trajectories_data has one row per tracked BLOB per
+# frame, skeleton or not, and link_fragments has always grouped that table —
+# it needs only worm_index_joined, frame_number and the centroid, and never
+# looked at has_skeleton. So an object Tierpsy tracked but never once managed
+# to trace an outline for became a group, then a worm row, then a speed
+# averaged over a handful of frames. Those rows landed at ~0 speed and were
+# indistinguishable in the output from an animal that genuinely did not move.
+#
+# WHY BEFORE THE LINKER RATHER THAN AFTER. Phantom fragments do not merely add
+# rows: they occupy plate positions, so the linker refuses legitimate links to
+# space it believes is taken. Removing them first measurably declutters it —
+# links refused as "occupied" fell 303 -> 120 on a day-2 video and 197 -> 117
+# on a day-4 one. Filtering the finished worms could never recover that.
+#
+# WHY 0.05 AND NOT HIGHER. Measured on 27 videos / 20,411 fragments, the
+# distribution is sharply bimodal: 54 % of fragments sit under 0.02 while
+# carrying only 27 % of frames. A floor here can only ever delete a fragment
+# whole, so it must sit low enough that it cannot amputate part of a real
+# animal — and a fragment under 0.05 has no skeleton to lose. Running the real
+# linker at 0.5 instead halved the surviving worms (154 -> 84 on day 2), and
+# those losses were not phantoms: they were real worms whose tracks got shorter
+# when a member fragment was deleted and then fell under the span gate. 0.05
+# takes the objects that were never worms and leaves the rest to the span gate.
+#
+# On a clean video it is a no-op: day-0 601 0J has 16 fragments, the worst
+# covered at 0.92, and produces byte-identical output at 0, 0.05 and 0.5.
+# ---------------------------------------------------------------------------
+MIN_FRAGMENT_SKELETON_COVERAGE: float = 0.05
+
 # Boolean quality flag appended to every per-worm row (see _passes_filter).
 QUALITY_COL: str = "passed_filter"
 
@@ -172,6 +227,20 @@ _PAUSED_FRACTION_OF_MEDIAN = 0.10   # legacy, only the no-length fallback
 # conditions on purpose — see the paused-threshold note in
 # compute_crawling_metrics.
 PAUSED_BL_PER_S: float = 0.01
+
+# A worm counts as IMMOBILE when its whole-track mean |speed| is under this, in
+# body lengths per second. Distinct from PAUSED_BL_PER_S in what it applies to,
+# not just in value: paused is per FRAME (how much of its time was this animal
+# stopped), immobile is per ANIMAL (did this one move at all). Averaging the flag
+# over a plate gives the fraction of animals immobile.
+#
+# 0.02 BL/s is where the two populations in this dataset actually separate. Across
+# the five-day UV timecourse, unaffected animals sit at a p10 of 0.04-0.05 BL/s
+# and affected ones at a p75 of about 0.03; 0.02 falls in the gap with room on
+# both sides, and no condition's median lands near it. It is a fixed threshold on
+# purpose — a per-video or per-condition one would rescale its own definition of
+# immobile in exactly the conditions where most animals are.
+IMMOBILE_BL_PER_S: float = 0.02
 
 # A worm typically PAUSES briefly (measured motion_mode == 0) between forward and
 # backward motion during a real reversal — that pause is part of the reversal
@@ -772,14 +841,47 @@ def compute_crawling_metrics(
         log.warning("crawling: %s trajectories_data empty or missing columns", skeletons_path)
         return []
 
-    groups, refused, linker_log, traj_split = link_fragments(skel_traj, fps)
     n_fragments = int(skel_traj["worm_index_joined"].nunique())
+
+    # ---- drop fragments that were essentially never skeletonised ----------
+    # See MIN_FRAGMENT_SKELETON_COVERAGE. Counted into the sidecar so a video
+    # where this removes most of the plate is visible rather than silent.
+    frag_drop_log: dict = {"fragments_in": n_fragments,
+                           "fragments_dropped_no_skeleton": 0,
+                           "frames_dropped_no_skeleton": 0,
+                           "min_fragment_skeleton_coverage":
+                               MIN_FRAGMENT_SKELETON_COVERAGE}
+    if ("has_skeleton" in skel_traj.columns
+            and MIN_FRAGMENT_SKELETON_COVERAGE > 0):
+        _cov = skel_traj.groupby("worm_index_joined")["has_skeleton"].mean()
+        _keep = _cov.index[_cov.values >= MIN_FRAGMENT_SKELETON_COVERAGE]
+        if len(_keep) == 0:
+            # Every fragment is under the floor. That is a broken video, not a
+            # plate of motionless worms, and deleting all of it would report
+            # the same empty result as a video that failed to open. Keep the
+            # rows, say so, and let the span gate and skeleton_coverage column
+            # speak for themselves downstream.
+            log.warning("crawling: every fragment in %s is under the %.2f "
+                        "skeleton floor — filter skipped for this video",
+                        skeletons_path.name, MIN_FRAGMENT_SKELETON_COVERAGE)
+            frag_drop_log["fragments_dropped_no_skeleton"] = 0
+            frag_drop_log["filter_skipped_all_below_floor"] = True
+        else:
+            _mask = skel_traj["worm_index_joined"].isin(_keep)
+            frag_drop_log["fragments_dropped_no_skeleton"] = int(
+                n_fragments - len(_keep))
+            frag_drop_log["frames_dropped_no_skeleton"] = int((~_mask).sum())
+            skel_traj = skel_traj[_mask]
+
+    groups, refused, linker_log, traj_split = link_fragments(skel_traj, fps)
     if not groups:
         log.warning("crawling: linker produced no groups for %s", skeletons_path)
         if engine_log_out is not None:
+            engine_log_out.update(frag_drop_log)
             engine_log_out.update(linker_log)
         return []
     if engine_log_out is not None:
+        engine_log_out.update(frag_drop_log)
         engine_log_out.update(linker_log)
 
     has_skel_col = "has_skeleton" in skel_traj.columns
@@ -1043,6 +1145,23 @@ def compute_crawling_metrics(
         path_length_px, net_displacement_px, tortuosity = _combined_path_geometry(
             member_ids, traj_by_worm, fps
         )
+        # Bounded companion to tortuosity — see the directionality note in
+        # METRIC_COLS. NaN rather than 0 on a zero-length path: a worm that never
+        # moved has no direction, and 0 would be the claim that it had one and it
+        # went nowhere, which is a different (and measurable) thing.
+        directionality = (net_displacement_px / path_length_px
+                          if path_length_px and np.isfinite(path_length_px)
+                          and path_length_px > 0 else float("nan"))
+
+        # --- reversal rate over MOVING time (see METRIC_COLS) ---
+        fraction_paused = (float(np.mean(abs_speed < paused_threshold))
+                           if n else float("nan"))
+        moving_min = (observed_min * (1.0 - fraction_paused)
+                      if np.isfinite(fraction_paused) else float("nan"))
+        reversal_rate_moving_per_min = (
+            reversal_count / moving_min
+            if np.isfinite(moving_min) and moving_min > 1e-9
+            and np.isfinite(reversal_count) else float("nan"))
 
         # --- skeleton coverage + longest single-fragment continuous run ---
         skeleton_coverage, longest_continuous_run_s = _skel_coverage_and_run(
@@ -1107,6 +1226,7 @@ def compute_crawling_metrics(
             mean_backward_speed_pxs = float("nan")
             reversal_count = float("nan")
             reversal_rate_per_min = float("nan")
+            reversal_rate_moving_per_min = float("nan")
 
         rows.append({
             "condition": condition,
@@ -1132,13 +1252,17 @@ def compute_crawling_metrics(
             "mean_backward_speed_pxs": mean_backward_speed_pxs,
             "fraction_forward": (float(np.mean(speed > 0)) if n else float("nan")),
             "fraction_backward": (float(np.mean(speed < 0)) if n else float("nan")),
-            "fraction_paused": (float(np.mean(abs_speed < paused_threshold))
-                                if n else float("nan")),
+            "fraction_paused": fraction_paused,
             "reversal_count": reversal_count,
             "reversal_rate_per_min": reversal_rate_per_min,
+            "reversal_rate_moving_per_min": reversal_rate_moving_per_min,
             "path_length_px": path_length_px,
             "net_displacement_px": net_displacement_px,
             "tortuosity": tortuosity,
+            "directionality": directionality,
+            # Filled in the second pass, once the per-video body-length scalar
+            # that mean_speed_bls needs is known.
+            "is_immobile": float("nan"),
             "mean_length_px": mean_length_px,
             "mean_width_midbody_px": (_mean_finite(g["width_midbody"].values.astype(float))
                                       if "width_midbody" in g.columns else float("nan")),
@@ -1198,6 +1322,13 @@ def compute_crawling_metrics(
             r["arrow_reversal_event_frames"] = []
             r["arrow_turn_event_frames"] = []
         r["mean_speed_bls"] = _per_bodylength(r["mean_speed_pxs"], plate_mean_length_px)
+        # Per-animal immobility flag, as a float — see IMMOBILE_BL_PER_S and the
+        # is_immobile note in METRIC_COLS. NaN when the speed is unknown, never
+        # 0.0: an animal we could not measure is not an animal that moved.
+        _sp = r["mean_speed_bls"]
+        r["is_immobile"] = (float(_sp < IMMOBILE_BL_PER_S)
+                            if _sp is not None and np.isfinite(_sp)
+                            else float("nan"))
         r["mean_forward_speed_bls"] = _per_bodylength(r["mean_forward_speed_pxs"], plate_mean_length_px)
         r["mean_backward_speed_bls"] = _per_bodylength(r["mean_backward_speed_pxs"], plate_mean_length_px)
         r["mean_speed_when_moving_bls"] = _per_bodylength(r["mean_speed_when_moving"], plate_mean_length_px)

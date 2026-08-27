@@ -72,6 +72,7 @@ from datetime import datetime
 from pathlib import Path
 
 import paths
+from analysis.stage_tracker import StageTracker
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -635,6 +636,7 @@ def run_inference(
     rescore: bool = True,
     write_log: Callable[[str], None],
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    stage_cb: Optional[Callable[[str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> tuple[list[str], list[dict], dict]:
     """Call vision/infer_stage.py once for the whole image list via stdin.
@@ -1322,8 +1324,20 @@ def analyze(
         "counts first."
     )
 
+    # The live "what is it doing" channel for the progress dialog. Separate
+    # from write_log, which goes to log.txt and is read afterwards; this is
+    # overwritten in place and read while the run is going. See
+    # analysis/stage_tracker.py.
+    def stage(msg: str) -> None:
+        if stage_cb is not None:
+            try:
+                stage_cb(msg)
+            except Exception:                                      # noqa: BLE001
+                pass
+
     for i, (plan, images) in enumerate(zip(plans, per_folder_images)):
         write_log("-" * 60)
+        stage(f"Folder {i + 1}/{len(plans)}: reading previous results")
         write_log(f"Folder {i + 1}/{len(plans)}: {plan.folder}  "
                   f"({plan.hours:g} h, {len(images)} image(s))")
         if not images:
@@ -1397,6 +1411,8 @@ def analyze(
                 if progress_cb is not None:
                     progress_cb(_base + done, grand_total, name)
 
+            stage(f"Folder {i + 1}/{len(plans)}: running the stage model "
+                  f"on {len(fc.to_infer)} image(s)")
             names, fresh_records, m = run_inference(
                 fc.to_infer, class_conf,
                 exclude_classes=exclude_classes,
@@ -1414,6 +1430,7 @@ def analyze(
             if m and not meta:
                 meta = m
 
+        stage(f"Folder {i + 1}/{len(plans)}: grouping detections")
         mode, frac = decide_grouping_mode(images)
         modes.append(mode)
         encoded.append(frac)
@@ -1450,6 +1467,7 @@ def analyze(
             write_log("Cancelled — aggregating what was already inferred.")
             break
 
+    stage("Aggregating across folders")
     if not folder_runs:
         raise RuntimeError("No images found in any of the selected folders.")
 
@@ -1725,6 +1743,9 @@ class SurvivalSnapshot:
     total: int
     current_basename: str
     current_stage: str
+    # What the run is doing right now, phases grouped and counted. Empty for a
+    # pipeline that reports none; see analysis/stage_tracker.py.
+    stage_detail: str = ""
 
 
 class SurvivalStatus:
@@ -1743,6 +1764,8 @@ class SurvivalStatus:
         self._total = 0
         self._current_basename = ""
         self._current_stage = ""
+        # Live phases; its own lock (analysis/stage_tracker.py).
+        self.stages = StageTracker()
         self._completed_result: Optional[dict] = None
 
     def update(
@@ -1779,6 +1802,7 @@ class SurvivalStatus:
             self._label = "Analysis failed — see log"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": True,
                 "error": error,
@@ -1797,6 +1821,7 @@ class SurvivalStatus:
             self._label = f"Analysis complete: {n_ok} plate(s)"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": False,
                 "n_ok": n_ok,
@@ -1815,6 +1840,7 @@ class SurvivalStatus:
                 total=self._total,
                 current_basename=self._current_basename,
                 current_stage=self._current_stage,
+                stage_detail=self.stages.summary(),
             )
 
     def is_running(self) -> bool:
@@ -1969,6 +1995,9 @@ class SurvivalAgent(threading.Thread):
                 current_stage="Discovering images…",
             )
 
+            def stage_cb(msg: str) -> None:
+                self.status.stages.set("run", msg)
+
             def progress_cb(done: int, total: int, name: str) -> None:
                 self.status.update(
                     color="yellow",
@@ -1989,6 +2018,7 @@ class SurvivalAgent(threading.Thread):
                     force_reanalyze=force_reanalyze,
                     write_log=write_log,
                     progress_cb=progress_cb,
+                    stage_cb=stage_cb,
                     cancel_check=self._cancel.is_set,
                 )
             except Exception:

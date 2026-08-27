@@ -73,33 +73,70 @@ MOTILITY_METRICS = [
                    "length. Short tracks are the ones the quality gate drops."),
 ]
 
+# CRAWLING. The first four are what the figures draw; the rest stay in the
+# workbook and the explorer, where a metric costs a line in a dropdown rather
+# than a row of a seven-high facet grid nobody reads to the bottom of.
+#
+# SPEED IS IN BODY LENGTHS, NOT PIXELS. px/s confounds a paralysed animal with
+# a small one, and worm length here moves with both the day and the treatment —
+# exactly the axis the timecourse is plotted against. mean_speed_pxs is kept
+# below, unpromoted, so the older numbers stay readable.
 CRAWLING_METRICS = [
-    AC.Metric("mean_speed_pxs", "Mean speed", "px/s", agg="mean", log=True,
-              note="Pixels per second. The body-length companion "
-                   "(mean_speed_bls) is in the per_worm sheet and cancels "
-                   "magnification drift between days."),
+    AC.Metric("mean_speed_bls", "Mean speed", "BL/s", agg="mean", log=True,
+              note="Body lengths per second — each worm's mean |speed| over "
+                   "that plate's mean worm length. Body lengths rather than "
+                   "pixels because a shrinking worm and a slowing worm are not "
+                   "the same finding and px/s cannot tell them apart."),
     AC.Metric("fraction_paused", "Time paused", "fraction", agg="mean",
-              note="Frames below 10% of that video's median speed. The "
-                   "threshold is per video, so this compares within a day more "
-                   "safely than across days."),
-    AC.Metric("reversal_rate_per_min", "Reversal rate", "per min", agg="mean",
-              note="Forward-to-backward transitions per observed minute — "
-                   "observed, not elapsed, so gaps do not dilute it."),
+              note="Fraction of a worm's OBSERVED frames below 0.01 BL/s. The "
+                   "threshold is fixed across every video and day, so a "
+                   "condition where most animals stopped cannot rescale its "
+                   "own definition of stopped."),
+    AC.Metric("is_immobile", "Animals immobile", "fraction", agg="mean",
+              note="Fraction of the plate's GATED animals whose whole-track "
+                   "mean speed is under 0.02 BL/s — of the worms that passed "
+                   "passed_filter, not of every animal on the agar, so read it "
+                   "with n_kept beside it. A proportion, not an average: when "
+                   "half a plate stops and half is unaffected the mean reports "
+                   "a middle speed no animal had, and this does not."),
+    AC.Metric("directionality", "Directionality", "", agg="median",
+              note="Net displacement over path length. 1 is a straight line, "
+                   "0 is covering ground without leaving. Replaces tortuosity, "
+                   "which is this upside down and unbounded — it diverges "
+                   "exactly where the animal stops, so its mean was set by "
+                   "whichever worm came closest to not moving."),
+    AC.Metric("mean_speed_pxs", "Mean speed", "px/s", agg="mean", log=True,
+              headline=False,
+              note="The same speed in pixels, kept so numbers from before the "
+                   "body-length change stay reproducible. Not the headline: it "
+                   "carries magnification drift and worm growth in it."),
+    AC.Metric("reversal_rate_moving_per_min", "Reversal rate (moving)",
+              "per min", agg="mean", headline=False,
+              note="Forward-to-backward transitions per minute of MOVING time. "
+                   "Per observed minute — the column beside it — falls whenever "
+                   "speed falls, because a paused animal cannot reverse, so it "
+                   "restates the speed panel instead of adding to it."),
+    AC.Metric("reversal_rate_per_min", "Reversal rate (observed)", "per min",
+              agg="mean", headline=False,
+              note="The original: transitions per observed minute. Kept for "
+                   "continuity and confounded with pausing — see above."),
     AC.Metric("turn_rate_per_min", "Turn rate", "per min", agg="mean",
+              headline=False,
               note="From the velocity-arrow detector: 60–140° counts as a turn, "
                    "≥140° as a reversal."),
-    AC.Metric("tortuosity", "Tortuosity", "", agg="median",
-              note="Path length over net displacement. 1 is a straight line; "
-                   "large values mean the animal covered ground without going "
-                   "anywhere."),
     AC.Metric("net_displacement_bl", "Net displacement", "body lengths",
-              agg="median",
+              agg="median", headline=False,
               note="Normalised by that plate's mean worm length, so it survives "
-                   "a magnification change that the pixel column does not."),
-    AC.Metric("bpm", "Bend rate", "bends/min", agg="mean",
-              note="Same head-swing counter as the motility assay, on a "
-                   "crawling animal. The two are not interchangeable — a "
-                   "crawling gait is not a swimming one."),
+                   "a magnification change that the pixel column does not. "
+                   "Scales with how long the track was, so read it against "
+                   "track_duration_s."),
+    AC.Metric("bpm", "Bend rate", "bends/min", agg="mean", headline=False,
+              note="Head-swing angle peaks on a crawling animal; half-peaks "
+                   "count for half, so one bend is a full excursion and back. "
+                   "NaN below three peaks."),
+    AC.Metric("tortuosity", "Tortuosity", "", agg="median", headline=False,
+              note="Path length over net displacement, unbounded. Superseded "
+                   "by directionality; kept so older numbers reproduce."),
 ]
 
 COUNTING_METRICS = [
@@ -130,12 +167,14 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
             dist_unit: str, readme_extra, run_info_extra,
             keep_note: str, unit_note: str,
             write_log: Callable[[str], None],
-            survival_metric: Optional[AC.Metric] = None) -> list:
+            survival_metric: Optional[AC.Metric] = None,
+            norm_metric: Optional[AC.Metric] = None) -> list:
     """The half of every report that is identical: sheets, figures, explorer."""
     write_log = _safe_log(write_log)
+    tps = list(getattr(agg, "timepoints", []) or [])
     AX.write_readme(wb, assay,
                     list(readme_extra) + AX.readme_common(metrics, keep_note,
-                                                          unit_note))
+                                                          unit_note, tps))
     AX.write_run_info(wb, AX.run_info_common(
         assay, out_dir, len(agg.per_condition), len(agg.per_plate),
         agg.n_items, agg.n_kept, run_info_extra))
@@ -158,6 +197,19 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
                           f"{title} over time", write_log)
     if f:
         written.append(f)
+    # The sensitivity curve: every treated condition against its OWN control at
+    # the same hour. Self-skipping below two timepoints, like the timecourse.
+    # It uses the first headline metric because that is the one the assay is
+    # read for; normalising a bounded fraction would be meaningless.
+    hl = AC.headline(metrics)
+    norm_metric = hl[0] if hl else None
+    if norm_metric is not None and len(tps) > 1:
+        f = AF.fig_normalised(out_dir / f"{stem}_normalised.png", agg,
+                              norm_metric,
+                              f"{norm_metric.label} relative to same-day "
+                              "control", write_log)
+        if f:
+            written.append(f)
     if survival_metric is not None:
         f = AF.fig_survival(out_dir / f"{stem}_survival.png", agg,
                             survival_metric, f"{title} relative to untreated",
@@ -171,7 +223,7 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
     f = AF.fig_distribution(out_dir / f"{stem}_distribution.png", dist,
                             dist_label, dist_unit, doses, strains,
                             AC.dose_unit_of(agg.per_condition),
-                            dist_title, write_log)
+                            dist_title, write_log, timepoints=tps)
     if f:
         written.append(f)
 
@@ -180,6 +232,7 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
         agg=agg, metrics=metrics, dist=dist, dist_title=dist_title,
         dist_caption=dist_caption, dist_label=dist_label, dist_unit=dist_unit,
         survival_metric=survival_metric,
+        norm_metric=norm_metric,
         survival_caption=(
             "Every plate as a percentage of the mean of its own strain's "
             "untreated plates, so strains that plated at different densities "
@@ -198,19 +251,39 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
 
 
 def _dist_by_strain_dose(items: Sequence[dict], key: str, log: bool,
-                         keep, write_log) -> Optional[dict]:
-    """Group per-item values as "<strain>|<dose>", the key the explorer and the
-    distribution figure both index by. Conditions outside the dose grammar fall
-    back to their own name so they are still drawn."""
+                         keep, write_log,
+                         by_timepoint: bool = False) -> Optional[dict]:
+    """Group per-item values by strain, dose and — in a timecourse — timepoint.
+
+    The key is AC.dist_key's, so the figure and the explorer index the groups
+    with the same string this builds them with. ``by_timepoint`` adds the hour:
+    without it a timecourse pools five imaging days into one density per
+    condition, which is not a summary of them but a shape none of the five had.
+    Conditions outside the dose grammar fall back to their own name so they are
+    still drawn.
+    """
     groups: dict[str, list] = {}
+    meta: dict[str, dict] = {}
     for r in items:
         if not keep(r):
             continue
         info = AC.split_condition(str(r.get("condition", "")))
-        gk = (f"{info['strain']}|{info['dose']}" if info["parsed"]
-              else info["condition"])
+        strain = info["strain"] if info["parsed"] else info["condition"]
+        dose = info["dose"] if info["parsed"] else None
+        tp = None
+        if by_timepoint:
+            try:
+                tp = float(r.get("timepoint_h"))
+            except (TypeError, ValueError):
+                tp = None
+        gk = AC.dist_key(strain, dose, tp)
         groups.setdefault(gk, []).append(r.get(key))
-    return AC.distribution(groups, log=log, write_log=write_log)
+        meta.setdefault(gk, {"strain": strain, "dose": dose, "tp": tp,
+                             "condition": info["condition"]})
+    dist = AC.distribution(groups, log=log, write_log=write_log)
+    if dist is not None:
+        dist["group_meta"] = {k: meta[k] for k in dist["groups"] if k in meta}
+    return dist
 
 
 def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
@@ -233,7 +306,8 @@ def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
     agg = AC.aggregate(worm_rows, metrics, keep=keep,
                        by_timepoint=by_timepoint)
     dist = _dist_by_strain_dose(worm_rows, "bpm", log=False, keep=keep,
-                                write_log=write_log)
+                                write_log=write_log,
+                                by_timepoint=by_timepoint)
     return _finish(
         wb=wb, agg=agg, dist=dist, metrics=metrics, out_dir=out_dir,
         stem="motility", assay="Motility (body bends, swimming in M9)",
@@ -286,7 +360,8 @@ def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
 def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
                     write_log: Callable[[str], None], *,
                     min_span_s: Optional[float] = None,
-                    by_timepoint: bool = False) -> list:
+                    by_timepoint: bool = False,
+                    min_fragment_coverage: Optional[float] = None) -> list:
     """Crawling: items are worms, the gate is passed_filter.
 
     ``by_timepoint`` splits every plate and condition row by timepoint and adds
@@ -301,8 +376,9 @@ def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
 
     agg = AC.aggregate(worm_rows, metrics, keep=keep,
                        by_timepoint=by_timepoint)
-    dist = _dist_by_strain_dose(worm_rows, "mean_speed_pxs", log=True,
-                                keep=keep, write_log=write_log)
+    dist = _dist_by_strain_dose(worm_rows, "mean_speed_bls", log=True,
+                                keep=keep, write_log=write_log,
+                                by_timepoint=by_timepoint)
     return _finish(
         wb=wb, agg=agg, dist=dist, metrics=metrics, out_dir=out_dir,
         stem="crawling", assay="Crawling (locomotion on agar)",
@@ -310,24 +386,49 @@ def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
         subtitle=(f"{agg.n_kept:,} worms over the quality gate, of "
                   f"{agg.n_items:,} tracked, on {len(agg.per_plate)} plate(s) "
                   f"in {len(agg.per_condition)} condition(s)."),
-        dr_caption="Marker is the condition mean across plates with ±1 SD; grey "
-                   "dots are plates. The y-axis is shared across each row.",
-        caveat="per_condition now aggregates PLATES, not worms. The previous "
-               "worm-pooled numbers are kept as the per_condition_pooled sheet "
-               "and as the *_pooled_median columns — they are not wrong, they "
-               "answer a different question, with n = worms and a spread that "
-               "is worm-to-worm rather than plate-to-plate.",
+        dr_caption="Marker is the condition mean across plates with ±1 SD; "
+                   "faint dots are plates. The y-axis is shared across each "
+                   "row. In a timecourse there is one line per timepoint — "
+                   "nothing here is averaged across days.",
+        # No caveat banner. It said per_condition aggregates plates rather
+        # than worms, which has been true since 26 Aug, is stated in the
+        # workbook README where a reader meets those columns, and by now was
+        # a red bar at the top of every page carrying news from two days ago.
+        # A standing warning that is always there is not read.
+        caveat="",
         dist_title="Speed distribution",
         dist_caption="Every worm that passed the gate. Log space, because speed "
                      "is multiplicative and a fixed bandwidth in linear space "
-                     "over-smooths the slow peak.",
-        dist_label="Mean speed", dist_unit="px/s",
+                     "over-smooths the slow peak. This is the panel that says "
+                     "whether a falling mean is a whole population slowing or "
+                     "part of it stopping — the two are different results and "
+                     "the condition mean cannot tell them apart.",
+        dist_label="Mean speed", dist_unit="BL/s",
         readme_extra=[
             ("This assay",
              "Crawling animals on agar, tracked by Tierpsy and regrouped by a "
              "linker that refuses ambiguous crossings rather than risk swapping "
-             "two animals' identities. The per_worm sheet is unchanged and "
-             "still carries all 47 columns."),
+             "two animals' identities. The per_worm sheet carries every column "
+             "the pipeline computes, including source_folder and timepoint_h, "
+             "and is the same table as per_worm_rows.csv beside the workbook."),
+            ("Objects that were never skeletonised",
+             "Tierpsy tracks blobs whether or not it can trace an outline for "
+             "them, and the linker groups that table, so an object it never "
+             "once skeletonised used to become a worm row with a speed "
+             "averaged over a handful of frames — landing at nearly zero and "
+             "indistinguishable from an animal that did not move. Fragments "
+             "below the min_fragment_skeleton_coverage on the run_info sheet "
+             "are now dropped BEFORE linking, so they also stop occupying "
+             "plate positions the linker reasons about. It is a no-op on a "
+             "cleanly tracked video. Each video's analysis_log.json says how "
+             "many fragments it removed."),
+            ("Which columns the figures draw",
+             "Mean speed (BL/s), time paused, fraction of animals immobile and "
+             "directionality. The rest — px/s speed, both reversal rates, turn "
+             "rate, net displacement, bend rate, tortuosity — are computed and "
+             "kept in every sheet and selectable in explorer.html, but do not "
+             "take a row in the figures. Reversal rate and tortuosity are "
+             "there with a warning attached: see their METRICS rows."),
             ("Motility and crawling are not the same assay",
              "They share a tracker and a bend counter and nothing else: "
              "different Tierpsy parameters, a different linker, a different "
@@ -336,18 +437,28 @@ def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
         ],
         run_info_extra=[
             ("min_span_s", min_span_s if min_span_s else "(run default)"),
-            ("quality_gate", "passed_filter — track span at or above the "
-                             "minimum AND skeleton coverage at or above 0.70"),
+            # This said "AND skeleton coverage at or above 0.70" long after
+            # that floor was removed. A run_info line that describes a gate the
+            # run did not apply is worse than no line: it is the first thing
+            # anyone checks when a number looks wrong.
+            ("quality_gate", "passed_filter — track span at or above "
+                             "min_span_s. Track length only; skeleton coverage "
+                             "is an information column, not a gate."),
+            ("min_fragment_skeleton_coverage",
+             min_fragment_coverage if min_fragment_coverage is not None
+             else "(not applied)"),
         ],
         keep_note="A worm counts when passed_filter is true. Worms failing it "
                   "stay in the per_worm sheet with passed_filter false, so a "
                   "gate can be re-tuned without re-running the tracker. A worm "
                   "with no timeseries rows carries NaN, never 0, so unmeasured "
                   "animals cannot manufacture a dose-response.",
-        unit_note="Speeds in pixels per second with body-length companions in "
-                  "the per_worm sheet; distances in pixels or body lengths; "
-                  "rates per observed minute; fractions 0–1. crawling_params."
-                  "json sets microns_per_pixel to -1, so nothing is in microns.",
+        unit_note="The headline speed is in BODY LENGTHS per second; the px/s "
+                  "column is kept beside it. Distances in pixels or body "
+                  "lengths; rates per observed or per moving minute as the "
+                  "column name says; fractions 0–1. crawling_params.json sets "
+                  "microns_per_pixel to -1, so nothing is in microns — body "
+                  "lengths are the only scale-free unit this assay has.",
         write_log=write_log)
 
 

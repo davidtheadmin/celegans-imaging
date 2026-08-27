@@ -664,7 +664,7 @@ def write_outputs(out_dir: Path, all_colony_rows: list[dict],
 # Driver
 # ----------------------------------------------------------------------------
 def process_image(path: Path, root: Path, opts, out_dir: Path,
-                  write_log) -> tuple[list[dict], dict | None]:
+                  write_log, stage=None) -> tuple[list[dict], dict | None]:
     condition, plate = resolve_image_path(path, root)
     tag = f"{condition}/{plate}/{path.name}"
 
@@ -674,6 +674,17 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
         return [], None
 
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+    def _st(msg: str) -> None:
+        # Live phase for the progress dialog; write_log goes to log.txt and is
+        # read afterwards, this is overwritten in place and read while the run
+        # is going. See analysis/stage_tracker.py.
+        if stage is not None:
+            try:
+                stage(msg)
+            except Exception:                                      # noqa: BLE001
+                pass
+
+    _st("Finding the well")
     found = well_circle(gray, opts, tag, write_log)
     if found is None:
         return [], None
@@ -687,12 +698,14 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
     um_per_px, scale_src = compute_scale(r, tags, opts.well_diameter_mm)
     bg_radius_px = (opts.background_radius_um / um_per_px) if um_per_px else (0.4 * r)
 
+    _st("Building the stain map")
     stain = build_stain_map(bgr, mask, opts.stain_channel)
     stain = flatten(stain, bg_radius_px)
 
     # Detection map: optionally blurred so feathery colonies read as one object.
     # Measurement still uses the unsmoothed `stain` below.
     smooth_um = float(getattr(opts, "smooth_um", 0.0) or 0.0)
+    _st("Smoothing")
     detect = smooth_stain(stain, smooth_um, um_per_px)
     scale = threshold_scale(getattr(opts, "sensitivity", _SENS_NEUTRAL))
     binary, thr = threshold_in_mask(detect, mask, opts.threshold, scale,
@@ -702,7 +715,9 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
     stained_fraction = stained_px / mask_area if mask_area else 0.0
     confluent = stained_fraction > opts.confluence_frac
 
+    _st("Segmenting colonies")
     labels = segment_colonies(binary, opts.split_sensitivity)
+    _st("Measuring and filtering")
     colony_rows, kept_ids, dropped_ids = measure_and_filter(
         labels, stain, mask, um_per_px, opts.min_colony_um, opts.min_solidity)
 
@@ -713,6 +728,7 @@ def process_image(path: Path, root: Path, opts, out_dir: Path,
     header = (f"{condition} | {plate}   count={len(kept_ids)}   "
               f"confluent={confluent}   stained={stained_fraction:.2f}   "
               f"well={well_src}")
+    _st("Rendering the overlay")
     render_overlay(bgr, labels, colony_rows, kept_ids, dropped_ids, r, header,
                    out_dir / "overlays" / f"{condition}__{plate}.png",
                    well_centre=(cx, cy), mask_radius_px=r * opts.mask_shrink)

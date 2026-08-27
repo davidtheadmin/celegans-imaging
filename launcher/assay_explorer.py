@@ -55,20 +55,33 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                   dist_label: str = "", dist_unit: str = "",
                   survival_metric: Optional[AC.Metric] = None,
                   survival_caption: str = "",
+                  norm_metric: Optional[AC.Metric] = None,
                   meta: Optional[dict] = None) -> dict:
-    """Turn an Aggregation into the JSON the template draws."""
+    """Turn an Aggregation into the JSON the template draws.
+
+    EVERY ROW CARRIES ITS TIMEPOINT. This used to drop timepoint_h on the way
+    in, which meant a five-day run reached the page as thirty condition rows
+    with six distinct names and every panel drew them on top of each other. The
+    template's job is to decide what to show; deciding it here, by discarding a
+    column, is how a viewer ends up looking at one arbitrary day and believing
+    it is the experiment.
+    """
     cond, plates = agg.per_condition, agg.per_plate
+    tps = [float(t) for t in (getattr(agg, "timepoints", []) or [])]
 
     has_dose = any(c.get("dose") is not None for c in cond)
     doses = sorted({c["dose"] for c in cond if c.get("dose") is not None})
     strains = sorted({c["strain"] for c in cond}, key=AC.strain_sort_key)
-    conditions = [c["condition"] for c in cond]
+    # Distinct names, in a stable order — a timecourse repeats each of them
+    # once per day and the filter chips must not repeat with them.
+    conditions = list(dict.fromkeys(c["condition"] for c in cond))
 
     cond_out = []
     for c in cond:
         cond_out.append({
             "condition": c["condition"], "strain": c["strain"],
-            "dose": c["dose"], "n_plates": c["n_plates"],
+            "dose": c["dose"], "tp": _r(c.get("timepoint_h")),
+            "n_plates": c["n_plates"],
             "n_items": c["n_items"], "n_kept": c["n_kept"],
             "stats": {m.key: {"mean": _r(c.get(f"{m.key}_mean")),
                               "sd": _r(c.get(f"{m.key}_sd")),
@@ -80,6 +93,7 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
         plates_out.append({
             "condition": p["condition"], "strain": p["strain"],
             "dose": p["dose"], "plate": p["plate"],
+            "tp": _r(p.get("timepoint_h")),
             "n_items": p["n_items"], "n_kept": p["n_kept"],
             "vals": {m.key: _r(p.get(m.key)) for m in metrics},
         })
@@ -115,15 +129,42 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                     for s in built["series"][:8]],
             }
 
+    norm = None
+    if norm_metric is not None and len(tps) > 1:
+        built = AC.normalised_series(agg, norm_metric.key)
+        if built is not None:
+            drop = max(0, len(built["series"]) - 8)
+            norm = {
+                "label": norm_metric.label,
+                "unit": norm_metric.unit,
+                "notes": built["notes"],
+                "capped": drop,
+                "series": [
+                    {"strain": s["strain"], "dose": s["dose"],
+                     "ctrl_dose": s["ctrl_dose"],
+                     "t_half": _r(s["t_half"], 1),
+                     "pts": [{"tp": _r(q["tp"]), "mean": _r(q["mean"], 2),
+                              "sd": _r(q["sd"], 2),
+                              "vals": [_r(x, 2) for x in q["vals"]],
+                              "plates": q["plates"]}
+                             for q in s["pts"]]}
+                    for s in built["series"][:8]],
+            }
+
     return {
         "title": title, "subtitle": subtitle, "caveat": caveat,
         "survival": surv,
+        "normalised": norm,
         "dr_caption": dr_caption,
         "has_dose": has_dose,
         "dose_unit": AC.dose_unit_of(cond),
         "doses": doses, "strains": strains, "conditions": conditions,
+        "timepoints": tps,
         "metrics": [{"key": m.key, "label": m.label, "unit": m.unit,
-                     "note": m.note} for m in metrics],
+                     "note": m.note,
+                     "headline": bool(getattr(m, "headline", True)),
+                     "log": bool(getattr(m, "log", False))}
+                    for m in metrics],
         "cond": cond_out, "plates": plates_out, "dist": dist_out,
         "meta": meta or {},
     }

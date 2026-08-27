@@ -141,6 +141,11 @@ class Metric:
                quantities: sizes, speeds). Linear otherwise.
     ``note``   one line shown under the panel — where a number is a proxy, or
                in pixel units, this is where it says so.
+    ``headline`` draw this metric in the static PNGs. Every metric reaches the
+               workbook and the explorer regardless; this flag only decides
+               what the figures spend their rows on. A seven-row facet grid is
+               not a figure anyone reads, and the metrics that earn a row are
+               not the same set as the metrics worth keeping.
     """
     key: str
     label: str
@@ -148,6 +153,7 @@ class Metric:
     agg: str = "mean"
     log: bool = False
     note: str = ""
+    headline: bool = True
 
     @property
     def axis(self) -> str:
@@ -402,6 +408,135 @@ def survival_series(agg: "Aggregation", metric_key: str,
         log_("survival: no strain had a usable untreated control.")
         return None
     return {"series": series, "notes": notes, "unit": unit}
+
+
+def dist_key(strain, dose, tp=None) -> str:
+    """The ONE spelling of a distribution group's key.
+
+    The report builder writes it, the figure reads it and the explorer reads it
+    again; three hand-rolled f-strings is how a group silently stops being
+    found and a curve quietly disappears. A condition outside the dose grammar
+    has dose None and keys on its own name, which is what makes it still get
+    drawn instead of dropped.
+    """
+    base = f"{strain}|{dose}" if dose is not None else str(strain)
+    return base if tp is None else f"{base}@{tp:g}h"
+
+
+def headline(metrics: Sequence[Metric]) -> list:
+    """The metrics the static figures draw. Falls back to all of them rather
+    than to none, so a metric set that forgot to flag anything still produces a
+    figure instead of an empty page."""
+    hl = [m for m in metrics if getattr(m, "headline", True)]
+    return hl or list(metrics)
+
+
+def normalised_series(agg: "Aggregation", metric_key: str,
+                      write_log: Optional[Callable[[str], None]] = None):
+    """Treated plates as a percentage of their OWN control, AT THE SAME TIME.
+
+    survival_series answers "how far did this dose fall", once. This answers
+    "how far had it fallen by hour t", which is the only form of the question a
+    timecourse can be read for. It is a separate function rather than a flag on
+    that one because the normalisation differs in the way that matters: the
+    denominator here is the same strain's control *at the same timepoint*, so a
+    control that itself declines — ours all do by 96 h, plates run down — is
+    divided out instead of being charged to the treatment.
+
+    Returns {"series", "notes", "unit", "timepoints"} or None. Each series is
+    one (strain, dose) with a point per timepoint and ``t_half``: the time at
+    which its mean first crosses 50% of control, linearly interpolated between
+    the two timepoints that bracket the crossing. t_half is None when the curve
+    never crosses — which is a result, not a gap, and the caller says so.
+    """
+    log_ = write_log or (lambda _m: None)
+    tps = list(getattr(agg, "timepoints", []) or [])
+    if len(tps) < 2:
+        log_(f"normalised {metric_key}: fewer than two timepoints — skipped.")
+        return None
+    plates = [p for p in agg.per_plate
+              if p.get("dose") is not None and p.get(metric_key) is not None
+              and p.get("timepoint_h") is not None]
+    if not plates:
+        log_(f"normalised {metric_key}: no dosed plates carrying the metric.")
+        return None
+    unit = dose_unit_of(agg.per_condition)
+    series, notes = [], []
+    for s in sorted({p["strain"] for p in plates}, key=strain_sort_key):
+        rows = [p for p in plates if p["strain"] == s]
+        doses = sorted({p["dose"] for p in rows})
+        ctrl = 0 if 0 in doses else doses[0]
+        if len(doses) < 2:
+            notes.append(f"{s} has only one dose — nothing to normalise.")
+            continue
+        if ctrl != 0:
+            notes.append(f"{s} is normalised to {ctrl} {unit}".strip())
+        # One base per timepoint. A timepoint whose control was not imaged has
+        # no base and therefore no normalised point — never the neighbouring
+        # day's base, which would silently compare across a day.
+        base_at = {}
+        for t in tps:
+            b = mean([p[metric_key] for p in rows
+                      if p["dose"] == ctrl and p["timepoint_h"] == t])
+            if b and b > 0:
+                base_at[t] = b
+        missing = [t for t in tps if t not in base_at]
+        if not base_at:
+            log_(f"normalised {metric_key}: {s} has no usable control at any "
+                 "timepoint — strain dropped.")
+            continue
+        if missing:
+            notes.append(f"{s}: no control at "
+                         + ", ".join(f"{t:g} h" for t in missing)
+                         + " — those points are absent, not interpolated.")
+        for d in doses:
+            if d == ctrl:
+                continue
+            pts = []
+            for t in tps:
+                b = base_at.get(t)
+                if b is None:
+                    continue
+                here = [p for p in rows
+                        if p["dose"] == d and p["timepoint_h"] == t]
+                vals = [100.0 * p[metric_key] / b for p in here]
+                if not vals:
+                    continue
+                pts.append({"tp": t, "vals": vals, "mean": mean(vals),
+                            "sd": sd(vals), "base": b,
+                            "plates": [p["plate"] for p in here]})
+            if not pts:
+                continue
+            series.append({"strain": s, "dose": d, "ctrl_dose": ctrl,
+                           "pts": pts, "t_half": _cross_time(pts, 50.0)})
+    if not series:
+        log_(f"normalised {metric_key}: no strain had a usable control.")
+        return None
+    return {"series": series, "notes": notes, "unit": unit,
+            "timepoints": tps}
+
+
+def _cross_time(pts: Sequence[dict], level: float) -> Optional[float]:
+    """First time the mean crosses DOWN through ``level``, interpolated.
+
+    Only a downward crossing counts: a curve that starts below the level was
+    already there at the first timepoint and the honest answer is "at or before
+    t0", which is the first timepoint itself. A curve that never goes below
+    returns None, and None here means "did not cross", not "unknown".
+    """
+    seq = [(p["tp"], p["mean"]) for p in pts
+           if p.get("mean") is not None and math.isfinite(p["mean"])]
+    if not seq:
+        return None
+    seq.sort()
+    if seq[0][1] <= level:
+        return seq[0][0]
+    for (t0, y0), (t1, y1) in zip(seq, seq[1:]):
+        if y1 <= level:
+            if y0 == y1:
+                return t1
+            return t0 + (t1 - t0) * (y0 - level) / (y0 - y1)
+    return None
 
 
 def aggregate_from_plates(plate_rows: Sequence[dict], metrics: Sequence[Metric],

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import paths
 
@@ -190,6 +190,21 @@ def _drop_stale_avi(avi: Path, flat_field: bool) -> bool:
 # Per-video worker (runs on a ThreadPoolExecutor worker thread)
 # ---------------------------------------------------------------------------
 
+
+def _pv_prefix(condition: str, plate: str, timepoint_h=None) -> str:
+    """Filename stem for this video's per_video artefacts.
+
+    "<condition>__<plate>" alone is NOT unique in a timecourse: the same
+    condition and plate name recur on every imaging day, so the sidecars, the
+    summary PNGs and the renders overwrote each other and the folder kept
+    whichever day finished last, under a name that claimed otherwise.
+    """
+    stem = f"{condition}__{plate}"
+    if timepoint_h is None:
+        return stem
+    return f"{stem}__t{float(timepoint_h):g}h"
+
+
 def _process_one_video_motility(
     video: Path,
     folder: Path,
@@ -209,6 +224,8 @@ def _process_one_video_motility(
     per_video_dir: Path,
     ffmpeg_threads: Optional[int],
     cancel_event: threading.Event,
+    timepoint_h: Optional[float] = None,
+    report_stage: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
     Process a single video end-to-end (probe → transcode → Tierpsy → read →
@@ -231,6 +248,16 @@ def _process_one_video_motility(
     def plog(msg: str) -> None:
         logbuf.append(msg)
 
+    # The live channel, distinct from the log: the log is buffered and flushed
+    # when the video finishes, which on a 20-minute video shows nothing at all
+    # while it runs. See analysis/stage_tracker.py.
+    def stage(msg: str) -> None:
+        if report_stage is not None:
+            try:
+                report_stage(msg)
+            except Exception:                                      # noqa: BLE001
+                pass
+
     condition, plate = _resolve_video_path(video, folder)
     thread_name = threading.current_thread().name
     plog(f"\n--- {video.name} ({condition}) ---")
@@ -251,6 +278,7 @@ def _process_one_video_motility(
     cache_dir = _cache_dir_for(video)
 
     try:
+        stage("Probing the video")
         fps = probe_fps(video)
         plog(f"fps: {fps:.3f}")
 
@@ -286,6 +314,8 @@ def _process_one_video_motility(
             if _drop_stale_avi(avi, flat_field):
                 plog("[CACHE] Dropped a cached AVI made under a different "
                      "flat-field setting; re-transcoding.")
+            stage("Flat-field + transcode" if flat_field
+                  else "Transcoding to AVI")
             convert_to_avi(video, avi, threads=ffmpeg_threads,
                            flat_field=flat_field)
             plog(f"AVI ready: {avi}")
@@ -300,11 +330,13 @@ def _process_one_video_motility(
                 json.dumps(params, indent=2), encoding="utf-8"
             )
 
+            stage("Starting Tierpsy")
             stdout, stderr = run_tierpsy(
                 avi, json_file,
                 image=image,
                 engine=engine,
                 timeout_s=timeout_s,
+                on_stage=lambda phrase: stage(f"Tierpsy: {phrase}"),
             )
             plog(f"Tierpsy stdout:\n{stdout}")
             if stderr.strip():
@@ -319,6 +351,7 @@ def _process_one_video_motility(
             hdf5_path = candidates[0]
             _write_cache_stamp(cache_dir, "motility", cache_fp)
 
+        stage("Grouping fragments + counting bends")
         fragment_rows, analysis_log = read_fragments(
             hdf5_path, fps, condition, plate,
             long_threshold_s=threshold_s,
@@ -334,14 +367,14 @@ def _process_one_video_motility(
             f" | dropped: {analysis_log['worms_dropped']['total']}"
         )
 
-        log_sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
+        log_sidecar = per_video_dir / f"{_pv_prefix(condition, plate, timepoint_h)}_analysis_log.json"
         log_sidecar.write_text(
             _json.dumps({"video": video.name, **analysis_log}, indent=2),
             encoding="utf-8",
         )
 
         if fragment_rows and hdf5_path:
-            plot_path = per_video_dir / f"{condition}__{plate}.png"
+            plot_path = per_video_dir / f"{_pv_prefix(condition, plate, timepoint_h)}.png"
             make_video_summary_png(fragment_rows, hdf5_path, fps, plot_path,
                                    head_angle_prominence)
 
@@ -352,7 +385,7 @@ def _process_one_video_motility(
             )
             skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
             masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
-            prefix = f"{condition}__{plate}"
+            prefix = _pv_prefix(condition, plate, timepoint_h)
 
             # Map every worm_index_joined fragment of a kept worm to
             # its stable worm_index so the renders label/colour by
@@ -414,6 +447,9 @@ def _process_one_video_motility(
         plog(f"ERROR: {exc}")
         log.exception("Error processing %s", video.name)
 
+    # Clear this video's phase whatever happened above, error path included: a
+    # failed video that leaves a phase behind makes a stalled run look alive.
+    stage("")
     elapsed = time.monotonic() - t0
     plog(f"FINISH on {thread_name} in {elapsed:.1f}s "
          f"({'ok' if status_str == 'ok' else 'FAILED'})")
@@ -447,6 +483,9 @@ class MotilitySnapshot:
     total: int
     current_basename: str
     current_stage: str
+    # What the pool is doing right now, phases grouped and counted. Empty for
+    # a run that reports none; see analysis/stage_tracker.py.
+    stage_detail: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +509,8 @@ class MotilityStatus:
         self._total = 0
         self._current_basename = ""
         self._current_stage = ""
+        # Live per-video phases; its own lock (analysis/stage_tracker.py).
+        self.stages = StageTracker()
         self._completed_result: Optional[dict] = None
 
     def update(
@@ -506,6 +547,7 @@ class MotilityStatus:
             self._label = "Analysis failed — see log"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": True,
                 "error": error,
@@ -521,6 +563,7 @@ class MotilityStatus:
             self._label = f"Analysis complete: {n_ok}/{n_ok + n_fail} videos"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": False,
                 "n_ok": n_ok,
@@ -538,6 +581,7 @@ class MotilityStatus:
                 total=self._total,
                 current_basename=self._current_basename,
                 current_stage=self._current_stage,
+                stage_detail=self.stages.summary(),
             )
 
     def is_running(self) -> bool:
@@ -910,6 +954,8 @@ class MotilityAgent(threading.Thread):
                                 want_per_worm_traces=want_per_worm_traces,
                                 per_video_dir=per_video_dir,
                                 ffmpeg_threads=ff_threads,
+                                timepoint_h=tp,
+                                report_stage=self.status.stages.reporter(video.name),
                                 cancel_event=self._cancel,
                             )
                             futures[fut] = video
@@ -987,6 +1033,14 @@ class MotilityAgent(threading.Thread):
             "curl_count", "fragment_count", "valid_frac", "displacement_px", "coverage_pct",
             "length_cv", "solidity_median", "speed_median_abs",
         ]
+        # In a timecourse "plate 01" of one condition names a different plate on
+        # every imaging day. Without the timepoint beside it these sheets hold
+        # one indistinguishable row per day and no reader can tell which day a
+        # number came from — the same collision the crawling sheets had.
+        if any("timepoint_h" in r for r in all_fragment_rows):
+            _sheet_cols.insert(0, "timepoint_h")
+        if any("source_folder" in r for r in all_fragment_rows):
+            _sheet_cols.append("source_folder")
         all_df = (pd.DataFrame(all_fragment_rows) if all_fragment_rows
                   else pd.DataFrame(columns=["condition"] + _sheet_cols))
         with pd.ExcelWriter(out_dir / "motility_results.xlsx", engine="openpyxl") as xw:

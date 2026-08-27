@@ -88,9 +88,21 @@ def write_run_info(wb, rows: Sequence[tuple]) -> None:
 
 
 def readme_common(metrics: Sequence[AC.Metric], keep_note: str,
-                  unit_note: str) -> list:
+                  unit_note: str, timepoints: Sequence = ()) -> list:
     """The paragraphs every one of these workbooks needs, in one place."""
-    rows = [
+    rows = []
+    if len(timepoints or ()) > 1:
+        rows.append((
+            "This run is a TIMECOURSE",
+            "Every plate and condition sheet carries a timepoint_h column and "
+            "one row PER TIMEPOINT: " + ", ".join(f"{t:g} h" for t in timepoints)
+            + ". A row is identified by (timepoint_h, condition) — the "
+              "condition name alone appears once per imaging day, and reading a "
+              "number without its timepoint means reading an arbitrary day. "
+              "Nothing is averaged across days anywhere in this workbook, "
+              "including % of control on the qc sheet, which uses each day's "
+              "own control."))
+    rows += [
         ("Sheets",
          "plate_summary is one row per plate; condition_summary is one row per "
          "condition; qc is what there was to measure and how much survived; "
@@ -147,44 +159,58 @@ def write_aggregate_sheets(wb, agg: AC.Aggregation) -> None:
     two relate.
     """
     metrics = list(agg.metrics)
+    # A timecourse row is identified by (timepoint, condition) — the condition
+    # alone repeats once per imaging day. Without this column the sheet holds
+    # five indistinguishable copies of every condition, which is not a sheet
+    # missing a nicety, it is a sheet nobody can read a number off.
+    tc = bool(getattr(agg, "timepoints", []))
+    tp_h = ["timepoint_h"] if tc else []
 
-    hdr = ["condition", "strain", "dose", "dose_unit", "plate",
-           "n_items", "n_kept"]
+    def _tp(r):
+        return [r.get("timepoint_h")] if tc else []
+
+    hdr = tp_h + ["condition", "strain", "dose", "dose_unit", "plate",
+                  "n_items", "n_kept"]
     for m in metrics:
         hdr += [m.key, f"n_{m.key}"]
     rows = []
     for p in agg.per_plate:
-        row = [p["condition"], p["strain"], p["dose"], p["unit"], p["plate"],
-               p["n_items"], p["n_kept"]]
+        row = _tp(p) + [p["condition"], p["strain"], p["dose"], p["unit"],
+                        p["plate"], p["n_items"], p["n_kept"]]
         for m in metrics:
             row += [_round(p.get(m.key)), p.get(f"n_{m.key}")]
         rows.append(row)
     _sheet(wb, "plate_summary", hdr, rows, {"condition": 22, "plate": 16})
 
-    hdr = ["condition", "strain", "dose", "dose_unit", "name_parsed",
-           "n_plates", "n_plates_with_data", "n_items", "n_kept"]
+    hdr = tp_h + ["condition", "strain", "dose", "dose_unit", "name_parsed",
+                  "n_plates", "n_plates_with_data", "n_items", "n_kept"]
     for m in metrics:
         hdr += [f"{m.key}_mean", f"{m.key}_sd", f"{m.key}_pooled_median"]
     rows = []
     for c in agg.per_condition:
-        row = [c["condition"], c["strain"], c["dose"], c["unit"],
-               bool(c["parsed"]), c["n_plates"], c["n_plates_with_data"],
-               c["n_items"], c["n_kept"]]
+        row = _tp(c) + [c["condition"], c["strain"], c["dose"], c["unit"],
+                        bool(c["parsed"]), c["n_plates"],
+                        c["n_plates_with_data"], c["n_items"], c["n_kept"]]
         for m in metrics:
             row += [_round(c.get(f"{m.key}_mean")), _round(c.get(f"{m.key}_sd")),
                     _round(c.get(f"{m.key}_pooled_median"))]
         rows.append(row)
     _sheet(wb, "condition_summary", hdr, rows, {"condition": 22})
 
-    hdr = ["condition", "strain", "dose", "n_plates", "n_plates_with_data",
-           "n_items", "n_kept", "kept_pct", "items_per_plate_mean",
-           "items_per_plate_min", "items_per_plate_max", "pct_of_control"]
+    hdr = tp_h + ["condition", "strain", "dose", "n_plates",
+                  "n_plates_with_data", "n_items", "n_kept", "kept_pct",
+                  "items_per_plate_mean", "items_per_plate_min",
+                  "items_per_plate_max", "pct_of_control"]
     rows = []
     for c in agg.per_condition:
-        plates = [p for p in agg.per_plate if p["condition"] == c["condition"]]
+        # Its own timepoint's plates, never every day's — the same collision
+        # the timepoint column exists to undo.
+        plates = [p for p in agg.per_plate
+                  if p["condition"] == c["condition"]
+                  and (not tc or p.get("timepoint_h") == c.get("timepoint_h"))]
         kept = [p["n_kept"] for p in plates]
-        ctrl = _control_for(c, agg.per_condition)
-        rows.append([
+        ctrl = _control_for(c, agg.per_condition, by_timepoint=tc)
+        rows.append(_tp(c) + [
             c["condition"], c["strain"], c["dose"], c["n_plates"],
             c["n_plates_with_data"], c["n_items"], c["n_kept"],
             _round(100.0 * c["n_kept"] / c["n_items"]) if c["n_items"] else None,
@@ -206,15 +232,18 @@ def write_condition_csv(path, agg: AC.Aggregation) -> int:
     """
     import csv as _csv
     metrics = list(agg.metrics)
-    hdr = ["condition", "strain", "dose", "dose_unit", "name_parsed",
-           "n_plates", "n_plates_with_data", "n_items", "n_kept"]
+    tc = bool(getattr(agg, "timepoints", []))
+    hdr = (["timepoint_h"] if tc else []) + [
+        "condition", "strain", "dose", "dose_unit", "name_parsed",
+        "n_plates", "n_plates_with_data", "n_items", "n_kept"]
     for m in metrics:
         hdr += [f"{m.key}_mean", f"{m.key}_sd", f"{m.key}_pooled_median"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = _csv.writer(fh)
         w.writerow(hdr)
         for c in agg.per_condition:
-            row = [c["condition"], c["strain"],
+            row = ([c.get("timepoint_h")] if tc else []) + [
+                   c["condition"], c["strain"],
                    "" if c["dose"] is None else c["dose"], c["unit"],
                    bool(c["parsed"]), c["n_plates"], c["n_plates_with_data"],
                    c["n_items"], c["n_kept"]]
@@ -232,14 +261,19 @@ def _blank(v):
     return "" if r is None else r
 
 
-def _control_for(c: dict, cond_rows: Sequence[dict]) -> Optional[int]:
+def _control_for(c: dict, cond_rows: Sequence[dict],
+                 by_timepoint: bool = False) -> Optional[int]:
     """Kept-item count of the LOWEST dose of the SAME strain.
 
     Its own control, never another strain's — the same rule the Development
-    explorer uses for % of control.
+    explorer uses for % of control. In a timecourse it is also never another
+    DAY's control: plates run down over four days, and charging that decline to
+    the treatment is the exact error the timepoint column exists to prevent.
     """
     same = [r for r in cond_rows
-            if r["strain"] == c["strain"] and r.get("dose") is not None]
+            if r["strain"] == c["strain"] and r.get("dose") is not None
+            and (not by_timepoint
+                 or r.get("timepoint_h") == c.get("timepoint_h"))]
     if not same:
         return None
     lo = min(same, key=lambda r: r["dose"])

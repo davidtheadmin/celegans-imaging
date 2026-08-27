@@ -30,6 +30,7 @@ h2{font-size:15px;margin:0 0 3px}
 .ctrl b{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;font-weight:600;margin-right:3px}
 button{font:inherit;font-size:12.5px;padding:5px 11px;border-radius:999px;cursor:pointer;border:1px solid var(--ring);background:transparent;color:var(--ink2)}
 button[aria-pressed=true]{background:var(--ink);color:var(--surface-1);border-color:var(--ink)}
+button.sw[aria-pressed=true]{background:var(--swc,var(--ink));border-color:var(--swc,var(--ink));color:#fff}
 .lg{display:flex;gap:15px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin-top:10px;align-items:center}
 .lg i{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-1px}
 svg{display:block;width:100%;height:auto;overflow:visible}
@@ -49,7 +50,20 @@ thead th{color:var(--mut);font-weight:600;font-size:11.5px;text-transform:upperc
 <p class="warn" id="caveat"></p>
 
 <div class="bar"><div class="ctrl"><b>Theme</b><span id="theme"></span>
-<span style="width:14px"></span><b id="fillab">Strains</b><span id="filt"></span></div></div>
+<span style="width:10px"></span><b>Layout</b><span id="lay"></span>
+<span style="width:10px"></span><b id="fillab">Conditions</b><span id="filt"></span>
+<button id="allbtn" style="margin-left:4px">All</button></div></div>
+
+<div class="card" id="tccard"><h2>Over time</h2>
+<p class="cap" id="tccap"></p>
+<div class="ctrl" id="tcm"><b>Metric</b></div>
+<div class="scroll"><div id="tc"></div></div><div class="lg" id="tclg"></div>
+<div class="note" id="tcnote"></div></div>
+
+<div class="card" id="normcard"><h2 id="normt">Sensitivity</h2>
+<p class="cap" id="normcap"></p>
+<div class="scroll"><div id="norm"></div></div><div class="lg" id="normlg"></div>
+<div class="note" id="normnote"></div></div>
 
 <div class="card" id="survcard"><h2>Survival, normalised to untreated</h2>
 <p class="cap" id="survcap"></p>
@@ -59,11 +73,13 @@ thead th{color:var(--mut);font-weight:600;font-size:11.5px;text-transform:upperc
 
 <div class="card"><h2 id="drt">Dose&ndash;response</h2>
 <p class="cap" id="drcap"></p>
+<div class="ctrl" id="drk"></div>
 <div class="scroll"><div id="dr"></div></div><div class="lg" id="drlg"></div>
 <div class="note" id="drnote"></div></div>
 
 <div class="card" id="distcard"><h2 id="distt">Distribution</h2>
 <p class="cap" id="distcap"></p>
+<div class="ctrl" id="distk"></div>
 <div class="scroll"><div id="dist"></div></div><div class="lg" id="distlg"></div></div>
 
 <div class="card"><h2>Quality control</h2>
@@ -93,29 +109,232 @@ function hov(el,html){el.style.pointerEvents='all';
  el.addEventListener('mouseleave',()=>tt.style.opacity=0);}
 const RAMP=['--g1','--g2','--g3','--g4','--g5','--g6','--g7'];
 const ramp=(i,n)=>RAMP[n<=1?2:Math.min(RAMP.length-1,Math.round(i*(RAMP.length-1)/(n-1)))];
-const num=(x,d)=>x===null||x===undefined||!isFinite(x)?'—':(+x).toFixed(d===undefined?2:d);
-const dl=d=>d===null?'—':(d+(D.dose_unit?' '+D.dose_unit:''));
-
-/* which strains (or conditions, when nothing parsed) are on screen */
-let SHOWN=new Set(D.has_dose?D.strains:D.conditions);
-const colKeys=()=>(D.has_dose?D.strains:D.conditions).filter(s=>SHOWN.has(s));
-const condOf=(strain,dose)=>D.cond.find(c=>c.strain===strain&&c.dose===dose);
-const condByName=n=>D.cond.find(c=>c.condition===n);
-
-/* ---------- 0. survival: one axis, every strain, normalised to its own control
-   The one panel that overlays strains instead of faceting them, because "which
-   strain falls off faster" is a comparison between curves. It pays for the
-   exception with a colour-vision-validated categorical set, capped at eight,
-   and a label on every curve, so identity never rests on colour alone.
-   Linear and log are the same numbers: linear can draw a zero, log shows a
-   fall from 100% to 10% and one from 10% to 1% as the same step. -------- */
+/* Categorical hues, fixed order, never cycled: past the eighth series two
+   would share a colour, and two series sharing a colour is a wrong figure
+   rather than a crowded one. */
 const CAT=['--c1','--c2','--c3','--c4','--c5','--c6','--c7','--c8'];
+const num=(x,d)=>x===null||x===undefined||!isFinite(x)?'—':(+x).toFixed(d===undefined?2:d);
+const dl=d=>d===null||d===undefined?'—':(d+(D.dose_unit?' '+D.dose_unit:''));
+const th=t=>(+t)+' h';
+
+/* ---------- indexes ----------------------------------------------------
+   A condition row is identified by (condition, timepoint). Every lookup in
+   this file goes through condAt: a timecourse repeats each condition name
+   once per imaging day, and any index keyed on the name alone silently keeps
+   whichever day came last and draws it as though it were the experiment. */
+const TPS=(D.timepoints||[]).slice();
+const isTC=TPS.length>1;
+const SEP='\u0001';
+const K=(a,b)=>a+SEP+(b===null||b===undefined?'null':b);
+const CIX={}; D.cond.forEach(c=>{CIX[K(c.condition,c.tp)]=c;});
+const condAt=(name,tp)=>CIX[K(name,isTC?tp:null)];
+const platesAt=(name,tp)=>D.plates.filter(p=>p.condition===name&&(!isTC||p.tp===tp));
+const DIX={};
+if(D.dist&&D.dist.group_meta)for(const k in D.dist.group_meta){const g=D.dist.group_meta[k];
+ DIX[[g.strain,g.dose,g.tp].join(SEP)]=k;}
+const distGroup=(s,d,t)=>{const k=DIX[[s,d===undefined?null:d,t===undefined?null:t].join(SEP)];
+ return k?D.dist.groups[k]:null;};
+
+/* every distinct condition name, in strain then dose order */
+const CONDS=(()=>{const seen=[],ix={};
+ D.cond.forEach(c=>{if(!(c.condition in ix)){ix[c.condition]=1;seen.push(c);}});
+ seen.sort((a,b)=>{const sa=D.strains.indexOf(a.strain),sb=D.strains.indexOf(b.strain);
+  return sa!==sb?sa-sb:((a.dose===null?-1:a.dose)-(b.dose===null?-1:b.dose));});
+ return seen.map(c=>c.condition);})();
+const strainOf={}; D.cond.forEach(c=>strainOf[c.condition]=c.strain);
+const doseOf={}; D.cond.forEach(c=>doseOf[c.condition]=c.dose);
+const CCOL={}; CONDS.forEach((c,i)=>CCOL[c]=CAT[i%CAT.length]);
+
+let SEL=new Set(CONDS);                 /* which conditions are drawn */
+let LAYOUT=0;                           /* 0 facet by strain, 1 overlay in one axis */
+let MK=0;                               /* timecourse metric */
+let DRT=isTC?-1:null;                   /* dose-response timepoint, -1 = all */
+let DTT=isTC?TPS[TPS.length-1]:null;    /* distribution timepoint */
+let DISTOVR=0;                          /* distribution: overlay every condition */
+const shown=()=>CONDS.filter(c=>SEL.has(c));
+const shownStrains=()=>D.strains.filter(s=>shown().some(c=>strainOf[c]===s));
+const colourFor=(cond,di,nd)=>LAYOUT?v(CCOL[cond]):v(ramp(di,nd));
+
+/* ---------- generic panel scaffolding ---------- */
+function yRange(vals){let lo=Infinity,hi=-Infinity;
+ vals.forEach(y=>{if(y!==null&&y!==undefined&&isFinite(y)){lo=Math.min(lo,y);hi=Math.max(hi,y);}});
+ if(!isFinite(lo)){lo=0;hi=1;}
+ const nonneg=lo>=0;
+ if(hi<=lo)hi=lo+Math.abs(lo||1)*0.1+1e-9;
+ if(lo>0&&lo/hi<0.35)lo=0;
+ const p=0.08*(hi-lo);
+ /* A speed, a fraction and a rate cannot be negative. Padding the axis below
+    zero puts a tick on a value the quantity has no way of taking, which reads
+    as a measurement rather than as whitespace. */
+ return[nonneg?Math.max(lo-p,0):lo-p,hi+p];}
+
+/* ---------- 1. over time — the panel this assay is read for --------------
+   First, and first for a reason: in a timecourse the dose-response panel is
+   two points at an arbitrary hour, and this is the measurement. Facet mode
+   gives one axis per strain with a ramped line per dose; overlay puts every
+   selected condition in one axis with categorical colours, which is the
+   comparison the facets cannot make. -------------------------------------- */
+function drawTC(){
+ if(!isTC){$('tccard').style.display='none';return;}
+ const m=D.metrics[MK]; const S=shown();
+ if(!S.length||!m){$('tc').innerHTML='<p class="note">Nothing selected.</p>';$('tclg').innerHTML='';return;}
+ const cols=LAYOUT?[null]:shownStrains();
+ const pw=LAYOUT?720:Math.max(190,Math.min(300,760/cols.length)), ph=LAYOUT?300:210;
+ const gapC=26,padL=78,padT=26,padB=52;
+ /* Overlay labels each curve at its right-hand end; the viewBox has to carry
+    room for them or the longest condition name is clipped by the frame. */
+ const W=padL+cols.length*(pw+gapC)+(LAYOUT?108:0), H=padT+ph+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Metric over time'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ /* one y-scale across every panel: the columns exist to be compared */
+ const all=[];
+ S.forEach(c=>TPS.forEach(t=>{const r=condAt(c,t); if(!r)return;
+  const st=r.stats[m.key]||{}; if(st.mean!==null&&isFinite(st.mean)){all.push(st.mean-(st.sd||0));all.push(st.mean+(st.sd||0));}
+  platesAt(c,t).forEach(p=>all.push(p.vals[m.key]));}));
+ const [lo,hi]=yRange(all);
+ const tmin=TPS[0],tmax=TPS[TPS.length-1],tspan=(tmax-tmin)||1;
+ const labs=[];
+ cols.forEach((cl,ci)=>{
+  const ox=padL+ci*(pw+gapC), oy=padT;
+  const X=t=>ox+16+(pw-32)*(t-tmin)/tspan, Y=y=>oy+ph-ph*(y-lo)/(hi-lo);
+  for(let g=0;g<=4;g++){const y=oy+ph-ph*g/4;
+   svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
+   if(ci===0)svg.appendChild(E('text',{x:ox-8,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':9.5},
+     [T(num(lo+(hi-lo)*g/4,(hi-lo)<3?3:(hi-lo)<40?1:0))]));}
+  if(ci===0)svg.appendChild(E('text',{x:14,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink'),
+    'font-size':11,'font-weight':600,transform:'rotate(-90 14 '+(oy+ph/2)+')'},
+    [T(m.label+(m.unit?' ('+m.unit+')':''))]));
+  if(cl!==null)svg.appendChild(E('text',{x:ox+pw/2,y:oy-10,'text-anchor':'middle',fill:v('--ink'),
+    'font-size':12,'font-weight':700},[T(cl)]));
+  const here=LAYOUT?S:S.filter(c=>strainOf[c]===cl);
+  const doses=[...new Set(here.map(c=>doseOf[c]))].sort((a,b)=>(a===null?-1:a)-(b===null?-1:b));
+  here.forEach(cname=>{
+   const col=colourFor(cname,doses.indexOf(doseOf[cname]),doses.length);
+   const pts=[];
+   TPS.forEach(t=>{
+    const r=condAt(cname,t); if(!r)return;
+    platesAt(cname,t).forEach(p=>{const y=p.vals[m.key];
+     if(y===null||y===undefined||!isFinite(y))return;
+     const dot=E('circle',{cx:X(t),cy:Y(y),r:2,fill:col,opacity:.32});
+     hov(dot,'<b>'+p.plate+'</b> · '+cname+' · '+th(t)+'<br>'+m.label+' '+num(y,3)+(m.unit?' '+m.unit:'')+
+         '<br>'+p.n_kept+' of '+p.n_items+' kept');
+     svg.appendChild(dot);});
+    const st=r.stats[m.key]||{};
+    if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
+    pts.push([X(t),Y(st.mean)]);
+    if(st.sd)svg.appendChild(E('path',{d:'M'+X(t)+' '+Y(st.mean+st.sd)+'V'+Y(st.mean-st.sd),
+      stroke:col,'stroke-width':1.2}));
+    const mk=E('circle',{cx:X(t),cy:Y(st.mean),r:3.5,fill:col,stroke:v('--surface-1'),'stroke-width':1.4});
+    hov(mk,'<b>'+cname+' · '+th(t)+'</b><br>'+m.label+' '+num(st.mean,3)+(m.unit?' '+m.unit:'')+
+        (st.sd?' ± '+num(st.sd,3):'')+'<br>'+r.n_plates+' plate(s), '+r.n_kept+' kept of '+r.n_items+
+        (m.note?'<br><i>'+m.note+'</i>':''));
+    svg.appendChild(mk);});
+   /* A condition missing at one hour leaves a GAP: an unimaged day is not a
+      measurement and a line through it would claim otherwise. */
+   if(pts.length>1)svg.appendChild(E('path',{d:pts.map((q,i)=>(i?'L':'M')+q[0]+' '+q[1]).join(' '),
+     fill:'none',stroke:col,'stroke-width':2,'stroke-linejoin':'round'}));
+   if(LAYOUT&&pts.length)labs.push({x:pts[pts.length-1][0],y:pts[pts.length-1][1],txt:cname,col:col});
+  });
+  svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+  TPS.forEach(t=>svg.appendChild(E('text',{x:X(t),y:oy+ph+15,'text-anchor':'middle',
+    fill:v('--mut'),'font-size':9.5},[T(String(+t))])));
+  svg.appendChild(E('text',{x:ox+pw/2,y:oy+ph+34,'text-anchor':'middle',fill:v('--mut'),'font-size':10},
+    [T('time (h)')]));
+ });
+ labs.sort((a,b)=>a.y-b.y);
+ for(let i=1;i<labs.length;i++)if(labs[i].y-labs[i-1].y<13)labs[i].y=labs[i-1].y+13;
+ labs.forEach(l=>svg.appendChild(E('text',{x:l.x+8,y:l.y+3.5,fill:l.col,'font-size':10.5,
+   'font-weight':700},[T(l.txt)])));
+ $('tc').innerHTML='';$('tc').appendChild(svg);
+ const doses=[...new Set(shown().map(c=>doseOf[c]))].sort((a,b)=>(a===null?-1:a)-(b===null?-1:b));
+ $('tclg').innerHTML=(LAYOUT
+   ? shown().map(c=>'<span><i style="background:'+v(CCOL[c])+'"></i>'+c+'</span>').join('')
+   : doses.map((d,i)=>'<span><i style="background:'+v(ramp(i,doses.length))+'"></i>'+dl(d)+'</span>').join(''))
+  +'<span style="color:var(--mut)">marker: condition mean across plates ±1 SD · faint dots: plates</span>'
+  +'<span style="color:var(--mut)">a gap means that day was not imaged, not that nothing happened</span>';
+ $('tcnote').innerHTML=(m.note?'<b>'+m.label+'</b> — '+m.note:'');
+}
+
+/* ---------- 2. sensitivity: % of the SAME DAY's control ------------------
+   The denominator moves with the x-axis. Untreated plates decline too, and a
+   fixed day-0 baseline would charge that decline to the treatment. ------- */
+function drawNorm(){
+ const P=D.normalised;
+ if(!P){$('normcard').style.display='none';return;}
+ /* a series is drawn when the condition it came from is selected */
+ const S=P.series.filter(s=>shown().some(c=>strainOf[c]===s.strain&&doseOf[c]===s.dose));
+ if(!S.length){$('norm').innerHTML='<p class="note">Nothing selected.</p>';$('normlg').innerHTML='';return;}
+ const slot={}; P.series.forEach((s,i)=>slot[s.strain+'|'+s.dose]=i);
+ const tps=TPS, tmin=tps[0],tmax=tps[tps.length-1],tspan=(tmax-tmin)||1;
+ const every=[100]; S.forEach(s=>s.pts.forEach(q=>(q.vals||[]).forEach(x=>{if(isFinite(x))every.push(x)})));
+ const top=Math.max(115,Math.max(...every)*1.06);
+ const padL=70,padT=14,padB=52,pw=690,ph=290,labw=96;
+ const W=padL+pw+labw,H=padT+ph+padB;
+ const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Sensitivity over time'});
+ svg.setAttribute('style','max-width:100%;height:auto');
+ const ox=padL,oy=padT;
+ const X=t=>ox+pw*(t-tmin)/tspan*0.94, Y=y=>oy+ph-ph*Math.min(Math.max(y,0),top)/top;
+ const st=top<=140?20:(top<=260?25:50);
+ for(let z=0;z<=top;z+=st){const y=Y(z);
+  svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
+  svg.appendChild(E('text',{x:ox-9,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':10},[T(z+'%')]));}
+ svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:Y(100),y2:Y(100),stroke:v('--axis'),'stroke-width':1,'stroke-dasharray':'5 4'}));
+ svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:Y(50),y2:Y(50),stroke:v('--axis'),'stroke-width':.8,'stroke-dasharray':'2 4'}));
+ const labs=[];
+ S.forEach(s=>{
+  const col=v(CAT[slot[s.strain+'|'+s.dose]%CAT.length]);
+  const pts=[];
+  (s.pts||[]).forEach(q=>{
+   (q.vals||[]).forEach(val=>{if(val===null||!isFinite(val))return;
+    const dot=E('circle',{cx:X(q.tp),cy:Y(val),r:2.2,fill:col,opacity:.4});
+    hov(dot,'<b>'+s.strain+' '+dl(s.dose)+' · '+th(q.tp)+'</b><br>'+num(val,1)+'% of same-day control');
+    svg.appendChild(dot);});
+   if(q.mean===null||!isFinite(q.mean))return;
+   pts.push([X(q.tp),Y(q.mean)]);
+   if(q.sd)svg.appendChild(E('path',{d:'M'+X(q.tp)+' '+Y(q.mean+q.sd)+'V'+Y(Math.max(q.mean-q.sd,0)),
+     stroke:col,'stroke-width':1.3}));
+   const mk=E('circle',{cx:X(q.tp),cy:Y(q.mean),r:3.8,fill:col,stroke:v('--surface-1'),'stroke-width':1.5});
+   hov(mk,'<b>'+s.strain+' '+dl(s.dose)+' · '+th(q.tp)+'</b><br>'+num(q.mean,1)+'% ± '+num(q.sd,1)+
+       ' of same-day control<br>'+(q.vals||[]).length+' plate(s)');
+   svg.appendChild(mk);});
+  if(pts.length>1)svg.appendChild(E('path',{d:pts.map((q,i)=>(i?'L':'M')+q[0]+' '+q[1]).join(' '),
+    fill:'none',stroke:col,'stroke-width':2,'stroke-linejoin':'round'}));
+  if(s.t_half!==null&&s.t_half!==undefined){
+   const tri=E('path',{d:'M'+(X(s.t_half)-5)+' '+(Y(50)-9)+'h10l-5 9z',fill:col,
+     stroke:v('--surface-1'),'stroke-width':1});
+   hov(tri,'<b>'+s.strain+' '+dl(s.dose)+'</b><br>crosses 50% of control at '+num(s.t_half,1)+' h'+
+       '<br><i>interpolated between timepoints</i>');
+   svg.appendChild(tri);}
+  if(pts.length)labs.push({x:pts[pts.length-1][0],y:pts[pts.length-1][1],
+    txt:s.strain+' '+dl(s.dose),col:col});});
+ labs.sort((a,b)=>a.y-b.y);
+ for(let i=1;i<labs.length;i++)if(labs[i].y-labs[i-1].y<13)labs[i].y=labs[i-1].y+13;
+ labs.forEach(l=>svg.appendChild(E('text',{x:l.x+9,y:Math.min(l.y,oy+ph+9)+3.5,fill:l.col,
+   'font-size':11,'font-weight':700},[T(l.txt)])));
+ svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
+ tps.forEach(t=>svg.appendChild(E('text',{x:X(t),y:oy+ph+16,'text-anchor':'middle',fill:v('--mut'),'font-size':10},[T(String(+t))])));
+ svg.appendChild(E('text',{x:ox+pw/2,y:H-10,'text-anchor':'middle',fill:v('--mut'),'font-size':10.5},[T('time (h)')]));
+ svg.appendChild(E('text',{x:13,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink'),'font-size':11,
+   'font-weight':600,transform:'rotate(-90 13 '+(oy+ph/2)+')'},[T(P.label+', % of same-day control')]));
+ $('norm').innerHTML='';$('norm').appendChild(svg);
+ $('normlg').innerHTML=S.map(s=>'<span><i style="background:'+v(CAT[slot[s.strain+'|'+s.dose]%CAT.length])+
+   '"></i>'+s.strain+' '+dl(s.dose)+'</span>').join('')
+  +'<span style="color:var(--mut)">dashed: control at 100% by construction · ▼ crosses 50%</span>';
+ const notes=S.map(s=>'<b>'+s.strain+' '+dl(s.dose)+'</b> — '+
+   (s.t_half===null||s.t_half===undefined?'never falls to half of its control'
+    :'half of control at '+num(s.t_half,1)+' h'));
+ if(P.capped)notes.push(P.capped+' further condition(s) are not drawn: eight is as far as the colours stay distinguishable');
+ (P.notes||[]).forEach(n=>notes.push(n));
+ $('normnote').innerHTML=notes.join('<br>');
+}
+
+/* ---------- 3. survival (colony assay only) ---------- */
 let SLOG=0;
 function drawSurv(){
  const P=D.survival;
  if(!P){$('survcard').style.display='none';return;}
- const S=P.series.filter(s=>SHOWN.has(s.strain));
- const slot={}; P.series.forEach((s,i)=>slot[s.strain]=i);   /* colour follows the strain, never its rank */
+ const S=P.series.filter(s=>shownStrains().indexOf(s.strain)>=0);
+ const slot={}; P.series.forEach((s,i)=>slot[s.strain]=i);
  if(!S.length){$('surv').innerHTML='<p class="note">Nothing selected.</p>';$('survlg').innerHTML='';return;}
  const every=[]; S.forEach(s=>s.pts.forEach(q=>(q.vals||[]).forEach(x=>{if(x!==null&&isFinite(x))every.push(x)})));
  const mx=Math.max(100,...every), pos=every.filter(x=>x>0);
@@ -132,9 +351,7 @@ function drawSurv(){
  const X=d=>ox+(ds.length===1?pw/2:pw*(d-dmin)/span*0.92);
  const lg=Math.log10(fl), lgT=Math.log10(top);
  const Y=y=>isLog?oy+ph-ph*(Math.log10(Math.max(y,fl))-lg)/(lgT-lg):oy+ph-ph*Math.min(y,top)/top;
- const FY=isLog?oy+ph:Y(0);                       /* where a zero-count plate sits */
-
- /* grid + y labels */
+ const FY=isLog?oy+ph:Y(0);
  const yt=[];
  if(isLog){for(let e=Math.floor(lg);Math.pow(10,e)<=top;e++){const z=Math.pow(10,e);if(z>=fl)yt.push(z);}}
  else{const st=top<=140?20:(top<=220?25:50);for(let z=0;z<=top;z+=st)yt.push(z);}
@@ -148,7 +365,6 @@ function drawSurv(){
    svg.appendChild(E('line',{x1:ox-3,x2:ox,y1:y,y2:y,stroke:v('--axis'),'stroke-width':.8}));}}
  svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:Y(100),y2:Y(100),stroke:v('--axis'),'stroke-width':1,
    'stroke-dasharray':'5 4'}));
-
  let nz=0; const labs=[];
  S.forEach(s=>{
   const col=v(CAT[slot[s.strain]%CAT.length]);
@@ -192,8 +408,6 @@ function drawSurv(){
     lx=X(zs[zs.length-1]); ly=FY;}}
   labs.push({x:lx,y:ly,txt:s.strain});
  });
- /* Curves that end close together would print their labels on top of each
-    other; nudge them apart rather than lose one. */
  labs.sort((a,b)=>a.y-b.y);
  for(let i=1;i<labs.length;i++)if(labs[i].y-labs[i-1].y<13)labs[i].y=labs[i-1].y+13;
  labs.forEach(l=>svg.appendChild(E('text',{x:l.x+8,y:Math.min(l.y,oy+ph+9)+3.5,fill:v('--ink'),
@@ -214,29 +428,24 @@ function drawSurv(){
  $('survnote').innerHTML=notes.join('<br>');
 }
 
-/* ---------- 1. dose-response grid: rows = metric, cols = strain ---------- */
+/* ---------- 4. dose-response, per timepoint ---------- */
 function drawDR(){
- const cols=colKeys(), M=D.metrics;
+ const cols=D.has_dose?shownStrains():shown(), M=D.metrics.filter(m=>m.headline!==false);
  if(!cols.length||!M.length){$('dr').innerHTML='<p class="note">Nothing selected.</p>';return;}
- const xs=D.has_dose?D.doses:D.conditions.filter(c=>SHOWN.has(c));
- const pw=Math.max(120,Math.min(230,150)), ph=104, gapC=16, gapR=44, padL=86, padT=30, padB=34;
+ const xs=D.has_dose?D.doses:shown();
+ const series=isTC?(DRT===-1?TPS:[DRT]):[null];
+ const pw=Math.max(120,Math.min(230,150)), ph=104, gapC=16, gapR=44, padL=92, padT=30, padB=34;
  const W=padL+cols.length*(pw+gapC), H=padT+M.length*(ph+gapR)+padB;
  const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Dose-response'});
  svg.setAttribute('style','max-width:100%;height:auto');
  M.forEach((m,ri)=>{
-  /* shared y across the row, so columns are directly comparable */
-  let lo=Infinity,hi=-Infinity;
-  cols.forEach(cl=>xs.forEach(x=>{
-   const c=D.has_dose?condOf(cl,x):condByName(x); if(!c)return;
-   const st=c.stats[m.key]||{}; const mu=st.mean, s=st.sd||0;
-   if(mu!==null&&mu!==undefined&&isFinite(mu)){lo=Math.min(lo,mu-s);hi=Math.max(hi,mu+s);}
-   D.plates.filter(p=>p.condition===c.condition).forEach(p=>{const y=p.vals[m.key];
-    if(y!==null&&y!==undefined&&isFinite(y)){lo=Math.min(lo,y);hi=Math.max(hi,y);}});
-  }));
-  if(!isFinite(lo)){lo=0;hi=1;}
-  if(hi<=lo)hi=lo+1;
-  if(lo>0&&lo/hi<0.35)lo=0;                  /* zero baseline when it is close */
-  const padY=0.08*(hi-lo); lo-=padY; hi+=padY;
+  const all=[];
+  cols.forEach(cl=>xs.forEach(x=>series.forEach(t=>{
+   const name=D.has_dose?condNameOf(cl,x):x; if(!name)return;
+   const c=condAt(name,t); if(!c)return;
+   const st=c.stats[m.key]||{}; if(st.mean!==null&&isFinite(st.mean)){all.push(st.mean-(st.sd||0));all.push(st.mean+(st.sd||0));}
+   platesAt(name,t).forEach(p=>all.push(p.vals[m.key]));})));
+  const [lo,hi]=yRange(all);
   cols.forEach((cl,ci)=>{
    const ox=padL+ci*(pw+gapC), oy=padT+ri*(ph+gapR);
    const X=i=>ox+(xs.length===1?pw/2:14+i*(pw-28)/(xs.length-1));
@@ -244,189 +453,249 @@ function drawDR(){
    for(let g=0;g<=3;g++){const y=oy+ph-ph*g/3;
     svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
     if(ci===0)svg.appendChild(E('text',{x:ox-8,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':9.5},
-      [T(num(lo+(hi-lo)*g/3,(hi-lo)<3?2:(hi-lo)<40?1:0))]));}
+      [T(num(lo+(hi-lo)*g/3,(hi-lo)<3?3:(hi-lo)<40?1:0))]));}
    if(ci===0)svg.appendChild(E('text',{x:14,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink'),
      'font-size':11,'font-weight':600,transform:'rotate(-90 14 '+(oy+ph/2)+')'},[T(m.label)]));
    if(ri===0)svg.appendChild(E('text',{x:ox+pw/2,y:oy-12,'text-anchor':'middle',fill:v('--ink'),
      'font-size':12,'font-weight':700},[T(cl)]));
-   const pts=[];
-   xs.forEach((x,xi)=>{
-    const c=D.has_dose?condOf(cl,x):condByName(x); if(!c)return;
-    const st=c.stats[m.key]||{};
-    D.plates.filter(p=>p.condition===c.condition).forEach((p,pi)=>{const y=p.vals[m.key];
-     if(y===null||y===undefined||!isFinite(y))return;
-     const dot=E('circle',{cx:X(xi)+((pi%5)-2)*2.6,cy:Y(y),r:2,fill:v('--axis')});
-     hov(dot,'<b>'+p.plate+'</b><br>'+m.label+' '+num(y)+(m.unit?' '+m.unit:'')+
-         '<br>'+p.n_kept+' of '+p.n_items+' kept');
-     svg.appendChild(dot);});
-    if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
-    pts.push([X(xi),Y(st.mean)]);
-    if(st.sd)svg.appendChild(E('path',{d:'M'+X(xi)+' '+Y(st.mean+st.sd)+'V'+Y(st.mean-st.sd),
-      stroke:v('--s1'),'stroke-width':1.2}));
-    const mk=E('circle',{cx:X(xi),cy:Y(st.mean),r:3.4,fill:v('--s1'),
-      stroke:v('--surface-1'),'stroke-width':1.5});
-    hov(mk,'<b>'+c.condition+'</b><br>'+m.label+' '+num(st.mean)+(m.unit?' '+m.unit:'')+
-        (st.sd?' ± '+num(st.sd):'')+'<br>'+c.n_plates+' plate(s), '+c.n_kept+' kept of '+c.n_items+
-        (m.note?'<br><i>'+m.note+'</i>':''));
-    svg.appendChild(mk);});
-   if(pts.length>1)svg.appendChild(E('path',{d:pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' '),
-     fill:'none',stroke:v('--s1'),'stroke-width':1.8,'stroke-linejoin':'round'}));
+   series.forEach((t,ti)=>{
+    const col=t===null?v('--s1'):v(ramp(ti,series.length));
+    const pts=[];
+    xs.forEach((x,xi)=>{
+     const name=D.has_dose?condNameOf(cl,x):x; if(!name)return;
+     const c=condAt(name,t); if(!c)return;
+     platesAt(name,t).forEach((p,pi)=>{const y=p.vals[m.key];
+      if(y===null||y===undefined||!isFinite(y))return;
+      const dot=E('circle',{cx:X(xi)+((pi%5)-2)*2.6,cy:Y(y),r:2,fill:col,opacity:.3});
+      hov(dot,'<b>'+p.plate+'</b>'+(t===null?'':' · '+th(t))+'<br>'+m.label+' '+num(y,3)+(m.unit?' '+m.unit:'')+
+          '<br>'+p.n_kept+' of '+p.n_items+' kept');
+      svg.appendChild(dot);});
+     const st=c.stats[m.key]||{};
+     if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
+     pts.push([X(xi),Y(st.mean)]);
+     if(st.sd)svg.appendChild(E('path',{d:'M'+X(xi)+' '+Y(st.mean+st.sd)+'V'+Y(st.mean-st.sd),
+       stroke:col,'stroke-width':1.2}));
+     const mk=E('circle',{cx:X(xi),cy:Y(st.mean),r:3.4,fill:col,stroke:v('--surface-1'),'stroke-width':1.5});
+     hov(mk,'<b>'+c.condition+(t===null?'':' · '+th(t))+'</b><br>'+m.label+' '+num(st.mean,3)+(m.unit?' '+m.unit:'')+
+         (st.sd?' ± '+num(st.sd,3):'')+'<br>'+c.n_plates+' plate(s), '+c.n_kept+' kept of '+c.n_items+
+         (m.note?'<br><i>'+m.note+'</i>':''));
+     svg.appendChild(mk);});
+    if(pts.length>1)svg.appendChild(E('path',{d:pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' '),
+      fill:'none',stroke:col,'stroke-width':1.8,'stroke-linejoin':'round'}));});
    svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
    if(ri===M.length-1)xs.forEach((x,xi)=>svg.appendChild(E('text',{x:X(xi),y:oy+ph+15,
-     'text-anchor':'middle',fill:v('--mut'),'font-size':9.5},[T(D.has_dose?String(x):String(x))])));
+     'text-anchor':'middle',fill:v('--mut'),'font-size':9.5},[T(String(x))])));
   });
  });
  if(D.has_dose)svg.appendChild(E('text',{x:padL+(W-padL)/2,y:H-6,'text-anchor':'middle',
    fill:v('--mut'),'font-size':10.5},[T('Dose'+(D.dose_unit?' ('+D.dose_unit+')':''))]));
  $('dr').innerHTML='';$('dr').appendChild(svg);
- $('drlg').innerHTML='<span><i style="background:'+v('--s1')+'"></i>condition mean ± SD across plates</span>'
-  +'<span><i style="background:'+v('--axis')+'"></i>one plate</span>'
+ $('drlg').innerHTML=(isTC&&DRT===-1
+   ? TPS.map((t,i)=>'<span><i style="background:'+v(ramp(i,TPS.length))+'"></i>'+th(t)+'</span>').join('')
+   : '<span><i style="background:'+v('--s1')+'"></i>condition mean ± SD across plates</span>')
+  +'<span style="color:var(--mut)">faint dots: one plate</span>'
   +'<span style="color:var(--mut)">y is shared across a row, so columns compare directly</span>';
- $('drnote').innerHTML=D.metrics.filter(m=>m.note).map(m=>'<b>'+m.label+'</b> — '+m.note).join('<br>');
+ $('drnote').innerHTML=M.filter(m=>m.note).map(m=>'<b>'+m.label+'</b> — '+m.note).join('<br>');
 }
+const condNameOf=(strain,dose)=>{const c=D.cond.find(q=>q.strain===strain&&q.dose===dose);
+ return c&&SEL.has(c.condition)?c.condition:null;};
 
-/* ---------- 2. distribution: rows = strain, curves = dose ---------- */
+/* ---------- 5. distribution ---------------------------------------------
+   One timepoint at a time, because five days pooled into one density is a
+   shape none of the five had. Overlay puts every selected condition of that
+   hour in a single axis, which is where the bimodality shows. ----------- */
 function drawDist(){
  if(!D.dist){$('distcard').style.display='none';return;}
- const P=D.dist, X=P.x, n=X.length, rows=colKeys();
- const series=D.has_dose?D.doses:['*'];
- const pw=420, ph=76, gapR=26, padL=96, padT=16, padB=40;
- const W=padL+pw+20, H=padT+rows.length*(ph+gapR)+padB;
+ const P=D.dist, X=P.x, n=X.length;
+ const t=isTC?DTT:null;
+ const rows=DISTOVR?['all']:shownStrains();
+ const pw=460, ph=DISTOVR?150:76, gapR=26, padL=104, padT=16, padB=44;
+ const W=padL+pw+150, H=padT+rows.length*(ph+gapR)+padB;
  const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Distribution'});
  svg.setAttribute('style','max-width:100%;height:auto');
  const lx=P.log?Math.log(X[0]):X[0], hx=P.log?Math.log(X[n-1]):X[n-1];
+ /* Decades only on a log axis. The 1/1.5/2/3/4/6/8 set needs a metre of
+    panel; in 460px it prints one grey smear and the reader loses the scale
+    entirely, which is worse than three labelled powers of ten. */
  const ticks=(()=>{if(!P.log){const o=[];for(let g=0;g<=5;g++)o.push(X[0]+(X[n-1]-X[0])*g/5);return o;}
   const o=[];let e=Math.floor(Math.log10(X[0]));
-  while(Math.pow(10,e)<=X[n-1]){[1,1.5,2,3,4,6,8].forEach(m=>{const z=m*Math.pow(10,e);
-   if(z>=X[0]&&z<=X[n-1])o.push(z);});e++;}return o;})();
+  while(Math.pow(10,e)<=X[n-1]){const z=Math.pow(10,e);
+   if(z>=X[0])o.push(z);e++;}return o;})();
+ const tlab=z=>P.log?(z>=1?String(z):z.toFixed(Math.max(0,-Math.round(Math.log10(z))))):num(z,z<10?(z<1?3:1):0);
  const PXo=z=>(P.log?Math.log(z):z);
- let drawn=0;
+ let drawn=0, ntot=0; const legend=[];
  rows.forEach((rk,ri)=>{
   const oy=padT+ri*(ph+gapR), ox=padL;
   const PX=z=>ox+pw*(PXo(z)-lx)/(hx-lx), PY=y=>oy+ph-ph*y;
   ticks.forEach(z=>{svg.appendChild(E('line',{x1:PX(z),x2:PX(z),y1:oy,y2:oy+ph,stroke:v('--grid'),'stroke-width':.8}));
    if(ri===rows.length-1)svg.appendChild(E('text',{x:PX(z),y:oy+ph+26,'text-anchor':'middle',
-     fill:v('--mut'),'font-size':9.5},[T(num(z,z<10?1:0))]));});
+     fill:v('--mut'),'font-size':9.5},[T(tlab(z))]));});
   svg.appendChild(E('text',{x:padL-12,y:oy+ph/2+4,'text-anchor':'end',fill:v('--ink'),
-    'font-size':12,'font-weight':700},[T(rk)]));
-  series.forEach((s,si)=>{
-   const key=D.has_dose?(rk+'|'+s):rk;
-   const g=P.groups[key]; if(!g)return;
-   const col=v(ramp(si,series.length));
+    'font-size':12,'font-weight':700},[T(DISTOVR?(isTC?th(t):'all'):rk)]));
+  const here=DISTOVR?shown():shown().filter(c=>strainOf[c]===rk);
+  const doses=[...new Set(here.map(c=>doseOf[c]))].sort((a,b)=>(a===null?-1:a)-(b===null?-1:b));
+  here.forEach(cname=>{
+   const g=distGroup(D.has_dose?strainOf[cname]:cname,D.has_dose?doseOf[cname]:null,t);
+   if(!g)return;
+   ntot+=g.n;
+   const col=DISTOVR?v(CCOL[cname]):v(ramp(doses.indexOf(doseOf[cname]),doses.length));
+   if(legend.indexOf(col+SEP+(DISTOVR?cname:dl(doseOf[cname])))<0)
+     legend.push(col+SEP+(DISTOVR?cname:dl(doseOf[cname])));
    if(g.y){drawn++;
     let d='M'+PX(X[0])+' '+PY(0); g.y.forEach((y,i)=>{d+='L'+PX(X[i])+' '+PY(y)}); d+='L'+PX(X[n-1])+' '+PY(0);
-    svg.appendChild(E('path',{d:d+'Z',fill:col,opacity:.12}));
+    svg.appendChild(E('path',{d:d+'Z',fill:col,opacity:DISTOVR?.08:.12}));
     const ln=E('path',{d:d,fill:'none',stroke:col,'stroke-width':2,'stroke-linejoin':'round'});
-    hov(ln,'<b>'+rk+(D.has_dose?' · '+dl(s):'')+'</b><br>median '+num(g.p50)+' '+P.unit+
-        '<br>p25–p75 '+num(g.p25)+'–'+num(g.p75)+' · n='+g.n);
+    hov(ln,'<b>'+cname+(isTC?' · '+th(t):'')+'</b><br>median '+num(g.p50,3)+' '+P.unit+
+        '<br>p25–p75 '+num(g.p25,3)+'–'+num(g.p75,3)+' · n='+g.n);
     svg.appendChild(ln);}
    const tri=E('path',{d:'M'+PX(g.p50)+' '+(oy+ph+3)+'l-4 6h8z',fill:col,
      stroke:v('--surface-1'),'stroke-width':1});
-   hov(tri,'<b>'+rk+(D.has_dose?' · '+dl(s):'')+'</b><br>median '+num(g.p50)+' '+P.unit+' · n='+g.n);
+   hov(tri,'<b>'+cname+(isTC?' · '+th(t):'')+'</b><br>median '+num(g.p50,3)+' '+P.unit+' · n='+g.n);
    svg.appendChild(tri);});
   svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
  });
  svg.appendChild(E('text',{x:padL+pw/2,y:H-6,'text-anchor':'middle',fill:v('--mut'),'font-size':10.5},
    [T(P.label+(P.unit?' ('+P.unit+')':'')+(P.log?', log scale':''))]));
  $('dist').innerHTML='';$('dist').appendChild(svg);
- $('distlg').innerHTML=(D.has_dose?D.doses.map((d,i)=>
-   '<span><i style="background:'+v(ramp(i,D.doses.length))+'"></i>'+dl(d)+'</span>').join(''):'')
-  +'<span style="color:var(--mut)">▲ median · '+P.n_total.toLocaleString()+' items · '+drawn
-  +' curve'+(drawn===1?'':'s')+' (a group needs ≥8)</span>';
+ $('distlg').innerHTML=legend.map(s=>{const q=s.split(SEP);
+   return '<span><i style="background:'+q[0]+'"></i>'+q[1]+'</span>';}).join('')
+  +'<span style="color:var(--mut)">▲ median · '+ntot.toLocaleString()+' items'+
+    (isTC?' at '+th(t):'')+' · '+drawn+' curve'+(drawn===1?'':'s')+' (a group needs ≥8)</span>';
 }
 
-/* ---------- 3. quality control ---------- */
+/* ---------- 6. quality control ---------- */
 const QCM=[{k:'n_items',lab:'Items measured per plate'},
            {k:'n_kept',lab:'…that passed the quality gate'},
            {k:'kept_pct',lab:'Kept, as % of measured'}];
 let QK=0;
 function drawQC(){
- const cols=colKeys();
- const cells=[]; cols.forEach(cl=>{(D.has_dose?D.doses:[null]).forEach(d=>{
-  const c=D.has_dose?condOf(cl,d):condByName(cl); if(c)cells.push(c);});});
+ const cells=[];
+ shown().forEach(name=>(isTC?TPS:[null]).forEach(t=>{const c=condAt(name,t); if(c)cells.push(c);}));
  if(!cells.length){$('qc').innerHTML='';return;}
  const M=QCM[QK];
- const pw=Math.max(360,Math.min(1040,66*cells.length+120)), ph=180, padL=64,padT=16,padB=64;
+ const pw=Math.max(360,Math.min(1400,26*cells.length+120)), ph=180, padL=64,padT=16,padB=76;
  const W=pw+padL, H=ph+padT+padB;
  const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Quality control'});
  svg.setAttribute('style','max-width:100%;height:auto');
  const valOf=c=>M.k==='kept_pct'?(c.n_items?100*c.n_kept/c.n_items:null):c[M.k];
  let hi=0; cells.forEach(c=>{const y=valOf(c); if(y!==null&&isFinite(y)&&y>hi)hi=y;});
  hi=hi*1.15||1;
- const iw=pw-30, ox=padL, oy=padT, bw=Math.min(34,iw/cells.length*0.62);
+ const iw=pw-30, ox=padL, oy=padT, bw=Math.min(30,iw/cells.length*0.7);
  const Y=y=>oy+ph-ph*Math.min(Math.max(y,0),hi)/hi;
  for(let g=0;g<=4;g++){const val=hi*g/4,y=Y(val);
   svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:y,y2:y,stroke:v('--grid'),'stroke-width':.8}));
   svg.appendChild(E('text',{x:ox-8,y:y+3.5,'text-anchor':'end',fill:v('--mut'),'font-size':10},
     [T(num(val,hi<10?1:0))]));}
  cells.forEach((c,i)=>{const x=ox+iw*(i+0.5)/cells.length, y=valOf(c);
+  const lab=c.condition+(isTC?' · '+(+c.tp)+'h':'');
   if(y!==null&&isFinite(y)){
    const h=Math.max(1,oy+ph-Y(y));
-   const r=E('rect',{x:x-bw/2,y:Y(y),width:bw,height:h,rx:3,fill:v('--s1'),opacity:.85});
-   hov(r,'<b>'+c.condition+'</b><br>'+M.lab+': '+num(y,1)+'<br>'+c.n_plates+
+   const r=E('rect',{x:x-bw/2,y:Y(y),width:bw,height:h,rx:3,fill:v(CCOL[c.condition]),opacity:.85});
+   hov(r,'<b>'+lab+'</b><br>'+M.lab+': '+num(y,1)+'<br>'+c.n_plates+
        ' plate(s) · '+c.n_kept+' kept of '+c.n_items);
    svg.appendChild(r);}
-  svg.appendChild(E('text',{x:x,y:oy+ph+14,'text-anchor':'end',fill:v('--mut'),'font-size':9.5,
-    transform:'rotate(-40 '+x+' '+(oy+ph+14)+')'},[T(c.condition)]));});
+  svg.appendChild(E('text',{x:x,y:oy+ph+14,'text-anchor':'end',fill:v('--mut'),'font-size':9,
+    transform:'rotate(-45 '+x+' '+(oy+ph+14)+')'},[T(lab)]));});
  svg.appendChild(E('line',{x1:ox,x2:ox+iw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
  $('qc').innerHTML='';$('qc').appendChild(svg);
  $('qclg').innerHTML='<span style="color:var(--mut)">'+M.lab+'</span>';
 }
 
-/* ---------- 4. table ---------- */
+/* ---------- 7. table ---------- */
 let TBK=0;
 function drawTable(){
  const per=TBK===0;
- let h='<table><thead><tr><th>Condition</th><th>'+(per?'Plates':'Plate')+'</th>'
-  +(per?'<th>n items</th><th>n kept</th>':'<th>n items</th><th>n kept</th>')
+ let h='<table><thead><tr>'+(isTC?'<th>Time (h)</th>':'')+'<th>Condition</th><th>'+(per?'Plates':'Plate')+'</th>'
+  +'<th>n items</th><th>n kept</th>'
   +D.metrics.map(m=>'<th>'+m.label+(m.unit?' ('+m.unit+')':'')+'</th>').join('')+'</tr></thead><tbody>';
+ const tcell=r=>isTC?'<td>'+(r.tp===null||r.tp===undefined?'—':+r.tp)+'</td>':'';
  if(per){
-  D.cond.filter(c=>SHOWN.has(D.has_dose?c.strain:c.condition)).forEach(c=>{
-   h+='<tr><td>'+c.condition+'</td><td>'+c.n_plates+'</td><td>'+c.n_items+'</td><td>'+c.n_kept+'</td>'
+  D.cond.filter(c=>SEL.has(c.condition)).forEach(c=>{
+   h+='<tr>'+tcell(c)+'<td>'+c.condition+'</td><td>'+c.n_plates+'</td><td>'+c.n_items+'</td><td>'+c.n_kept+'</td>'
     +D.metrics.map(m=>{const s=c.stats[m.key]||{};
-      return '<td>'+num(s.mean)+(s.sd!==null&&s.sd!==undefined?' <span style="color:var(--mut)">± '+num(s.sd)+'</span>':'')+'</td>'}).join('')+'</tr>';});
+      return '<td>'+num(s.mean,3)+(s.sd!==null&&s.sd!==undefined?' <span style="color:var(--mut)">± '+num(s.sd,3)+'</span>':'')+'</td>'}).join('')+'</tr>';});
  }else{
-  D.plates.filter(p=>SHOWN.has(D.has_dose?p.strain:p.condition)).forEach(p=>{
-   h+='<tr><td>'+p.condition+'</td><td>'+p.plate+'</td><td>'+p.n_items+'</td><td>'+p.n_kept+'</td>'
-    +D.metrics.map(m=>'<td>'+num(p.vals[m.key])+'</td>').join('')+'</tr>';});
+  D.plates.filter(p=>SEL.has(p.condition)).forEach(p=>{
+   h+='<tr>'+tcell(p)+'<td>'+p.condition+'</td><td>'+p.plate+'</td><td>'+p.n_items+'</td><td>'+p.n_kept+'</td>'
+    +D.metrics.map(m=>'<td>'+num(p.vals[m.key],3)+'</td>').join('')+'</tr>';});
  }
  h+='</tbody></table>';$('tbl').innerHTML=h;
 }
 
 /* ---------- chrome ---------- */
-function chip(host,label,pressed,onclick){const b=document.createElement('button');
+function chip(host,label,pressed,onclick,swatch){const b=document.createElement('button');
  b.textContent=label;b.setAttribute('aria-pressed',pressed?'true':'false');
+ if(swatch){b.className='sw';b.style.setProperty('--swc',swatch);}
  b.onclick=()=>{onclick(b);};host.appendChild(b);return b;}
+function press(host,i){[...host.querySelectorAll('button')].forEach((c,j)=>
+ c.setAttribute('aria-pressed',j===i?'true':'false'));}
 
 function boot(){
  $('title').textContent=D.title; document.title=D.title;
  $('hdr').innerHTML=D.subtitle||'';
  if(D.caveat)$('caveat').innerHTML=D.caveat; else $('caveat').style.display='none';
  $('drt').textContent=D.has_dose?'Dose–response':'By condition';
- $('drcap').innerHTML=D.dr_caption||'';
- if(D.dist){$('distt').textContent=D.dist.title||'Distribution';$('distcap').innerHTML=D.dist.caption||'';}
+ $('drcap').innerHTML=(D.dr_caption||'')+(isTC?' Only the headline metrics take a row here; every '
+   +'metric is available in the panel above and in the table below.':'');
+ $('tccap').innerHTML='The measurement. Pick a metric; pick which conditions are drawn with the chips '
+  +'at the top. <b>Facet</b> gives one axis per strain so the doses of a strain sit together; '
+  +'<b>Overlay</b> puts every selected condition in one axis, which is the comparison the facets '
+  +'cannot make. Marker is the condition mean across plates at that hour with ±1 SD, faint dots are '
+  +'the plates themselves. Nothing here is averaged across days.';
+ if(D.dist){$('distt').textContent=D.dist.title||'Distribution';
+  $('distcap').innerHTML=(D.dist.caption||'')+(isTC?' One hour at a time — pooling the days would '
+    +'make a shape none of them had.':'');}
+ if(D.normalised){$('normt').textContent=D.normalised.label+' relative to same-day control';
+  $('normcap').innerHTML='Every treated plate as a percentage of the mean of its own strain’s control '
+   +'plates <b>from the same day</b>, so the decline of the untreated plates themselves is divided out '
+   +'rather than charged to the treatment. ▼ marks where a curve first crosses half of its control, '
+   +'interpolated between timepoints. This is the panel that says which strain lost more, and when.';}
+ else $('normcard').style.display='none';
  if(D.survival){$('survcap').innerHTML=D.survival.caption||'';
-  ['Linear','Log'].forEach((lab,i)=>chip($('survk'),lab,i===0,b=>{SLOG=i;
-    [...$('survk').querySelectorAll('button')].forEach((c,j)=>c.setAttribute('aria-pressed',j===i?'true':'false'));
-    drawSurv();}));}
+  ['Linear','Log'].forEach((lab,i)=>chip($('survk'),lab,i===0,b=>{SLOG=i;press($('survk'),i);drawSurv();}));}
  else $('survcard').style.display='none';
  $('tblcap').innerHTML='Every number behind the panels. Condition rows are mean ± SD across plates; '
-  +'plate rows are that plate’s own summary.';
- $('fillab').textContent=D.has_dose?'Strains':'Conditions';
- (D.has_dose?D.strains:D.conditions).forEach(s=>chip($('filt'),s,true,b=>{
-   if(SHOWN.has(s)&&SHOWN.size>1)SHOWN.delete(s); else SHOWN.add(s);
-   b.setAttribute('aria-pressed',SHOWN.has(s)?'true':'false'); redraw();}));
- QCM.forEach((m,i)=>chip($('qck'),m.lab,i===0,b=>{QK=i;
-   [...$('qck').children].forEach((c,j)=>c.setAttribute('aria-pressed',j===i?'true':'false'));drawQC();}));
- ['Per condition','Per plate'].forEach((lab,i)=>chip($('tbk'),lab,i===0,b=>{TBK=i;
-   [...$('tbk').children].forEach((c,j)=>c.setAttribute('aria-pressed',j===i?'true':'false'));drawTable();}));
+  +'plate rows are that plate’s own summary.'+(isTC?' One row per condition <i>per timepoint</i>.':'');
+
+ /* metric chips: headline first, then the rest */
+ const order=D.metrics.map((m,i)=>i).sort((a,b)=>
+   (D.metrics[a].headline===false)-(D.metrics[b].headline===false));
+ MK=order[0];
+ /* Two metrics can share a label and differ only in unit — mean speed in BL/s
+    and in px/s. A chip row with the same word on two chips is a chip row you
+    have to click to read, so the unit joins the label exactly there. */
+ const dup={}; D.metrics.forEach(m=>dup[m.label]=(dup[m.label]||0)+1);
+ const chipLab=m=>m.label+(dup[m.label]>1&&m.unit?' ('+m.unit+')':'');
+ order.forEach((mi,pos)=>chip($('tcm'),chipLab(D.metrics[mi]),pos===0,b=>{
+   MK=mi;press($('tcm'),pos);drawTC();}));
+
+ ['Facet','Overlay'].forEach((lab,i)=>chip($('lay'),lab,i===0,b=>{LAYOUT=i;press($('lay'),i);
+   DISTOVR=i;press($('distk'),isTC?TPS.indexOf(DTT):0);redraw();}));
+
+ $('fillab').textContent='Conditions';
+ CONDS.forEach(s=>chip($('filt'),s,true,b=>{
+   if(SEL.has(s)&&SEL.size>1)SEL.delete(s); else SEL.add(s);
+   b.setAttribute('aria-pressed',SEL.has(s)?'true':'false'); redraw();},v(CCOL[s])));
+ $('allbtn').onclick=()=>{const on=SEL.size<CONDS.length;
+   SEL=new Set(on?CONDS:[CONDS[0]]);
+   [...$('filt').querySelectorAll('button')].forEach((b,i)=>
+     b.setAttribute('aria-pressed',SEL.has(CONDS[i])?'true':'false'));redraw();};
+
+ if(isTC){
+  const drl=document.createElement('b');drl.textContent='Timepoint';$('drk').appendChild(drl);
+  chip($('drk'),'All',true,b=>{DRT=-1;press($('drk'),0);drawDR();});
+  TPS.forEach((t,i)=>chip($('drk'),th(t),false,b=>{DRT=t;press($('drk'),i+1);drawDR();}));
+  const dtl=document.createElement('b');dtl.textContent='Timepoint';$('distk').appendChild(dtl);
+  TPS.forEach((t,i)=>chip($('distk'),th(t),t===DTT,b=>{DTT=t;press($('distk'),i);drawDist();}));
+ }
+ QCM.forEach((m,i)=>chip($('qck'),m.lab,i===0,b=>{QK=i;press($('qck'),i);drawQC();}));
+ ['Per condition','Per plate'].forEach((lab,i)=>chip($('tbk'),lab,i===0,b=>{TBK=i;press($('tbk'),i);drawTable();}));
  ['Auto','Light','Dark'].forEach((lab,i)=>chip($('theme'),lab,i===0,b=>{
    const r=document.documentElement;
    if(i===0)r.removeAttribute('data-theme'); else r.setAttribute('data-theme',lab.toLowerCase());
-   [...$('theme').children].forEach((c,j)=>c.setAttribute('aria-pressed',j===i?'true':'false'));
-   redraw();}));
+   press($('theme'),i);redraw();}));
  redraw();
 }
-function redraw(){drawSurv();drawDR();drawDist();drawQC();drawTable();}
+function redraw(){drawTC();drawNorm();drawSurv();drawDR();drawDist();drawQC();drawTable();}
 boot();
 </script></body></html>

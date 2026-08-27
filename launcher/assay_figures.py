@@ -9,9 +9,20 @@ one that only the assays with a real untreated control ask for:
                               as a density per condition
   <assay>_survival.png        one metric, every strain in one axis, each
                               normalised to its own untreated control
+  <assay>_timecourse.png      metric (rows) x strain (columns), TIME on x —
+                              self-skipping below two timepoints
+  <assay>_normalised.png      one metric, every treated condition in one axis,
+                              as a percentage of its own control AT THE SAME
+                              TIMEPOINT, with the 50% crossing marked
 
-Both are bonus outputs — a failure is logged and swallowed, because the workbook
-is the primary artefact and must always complete.
+Every one is a bonus output — a failure is logged and swallowed, because the
+workbook is the primary artefact and must always complete.
+
+NOTHING HERE POOLS ACROSS TIMEPOINTS. Every function that indexes a condition
+row keys it on (timepoint, condition), never on the condition name: in a
+timecourse the name repeats once per imaging day, and an index that ignores
+that keeps whichever day came last and draws it as if it were the experiment.
+It is a silent wrong answer rather than a crash, so the rule is a rule.
 
 The faceted layout is deliberate and is explained in assay_explorer's docstring:
 overlaying six strains needs six categorical colours in one axis, which is not
@@ -81,13 +92,23 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
                       write_log: Callable[[str], None]) -> Optional[Path]:
     """Grid of metric x strain. Condition mean ± SD across plates, plus a dot
     per plate — a condition whose plates disagree has to look different from one
-    whose plates agree."""
+    whose plates agree.
+
+    IN A TIMECOURSE THIS DRAWS ONE LINE PER TIMEPOINT. It used to key the
+    condition rows by dose alone; with a timepoint dimension that dict keeps
+    whichever day happened to come last and draws it as though it were the
+    condition, with every day's plates scattered behind it. That is not a
+    cluttered figure, it is a wrong one, and it read as plausible — which is
+    why the rule now is that nothing in this module indexes a condition row by
+    anything less than its full key.
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import numpy as np
 
+        metrics = AC.headline(metrics)
         cond, plates = agg.per_condition, agg.per_plate
         if not cond or not metrics:
             write_log("dose-response figure: nothing to draw — skipped.")
@@ -97,6 +118,13 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
         xs = (sorted({c["dose"] for c in cond if c.get("dose") is not None})
               if has_dose else [None])
         unit = AC.dose_unit_of(cond)
+        tps = list(getattr(agg, "timepoints", []) or [])
+        series = tps if len(tps) > 1 else [None]
+
+        def _plates_of(c, t):
+            return [p for p in plates
+                    if p["condition"] == c["condition"]
+                    and (t is None or p.get("timepoint_h") == t)]
 
         cols = strains if has_dose else [None]
         fig, axes = plt.subplots(len(metrics), len(cols),
@@ -112,32 +140,43 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
                 if has_dose:
                     rows = [c for c in cond if c["strain"] == s]
                     order = xs
-                    keyed = {c["dose"]: c for c in rows}
                 else:
+                    rows = list(cond)
                     order = [c["condition"] for c in cond]
-                    keyed = {c["condition"]: c for c in cond}
-                mus, errs, X = [], [], []
-                for xi, x in enumerate(order):
-                    c = keyed.get(x)
-                    if c is None:
-                        continue
-                    for p in [p for p in plates
-                              if p["condition"] == c["condition"]]:
-                        y = p.get(m.key)
-                        if y is None:
+                for ti, t in enumerate(series):
+                    here = [c for c in rows
+                            if t is None or c.get("timepoint_h") == t]
+                    keyed = {(c["dose"] if has_dose else c["condition"]): c
+                             for c in here}
+                    col = _MARK if t is None else _ramp(ti, len(series))
+                    mus, errs, X = [], [], []
+                    for xi, x in enumerate(order):
+                        c = keyed.get(x)
+                        if c is None:
                             continue
-                        ax.plot([xi + (hash(p["plate"]) % 5 - 2) * 0.04], [y],
-                                marker="o", markersize=2.6, color=_AXIS,
-                                linestyle="none", zorder=2)
-                    mu = c.get(f"{m.key}_mean")
-                    if mu is None:
-                        continue
-                    X.append(xi)
-                    mus.append(mu)
-                    errs.append(c.get(f"{m.key}_sd") or 0.0)
-                if X:
-                    ax.errorbar(X, mus, yerr=errs, marker="o", markersize=4.4,
-                                linewidth=1.7, capsize=3, color=_MARK, zorder=3)
+                        for p in _plates_of(c, t):
+                            y = p.get(m.key)
+                            if y is None:
+                                continue
+                            # Jitter is in CATEGORY units, so it has to stay
+                            # small: with two doses the axis spans 0..1 and
+                            # what looks like a modest nudge throws a plate
+                            # dot a tenth of the panel away from its tick.
+                            ax.plot([xi + (hash(p["plate"]) % 5 - 2) * 0.012],
+                                    [y], marker="o", markersize=2.4,
+                                    color=col, alpha=0.28,
+                                    linestyle="none", zorder=2)
+                        mu = c.get(f"{m.key}_mean")
+                        if mu is None:
+                            continue
+                        X.append(xi)
+                        mus.append(mu)
+                        errs.append(c.get(f"{m.key}_sd") or 0.0)
+                    if X:
+                        ax.errorbar(X, mus, yerr=errs, marker="o",
+                                    markersize=4.0, linewidth=1.6, capsize=2.5,
+                                    color=col, zorder=3,
+                                    label=(None if t is None else f"{t:g} h"))
                 ax.set_xticks(range(len(order)))
                 ax.set_xticklabels(
                     [str(x) for x in order], fontsize=7,
@@ -152,12 +191,24 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
                     ax.set_xlabel(f"Dose ({unit})" if unit else "Dose",
                                   fontsize=8, color=_MUT)
         fig.suptitle(title, fontsize=13, y=0.995, color=_INK)
-        bottom = _caption(
-            fig, "Marker is the condition mean across plates, bars are ±1 SD "
-                 "(sample SD, blank at one plate); grey dots are individual "
-                 "plates. The y-axis is shared across each row, so columns can "
-                 "be compared directly. n is the number of plates, not the "
-                 "number of animals.")
+        cap = ("Marker is the condition mean across plates, bars are ±1 SD "
+               "(sample SD, blank at one plate); faint dots are individual "
+               "plates. The y-axis is shared across each row, so columns can "
+               "be compared directly. n is the number of plates, not the "
+               "number of animals.")
+        if len(series) > 1:
+            cap += (" One line per timepoint, light to dark with time — no "
+                    "quantity here is averaged across days.")
+        bottom = _caption(fig, cap)
+        if len(series) > 1:
+            h, l = axes[0][0].get_legend_handles_labels()
+            if h:
+                # Above the caption, never on top of it — _caption returns the
+                # figure fraction it just claimed for exactly this.
+                fig.legend(h, l, loc="lower center", ncol=min(len(l), 8),
+                           frameon=False, fontsize=8,
+                           bbox_to_anchor=(0.5, bottom + 0.004))
+                bottom += 0.035
         fig.tight_layout(rect=(0, bottom + 0.02, 1, 0.965))
         fig.savefig(out_png, dpi=200)
         plt.close(fig)
@@ -172,8 +223,18 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
 def fig_distribution(out_png: Path, dist: Optional[dict], label: str,
                      unit: str, doses: Sequence, strains: Sequence,
                      dose_unit: str, title: str,
-                     write_log: Callable[[str], None]) -> Optional[Path]:
-    """One row per strain, one curve per dose."""
+                     write_log: Callable[[str], None],
+                     timepoints: Sequence = ()) -> Optional[Path]:
+    """One row per strain, one curve per dose — and one COLUMN per timepoint.
+
+    Pooling five imaging days into one density is not a summary of them: the
+    day-0 and day-4 populations of the same condition are different
+    populations, and a curve that merges them has a shape neither of them had.
+    Splitting the panel is the only honest way to keep the distribution in a
+    timecourse, and it is also the view that shows what the condition means
+    cannot — whether a falling mean is the whole population slowing or half of
+    it stopping.
+    """
     try:
         if not dist:
             return None
@@ -184,51 +245,73 @@ def fig_distribution(out_png: Path, dist: Optional[dict], label: str,
 
         x = np.array(dist["x"], dtype=float)
         rows = list(strains) or ["all"]
-        series = list(doses) or ["*"]
-        fig, axes = plt.subplots(len(rows), 1, squeeze=False, sharex=True,
-                                 figsize=(7.4, 1.15 * len(rows) + 1.9))
+        series = list(doses) or [None]
+        tps = list(timepoints or [])
+        cols = tps if len(tps) > 1 else [None]
+        fig, axes = plt.subplots(
+            len(rows), len(cols), squeeze=False, sharex=True,
+            figsize=(2.3 * len(cols) + 2.6 if len(cols) > 1 else 7.4,
+                     1.15 * len(rows) + 1.9))
         drawn = 0
         for ri, rk in enumerate(rows):
-            ax = axes[ri][0]
-            _style(ax)
-            ax.grid(True, axis="x", color=_GRID, linewidth=0.8)
-            ax.grid(False, axis="y")
-            ax.set_yticks([])
-            for si, s in enumerate(series):
-                key = f"{rk}|{s}" if doses else str(rk)
-                g = dist["groups"].get(key)
-                if not g:
-                    continue
-                col = _ramp(si, len(series))
-                if g["y"] is not None:
-                    y = np.array(g["y"], dtype=float)
-                    ax.fill_between(x, 0, y, color=col, alpha=0.13, linewidth=0)
-                    ax.plot(x, y, color=col, linewidth=1.6)
-                    drawn += 1
-                ax.plot([g["p50"]], [-0.07], marker="^", markersize=5,
-                        color=col, clip_on=False)
-            if dist.get("log"):
-                ax.set_xscale("log")
-                ticks = _log_ticks(float(x[0]), float(x[-1]))
-                if ticks:
-                    ax.set_xticks(ticks)
-                    ax.set_xticklabels([f"{t:g}" for t in ticks])
-                ax.set_xticks([], minor=True)
-            ax.set_ylim(-0.12, 1.12)
-            ax.set_ylabel(str(rk), fontsize=9, color=_INK, rotation=0,
-                          ha="right", va="center")
-        axes[-1][0].set_xlabel(label + (f"  [{unit}]" if unit else ""),
-                               fontsize=8, color=_MUT)
+            for ci, t in enumerate(cols):
+                ax = axes[ri][ci]
+                _style(ax)
+                ax.grid(True, axis="x", color=_GRID, linewidth=0.8)
+                ax.grid(False, axis="y")
+                ax.set_yticks([])
+                for si, s in enumerate(series):
+                    g = dist["groups"].get(AC.dist_key(rk, s, t))
+                    if not g:
+                        continue
+                    col = _ramp(si, len(series))
+                    if g["y"] is not None:
+                        y = np.array(g["y"], dtype=float)
+                        ax.fill_between(x, 0, y, color=col, alpha=0.13,
+                                        linewidth=0)
+                        ax.plot(x, y, color=col, linewidth=1.6)
+                        drawn += 1
+                    ax.plot([g["p50"]], [-0.07], marker="^", markersize=5,
+                            color=col, clip_on=False)
+                if dist.get("log"):
+                    ax.set_xscale("log")
+                    # Narrow columns get decades only. The 1/1.5/2/3/4/6/8 set
+                    # is right for one wide axis and unreadable in five, and an
+                    # axis whose labels overlap into a grey bar is worse than
+                    # one with three labels on it.
+                    ticks = (_decade_ticks(float(x[0]), float(x[-1]))
+                             if len(cols) > 1
+                             else _log_ticks(float(x[0]), float(x[-1])))
+                    if ticks:
+                        ax.set_xticks(ticks)
+                        ax.set_xticklabels([f"{v:g}" for v in ticks],
+                                           fontsize=7.5 if len(cols) > 1 else 8)
+                    ax.set_xticks([], minor=True)
+                ax.set_ylim(-0.12, 1.12)
+                if ci == 0:
+                    ax.set_ylabel(str(rk), fontsize=9, color=_INK, rotation=0,
+                                  ha="right", va="center")
+                if ri == 0 and t is not None:
+                    ax.set_title(f"{t:g} h", fontsize=9.5, color=_INK)
+        xlab = label + (f"  [{unit}]" if unit else "")
+        for ci, ax in enumerate(axes[-1]):
+            # One x-label per figure, under the middle column: repeating it
+            # under all five says nothing the first one did not.
+            if len(cols) == 1 or ci == len(cols) // 2:
+                ax.set_xlabel(xlab, fontsize=8.5, color=_MUT)
         handles = [plt.Line2D([], [], color=_ramp(i, len(series)), linewidth=2)
                    for i in range(len(series))]
-        labels = [f"{s} {dose_unit}".strip() for s in series] if doses else ["all"]
+        labels = ([f"{s} {dose_unit}".strip() for s in series] if doses
+                  else ["all"])
         fig.suptitle(title, fontsize=13, color=_INK)
         bottom = _caption(
             fig, "Kernel density " + ("in log space" if dist.get("log")
                                       else "in linear space")
                  + f", curves scaled to equal height; ▲ marks the median. "
                    f"{dist['n_total']:,} items. A group needs at least 8 to "
-                   "draw a curve; its median is still marked.")
+                   "draw a curve; its median is still marked."
+                 + (" Columns are timepoints and are never pooled."
+                    if len(cols) > 1 else ""))
         fig.legend(handles, labels, loc="lower center", ncol=min(7, len(series)),
                    frameon=False, fontsize=8, bbox_to_anchor=(0.5, bottom + 0.005))
         fig.tight_layout(rect=(0, bottom + 0.06, 1, 0.955))
@@ -506,6 +589,7 @@ def fig_timecourse(out_png: Path, agg: AC.Aggregation,
         import matplotlib.pyplot as plt
         import numpy as np
 
+        metrics = AC.headline(metrics)
         cond, plates = agg.per_condition, agg.per_plate
         tps = list(getattr(agg, "timepoints", []) or [])
         if len(tps) < 2:
@@ -604,4 +688,117 @@ def fig_timecourse(out_png: Path, agg: AC.Aggregation,
         write_log(f"WARNING: the timecourse figure could not be drawn ({exc}). "
                   "Every other output of this run is unaffected.")
         log.warning("timecourse figure failed", exc_info=True)
+        return None
+
+
+def fig_normalised(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
+                   title: str, write_log: Callable[[str], None]
+                   ) -> Optional[Path]:
+    """One metric, every treated condition, as a percentage of ITS OWN control
+    at the SAME timepoint — the sensitivity curve, and the one panel that puts
+    the strains in a single axis.
+
+    Why this is the figure the timecourse grid cannot be. The grid answers
+    "what did each condition do", one panel at a time, and leaves the reader to
+    hold three panels in their head and subtract. This answers "which strain
+    lost more of its locomotion, and when", which is a comparison BETWEEN
+    curves and therefore has to be drawn as one. It pays for overlaying with a
+    colour-vision-validated categorical set, a label on every curve, and a cap
+    at eight.
+
+    The denominator moves with the x-axis. Untreated plates decline too — ours
+    are down sharply by 96 h — and a fixed day-0 baseline would charge that to
+    the treatment and manufacture a dose-response out of the plates simply
+    getting older. Dividing by the same day's control removes it. That is also
+    why the control line sits flat at 100% by construction: it is the
+    definition, not a result, and the figure says so rather than inviting the
+    reading that the control was stable.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        built = AC.normalised_series(agg, metric.key, write_log)
+        if built is None:
+            return None
+        series = built["series"]
+        capped = max(0, len(series) - len(_CAT))
+        series = series[:len(_CAT)]
+        unit = built["unit"]
+        tps = built["timepoints"]
+
+        fig, ax = plt.subplots(figsize=(7.6, 4.3))
+        _style(ax)
+        ax.grid(True, axis="y", color=_GRID, linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.axhline(100.0, color=_AXIS, linewidth=1.0, linestyle=(0, (5, 4)))
+        ax.axhline(50.0, color=_AXIS, linewidth=0.8, linestyle=(0, (2, 4)))
+
+        labs = []
+        for i, s in enumerate(series):
+            col = _CAT[i % len(_CAT)]
+            xs = [q["tp"] for q in s["pts"] if q["mean"] is not None]
+            ys = [q["mean"] for q in s["pts"] if q["mean"] is not None]
+            es = [(q["sd"] or 0.0) for q in s["pts"] if q["mean"] is not None]
+            for q in s["pts"]:
+                for val in q["vals"]:
+                    ax.plot([q["tp"]], [val], marker="o", markersize=2.4,
+                            color=col, alpha=0.30, linestyle="none", zorder=1)
+            if xs:
+                ax.errorbar(xs, ys, yerr=es, color=col, marker="o",
+                            markersize=4.4, linewidth=1.9, capsize=2.5,
+                            elinewidth=0.9, zorder=3)
+                labs.append((xs[-1], ys[-1],
+                             f"{s['strain']} {s['dose']:g} {unit}".strip(), col))
+            th = s.get("t_half")
+            if th is not None:
+                ax.plot([th], [50.0], marker="v", markersize=6.5, color=col,
+                        markeredgecolor="white", markeredgewidth=0.9, zorder=4)
+
+        labs.sort(key=lambda q: q[1])
+        for j in range(1, len(labs)):
+            if labs[j][1] - labs[j - 1][1] < 6:
+                labs[j] = (labs[j][0], labs[j - 1][1] + 6, labs[j][2], labs[j][3])
+        for lx, ly, txt, col in labs:
+            ax.annotate(txt, (lx, ly), xytext=(7, 0),
+                        textcoords="offset points", fontsize=9,
+                        color=col, fontweight="bold", va="center")
+
+        ax.set_xlabel("time (h)", fontsize=9, color=_MUT)
+        ax.set_ylabel(f"{metric.label}, % of same-day control", fontsize=9.5,
+                      color=_INK)
+        ax.set_xticks(tps)
+        ax.set_xlim(min(tps) - 4, max(tps) + max(22.0, 0.28 * (max(tps) or 1)))
+        ax.set_ylim(bottom=0)
+        fig.suptitle(title, fontsize=13, y=0.985, color=_INK)
+
+        halves = [f"{s['strain']} {s['dose']:g} {unit}".strip()
+                  + (f" at {s['t_half']:.0f} h" if s.get("t_half") is not None
+                     else ": never")
+                  for s in series]
+        cap = ("Each treated plate as a percentage of the mean of its own "
+               "strain's control plates FROM THE SAME DAY, so the decline of "
+               "the untreated plates themselves is divided out rather than "
+               "charged to the treatment. Marker is the mean across those "
+               "normalised plates, bar is ±1 SD, faint dots are the plates. "
+               "The dashed line at 100% is the control by construction. "
+               "▼ marks where a curve first crosses 50%, interpolated between "
+               "timepoints — " + "; ".join(halves) + ".")
+        if capped:
+            cap += (f" {capped} further condition(s) are not drawn: eight is "
+                    "as far as the colours stay distinguishable.")
+        for n in built.get("notes", []):
+            cap += " " + n
+        bottom = _caption(fig, cap)
+        fig.tight_layout(rect=(0, bottom + 0.02, 1, 0.945))
+        fig.savefig(out_png, dpi=200)
+        plt.close(fig)
+        write_log(f"Wrote {out_png} ({len(series)} normalised curve(s); "
+                  + "; ".join(halves) + ")")
+        return out_png
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("normalised figure failed: %s", exc, exc_info=True)
+        write_log(f"WARNING: {Path(out_png).name} was not written ({exc}).")
         return None

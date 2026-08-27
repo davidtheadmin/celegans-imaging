@@ -7,6 +7,7 @@ No widget method is ever called from the sync thread.
 """
 import logging
 import os
+import random
 import re
 import subprocess
 import sys
@@ -55,6 +56,10 @@ _DOT_COLORS: dict[str, str] = {
 
 _POLL_MS = 2000        # main window refresh interval
 _PROGRESS_POLL_MS = 200  # progress dialog refresh interval
+# Flavour-line dwell, in poll ticks. 15 ticks (3 s) read as a progress
+# indicator and made the window feel busier than the run was; 45 (9 s) is
+# long enough to read a line, look away, and not catch it changing.
+_FLAVOUR_TICKS = 45
 
 # ---------------------------------------------------------------------------
 # Window placement
@@ -288,6 +293,52 @@ _FLAVOUR_TEXTS: list[str] = [
     "Telling the worms apart from the dust…",
     "Spooling up the agar treadmill…",
     "Consulting the petri oracle…",
+    # 2026-08-27: the pool doubled and the shuffle slowed. A line that changed
+    # every three seconds read as a progress indicator, which it is not — the
+    # line above it is. These are meant to be noticed once and then ignored.
+    "Counting the ones that hold still.",
+    "Nothing has gone wrong yet.",
+    "Every worm is a 49-point polyline with opinions.",
+    "Subtracting the illumination gradient…",
+    "The rim of the plate is darker. We know. It's handled.",
+    "Refusing an ambiguous crossing rather than swapping two animals.",
+    "Two worms met. Neither will be renamed.",
+    "Measuring in body lengths, because pixels lie across days.",
+    "Deciding whether that stopped or just paused.",
+    "A blank is not a zero.",
+    "Reading the head-swing angle…",
+    "Half-peaks count for half.",
+    "Bridging a one-frame skeleton hiccup…",
+    "That was an egg.",
+    "That was definitely a scratch.",
+    "Worm #12 has gone under the lawn.",
+    "Following a track that would rather not be followed.",
+    "This plate has more debris than worms. Filtering.",
+    "Checking whether the fragment came back.",
+    "Merging two fragments that were one animal.",
+    "Splitting one fragment that was two animals.",
+    "Docker is fine. Docker is always fine.",
+    "22 GB of RAM, eight workers, one very slow worm.",
+    "The container is thinking. Let it think.",
+    "Reading HDF5 the long way round…",
+    "Sorting by frame number, again.",
+    "Nobody knows why this stage is the slow one.",
+    "Intensity maps: expensive, occasionally worth it.",
+    "Smoothing skeletons, which is not the same as smoothing data.",
+    "Normalising by the plate, not by the worm.",
+    "The median is doing the heavy lifting here.",
+    "Averaging plates, not animals. It matters.",
+    "One plate of 200 does not outvote one of 12.",
+    "Computing something you will look at for four seconds.",
+    "Building a figure nobody asked for but everybody wants.",
+    "Preparing an explorer with more toggles than last time.",
+    "Rounding to four places, reluctantly.",
+    "Writing the CSV before the renders, having learned.",
+    "Not overwriting yesterday's file.",
+    "Still going. Genuinely.",
+    "This is the part where you make tea.",
+    "Long runs are the price of not guessing.",
+    "You could be doing this by eye. You are not. Good.",
 ]
 
 
@@ -557,7 +608,13 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
         self._agent = agent
         self._status = status
         self._noun = noun
-        self._flavour_idx = 0
+        # Shuffled once per dialog rather than walked in file order: the list
+        # is authored, so in order it plays the same opening three lines at the
+        # start of every run and the later two thirds are never seen on a short
+        # one.
+        self._flavour_order = list(range(len(_FLAVOUR_TEXTS)))
+        random.shuffle(self._flavour_order)
+        self._flavour_pos = 0
         self._flavour_tick = 0
         self._build()
         # Beside the launcher, not full height: this window is six lines tall
@@ -588,11 +645,22 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
         )
         self._stage_lbl.pack(fill="x")
 
+        # What the run is DOING, live — Tierpsy's own checkpoint names, counted
+        # across the worker pool. This is the line to read; the flavour line
+        # below it is decoration and should not be mistaken for progress, which
+        # is why it sits lower, dimmer and changes slowly.
+        self._detail_lbl = ctk.CTkLabel(
+            body, text="", font=theme.caption(), text_color=theme.TEXT,
+            anchor="w", justify="left",
+        )
+        self._detail_lbl.pack(fill="x", pady=(1, 0))
+
         self._flavour_lbl = ctk.CTkLabel(
-            body, text=_FLAVOUR_TEXTS[0], font=theme.caption(),
+            body, text=_FLAVOUR_TEXTS[self._flavour_order[0]],
+            font=theme.caption(),
             text_color=theme.TEXT_2, anchor="w", justify="left",
         )
-        self._flavour_lbl.pack(fill="x", pady=(2, 0))
+        self._flavour_lbl.pack(fill="x", pady=(6, 0))
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(fill="x", padx=16, pady=(0, 16))
@@ -621,12 +689,22 @@ class AnalysisProgressDialog(ctk.CTkToplevel):
                 self._video_tip.set_text("")
 
         self._stage_lbl.configure(text=snap.current_stage)
+        # Pipelines that do not report per-worker phases simply leave this
+        # empty; getattr keeps this dialog working for all four assays off one
+        # snapshot shape.
+        self._detail_lbl.configure(text=getattr(snap, "stage_detail", "") or "")
 
         self._flavour_tick += 1
-        if self._flavour_tick >= 15:
+        if self._flavour_tick >= _FLAVOUR_TICKS:
             self._flavour_tick = 0
-            self._flavour_idx = (self._flavour_idx + 1) % len(_FLAVOUR_TEXTS)
-            self._flavour_lbl.configure(text=_FLAVOUR_TEXTS[self._flavour_idx])
+            self._flavour_pos += 1
+            if self._flavour_pos >= len(self._flavour_order):
+                # Reshuffle rather than loop: on a 20-hour run the same order
+                # twice is more noticeable than no order at all.
+                random.shuffle(self._flavour_order)
+                self._flavour_pos = 0
+            self._flavour_lbl.configure(
+                text=_FLAVOUR_TEXTS[self._flavour_order[self._flavour_pos]])
 
         self.after(_PROGRESS_POLL_MS, self._poll)
 

@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 import sys
 from pathlib import Path
+from typing import Callable
 
 from analysis import engine as engine_mod
+from analysis.stage_tracker import tierpsy_phase
 from analysis.engine import Engine
 
 log = logging.getLogger(__name__)
@@ -49,6 +52,7 @@ def run_tierpsy(
     docker_cmd: str = "docker",
     timeout_s: int = 600,
     engine: Engine | None = None,
+    on_stage: Callable[[str], None] | None = None,
 ) -> tuple[str, str]:
     """
     Run Tierpsy on a single video. Returns (stdout, stderr).
@@ -57,23 +61,61 @@ def run_tierpsy(
     `engine` is the supported argument. `docker_cmd` is the pre-engine form and
     is honoured when no engine is passed, so an out-of-tree caller (the dev
     param-sweep script, for instance) keeps working without edits.
+
+    STREAMED, NOT CAPTURED. This used to be a blocking subprocess.run, which
+    meant the whole 20-odd minutes of Tierpsy arrived at once when it was over
+    and there was no way to tell a working container from a wedged one. It now
+    reads the pipe line by line and, when `on_stage` is given, calls it with
+    each checkpoint name Tierpsy announces ("Compressing video", "Calculating
+    skeletons", …). stderr is folded into the same stream so the ordering is
+    the container's own; the returned stderr is therefore always "".
     """
     if engine is None:
         engine = Engine(command=docker_cmd, kind="docker", version="(assumed)")
 
     cmd = engine_mod.build_tierpsy_cmd(engine, video_avi, json_file, image)
+    captured: list[str] = []
+    timed_out = {"value": False}
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, creationflags=_NO_WINDOW,
+    )
+
+    def _kill_on_timeout() -> None:
+        timed_out["value"] = True
+        try:
+            proc.kill()
+        except Exception:                                          # noqa: BLE001
+            pass
+
+    timer = threading.Timer(timeout_s, _kill_on_timeout)
+    timer.start()
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s,
-            creationflags=_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
+        assert proc.stdout is not None
+        last = ""
+        for line in proc.stdout:
+            captured.append(line)
+            if on_stage is not None:
+                phase = tierpsy_phase(line)
+                if phase and phase != last:
+                    last = phase
+                    try:
+                        on_stage(phase)
+                    except Exception:                              # noqa: BLE001
+                        pass   # a status update never breaks a Tierpsy run
+        proc.wait()
+    finally:
+        timer.cancel()
+
+    combined = "".join(captured)
+    if timed_out["value"]:
         raise RuntimeError(f"Tierpsy timed out after {timeout_s}s")
-    if result.returncode != 0:
+    if proc.returncode != 0:
         raise RuntimeError(
-            f"Tierpsy exited {result.returncode}:\n{result.stderr.strip()[-1000:]}"
+            f"Tierpsy exited {proc.returncode}:\n{combined.strip()[-1000:]}"
         )
-    return result.stdout, result.stderr
+    return combined, ""
 
 
 def preflight_engine(settings: object, folder: Path) -> tuple[Engine | None, list[str]]:

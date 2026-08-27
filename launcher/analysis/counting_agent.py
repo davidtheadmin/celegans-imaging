@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from analysis.stage_tracker import StageTracker
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +106,8 @@ class CountingSnapshot:
     total: int
     current_basename: str
     current_stage: str
+    # What the run is doing right now; see analysis/stage_tracker.py.
+    stage_detail: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +131,8 @@ class CountingStatus:
         self._total = 0
         self._current_basename = ""
         self._current_stage = ""
+        # Live phases; its own lock (analysis/stage_tracker.py).
+        self.stages = StageTracker()
         self._completed_result: Optional[dict] = None
 
     def update(
@@ -164,6 +169,7 @@ class CountingStatus:
             self._label = "Analysis failed — see log"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": True,
                 "error": error,
@@ -179,6 +185,7 @@ class CountingStatus:
             self._label = f"Analysis complete: {n_ok}/{n_ok + n_fail} plates"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": False,
                 "n_ok": n_ok,
@@ -196,6 +203,7 @@ class CountingStatus:
                 total=self._total,
                 current_basename=self._current_basename,
                 current_stage=self._current_stage,
+                stage_detail=self.stages.summary(),
             )
 
     def is_running(self) -> bool:
@@ -429,7 +437,8 @@ class CountingAgent(threading.Thread):
                 )
                 try:
                     colony_rows, plate_row = process_image(
-                        path, folder, opts, out_dir, write_log
+                        path, folder, opts, out_dir, write_log,
+                        stage=self.status.stages.reporter(path.name),
                     )
                 except Exception as exc:
                     # One corrupt TIFF used to escape the loop, escape
@@ -439,6 +448,11 @@ class CountingAgent(threading.Thread):
                     log.exception("Counting failed on %s", path.name)
                     write_log(f"ERROR {path.name}: {exc}  (skipped)")
                     continue
+                finally:
+                    # Also on the skip path: an image that failed half way
+                    # through would otherwise leave its last phase on screen,
+                    # and a stalled run and a working one would look alike.
+                    self.status.stages.clear()
                 all_colony_rows.extend(colony_rows)
                 if plate_row is not None:
                     plate_rows.append(plate_row)

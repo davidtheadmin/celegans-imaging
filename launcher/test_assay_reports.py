@@ -104,13 +104,37 @@ def _worms(n_plates=3, n_worms=12):
                         "duration_s": 25.0 + w,
                         "is_long": w != 0,          # one short worm per plate
                         "mean_speed_pxs": 12.0 + w * 0.5,
+                        # The crawling headline is BL/s, not px/s. A fixture
+                        # that carries only the pixel column makes the report
+                        # skip its distribution panel and the test then checks
+                        # a None — which is how this fixture last drifted.
+                        "mean_speed_bls": (12.0 + w * 0.5) / 100.0,
                         "fraction_paused": 0.1 + 0.01 * (w % 5),
+                        "is_immobile": 1.0 if w < 2 else 0.0,
                         "reversal_rate_per_min": 2.0 + 0.1 * w,
+                        "reversal_rate_moving_per_min": (2.0 + 0.1 * w) / 0.9,
                         "turn_rate_per_min": 1.0 + 0.05 * w,
                         "tortuosity": 1.2 + 0.02 * w,
+                        "directionality": 0.8 - 0.02 * w,
                         "net_displacement_bl": 3.0 + 0.1 * w,
                         "passed_filter": w != 0,
                     })
+    return rows
+
+
+def _timecourse_worms(hours=(0.0, 24.0, 48.0)):
+    """The same worms imaged on several days, with a real decline in the
+    treated arm, so a test can tell a timepoint-aware output from one that
+    silently kept whichever day came last."""
+    rows = []
+    for i, t in enumerate(hours):
+        for r in _worms(n_plates=2, n_worms=8):
+            r = dict(r)
+            r["timepoint_h"] = t
+            r["source_folder"] = f"day{i}"
+            if r["condition"].endswith("40J"):
+                r["mean_speed_bls"] *= (1.0 - 0.3 * i)
+            rows.append(r)
     return rows
 
 
@@ -182,12 +206,92 @@ def test_crawling(tmp: Path):
     html = (d / "explorer.html").read_text(encoding="utf-8")
     D = json.loads(re.search(r"const D = (\{.*?\});\n", html, re.S).group(1))
     check([m["key"] for m in D["metrics"]] ==
-          ["mean_speed_pxs", "fraction_paused", "reversal_rate_per_min",
-           "turn_rate_per_min", "tortuosity", "net_displacement_bl", "bpm"],
+          ["mean_speed_bls", "fraction_paused", "is_immobile", "directionality",
+           "mean_speed_pxs", "reversal_rate_moving_per_min",
+           "reversal_rate_per_min", "turn_rate_per_min", "net_displacement_bl",
+           "bpm", "tortuosity"],
           "the agreed crawling panels, in order")
+    check([m["key"] for m in D["metrics"] if m["headline"]] ==
+          ["mean_speed_bls", "fraction_paused", "is_immobile", "directionality"],
+          "the four that take a row in the figures are flagged headline")
     check(D["dist"]["log"] is True, "speed is drawn in log space")
-    check("plate" in (D.get("caveat") or "").lower(),
-          "the change of replication unit is stated on the page")
+    check(D["dist"]["unit"] == "BL/s",
+          "the distribution is the body-length speed, not the pixel one")
+    check(not (D.get("caveat") or "").strip(),
+          "no standing caveat banner — the workbook README carries that now")
+    check(not any("motility" in (m.get("note") or "").lower()
+                  for m in D["metrics"]),
+          "no metric note sends the reader to another assay")
+
+
+def test_timecourse(tmp: Path):
+    """The regression this whole change exists for.
+
+    Before it, a multi-folder run aggregated by timepoint and then every
+    consumer of that aggregation dropped the timepoint again: the sheets held
+    N indistinguishable copies of each condition, the dose-response figure drew
+    one arbitrary day as the condition mean with every day's plates behind it,
+    and the explorer received rows it could not tell apart. Each of those is a
+    silent wrong answer, so each gets an assertion.
+    """
+    print("\ncrawling timecourse")
+    d = tmp / "tc"; d.mkdir()
+    hours = (0.0, 24.0, 48.0)
+    wb, written, logs = _run(AR.crawling_report, d, _timecourse_worms(hours),
+                             min_span_s=30.0, by_timepoint=True)
+
+    # plate_summary is one row per (timepoint, condition, PLATE); the other two
+    # are one row per (timepoint, condition). Checking the wrong key would pass
+    # for the wrong reason, so each sheet is checked against its own.
+    for sheet, key in (("plate_summary", ("timepoint_h", "condition", "plate")),
+                       ("condition_summary", ("timepoint_h", "condition")),
+                       ("qc", ("timepoint_h", "condition"))):
+        hdr = [c.value for c in wb[sheet][1]]
+        check(hdr[0] == "timepoint_h", f"{sheet} leads with timepoint_h")
+        ix = [hdr.index(k) for k in key]
+        seen = {tuple(r[i].value for i in ix)
+                for r in wb[sheet].iter_rows(min_row=2)}
+        check(len(seen) == wb[sheet].max_row - 1,
+              f"{sheet} has no two rows sharing {key}")
+
+    with open(d / "crawling_condition_summary.csv", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    check(rows and "timepoint_h" in rows[0],
+          "the condition CSV carries the timepoint too")
+    check(len({r["condition"] for r in rows}) * len(hours) == len(rows),
+          "one CSV row per condition per timepoint, none collapsed")
+
+    check((d / "crawling_timecourse.png").exists(),
+          "the timecourse figure is written")
+    check((d / "crawling_normalised.png").exists(),
+          "the same-day-control figure is written")
+
+    html = (d / "explorer.html").read_text(encoding="utf-8")
+    D = json.loads(re.search(r"const D = (\{.*?\});\n", html, re.S).group(1))
+    check(D["timepoints"] == list(hours), "the explorer knows its timepoints")
+    check(all(c.get("tp") is not None for c in D["cond"]),
+          "every condition row in the payload carries its timepoint")
+    check(all(p.get("tp") is not None for p in D["plates"]),
+          "so does every plate row")
+    check(len({(c["condition"], c["tp"]) for c in D["cond"]}) == len(D["cond"]),
+          "no two payload rows are indistinguishable")
+    keys = list((D["dist"] or {}).get("group_meta", {}))
+    check(keys and all("@" in k for k in keys),
+          "distribution groups are split by timepoint, not pooled across days")
+    norm = D.get("normalised")
+    check(norm is not None, "the payload carries the same-day-control series")
+    dosed = [s for s in (norm or {}).get("series", []) if s["strain"] == "601"
+             and s["dose"] == 40]
+    check(bool(dosed) and dosed[0]["t_half"] is not None,
+          "a condition that halves against its own control reports a t_half")
+
+    # The single-folder path must be untouched by all of this.
+    d2 = tmp / "tc_single"; d2.mkdir()
+    wb2, _, _ = _run(AR.crawling_report, d2, _worms(), min_span_s=30.0)
+    check([c.value for c in wb2["condition_summary"][1]][0] == "condition",
+          "a single-folder run gets no timepoint column")
+    check(not (d2 / "crawling_timecourse.png").exists(),
+          "…and no timecourse figure")
 
 
 def test_counting(tmp: Path):
@@ -271,6 +375,7 @@ if __name__ == "__main__":
         test_gate()
         test_motility(tmp)
         test_crawling(tmp)
+        test_timecourse(tmp)
         test_counting(tmp)
         test_logger_cannot_kill_a_run(tmp)
     print()

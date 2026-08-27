@@ -20,6 +20,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import shlex
 import shutil
 import traceback
@@ -30,10 +31,11 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import paths
 from analysis import engine as engine_mod
+from analysis.stage_tracker import StageTracker, tierpsy_phase
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +186,8 @@ def _print_output_tree(root: Path, prefix: str = "") -> None:
             print(f"{prefix}  {p}  (stat error: {exc})", flush=True)
 
 
+
+
 def _run_tierpsy_instrumented(
     video_avi: Path,
     json_file: Path,
@@ -192,6 +196,7 @@ def _run_tierpsy_instrumented(
     engine: object = None,
     timeout_s: int = _TIERPSY_TIMEOUT_S,
     tag: str = "",
+    on_stage: Optional[Callable[[str], None]] = None,
 ) -> tuple[str, str]:
     """
     Run Tierpsy on a single video via Docker, with diagnostic instrumentation.
@@ -247,9 +252,18 @@ def _run_tierpsy_instrumented(
     timer.start()
     try:
         assert proc.stdout is not None
+        last_stage = ""
         for line in proc.stdout:
             captured.append(line)
             print(f"{cpfx}[tierpsy] " + line.rstrip("\n"), flush=True)
+            if on_stage is not None:
+                phase = tierpsy_phase(line)
+                if phase and phase != last_stage:
+                    last_stage = phase
+                    try:
+                        on_stage(phase)
+                    except Exception:                          # noqa: BLE001
+                        pass       # a status update never breaks a Tierpsy run
         proc.wait()
     finally:
         timer.cancel()
@@ -324,6 +338,22 @@ def _drop_stale_avi(avi: Path, flat_field: bool) -> bool:
 # Per-video worker (runs on a ThreadPoolExecutor worker thread)
 # ---------------------------------------------------------------------------
 
+
+def _pv_prefix(condition: str, plate: str, timepoint_h=None) -> str:
+    """Filename stem for this video's per_video artefacts.
+
+    "<condition>__<plate>" alone is NOT unique in a timecourse: "601 0J" /
+    "plate 01" names one video on every imaging day, so five days of sidecars
+    and renders wrote over each other and the folder ended up holding whichever
+    day finished last, silently and under a name that claimed otherwise. The
+    timepoint is part of the identity, so it is part of the name.
+    """
+    stem = f"{condition}__{plate}"
+    if timepoint_h is None:
+        return stem
+    return f"{stem}__t{float(timepoint_h):g}h"
+
+
 def _process_one_video_crawling(
     video: Path,
     folder: Path,
@@ -343,6 +373,8 @@ def _process_one_video_crawling(
     per_video_dir: Path,
     ffmpeg_threads: Optional[int],
     cancel_event: threading.Event,
+    timepoint_h: Optional[float] = None,
+    report_stage: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """
     Process a single video end-to-end (probe → transcode → Tierpsy → metrics →
@@ -364,6 +396,17 @@ def _process_one_video_crawling(
     def plog(msg: str) -> None:
         logbuf.append(msg)
 
+    # The log is buffered and flushed only when a video finishes, which is
+    # right for the log and useless for a progress window: on a 25-minute
+    # video it means 25 minutes of nothing. stage() is the live channel — one
+    # short phrase, overwritten, never queued.
+    def stage(msg: str) -> None:
+        if report_stage is not None:
+            try:
+                report_stage(msg)
+            except Exception:                                  # noqa: BLE001
+                pass          # a status update is never worth failing a video
+
     condition, plate = _resolve_video_path(video, folder)
     thread_name = threading.current_thread().name
     plog(f"\n--- {video.name} ({condition}) ---")
@@ -383,6 +426,7 @@ def _process_one_video_crawling(
     cache_dir = _cache_dir_for(video)
 
     try:
+        stage("Probing the video")
         fps = probe_fps(video)
         plog(f"fps: {fps:.3f}")
 
@@ -400,10 +444,12 @@ def _process_one_video_crawling(
         if cache_hit:
             hdf5_path = candidate_hdf5
             needs_avi = (want_tracked or want_sidebyside or want_path_traces)
+            stage("Reusing cached tracking")
             if avi.exists():
                 plog(f"[CACHE HIT] Skipping Tierpsy; AVI present: {video.name}")
             elif needs_avi:
                 plog(f"[CACHE HIT] Skipping Tierpsy; converting AVI for rendering: {video.name}")
+                stage("Flat-field + transcode")
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 convert_to_avi(video, avi, threads=ffmpeg_threads,
                            flat_field=flat_field)
@@ -415,6 +461,8 @@ def _process_one_video_crawling(
             if _drop_stale_avi(avi, flat_field):
                 plog("[CACHE] Dropped a cached AVI made under a different "
                      "flat-field setting; re-transcoding.")
+            stage("Flat-field + transcode"
+                  if flat_field else "Transcoding to AVI")
             convert_to_avi(video, avi, threads=ffmpeg_threads,
                            flat_field=flat_field)
             plog(f"AVI ready: {avi}")
@@ -429,6 +477,7 @@ def _process_one_video_crawling(
                 json.dumps(params, indent=2), encoding="utf-8"
             )
 
+            stage("Starting Tierpsy")
             stdout, stderr = _run_tierpsy_instrumented(
                 avi, json_file,
                 image=image,
@@ -436,6 +485,7 @@ def _process_one_video_crawling(
                 engine=engine,
                 timeout_s=timeout_s,
                 tag=video.stem,
+                on_stage=lambda phrase: stage(f"Tierpsy: {phrase}"),
             )
             plog(f"Tierpsy stdout:\n{stdout}")
             if stderr.strip():
@@ -451,6 +501,7 @@ def _process_one_video_crawling(
             _write_cache_stamp(cache_dir, "crawling", cache_fp)
 
         engine_log: dict = {}
+        stage("Linking fragments + measuring")
         worm_rows = compute_crawling_metrics(
             hdf5_path, fps, condition, plate, video.name,
             head_angle_prominence=head_angle_prominence,
@@ -463,6 +514,13 @@ def _process_one_video_crawling(
         # Surface the shared engine's pre-grouping drop reasons so we
         # can see how many tracks die before the 60s gate vs at it.
         if engine_log:
+            _fd = engine_log.get("fragments_dropped_no_skeleton") or 0
+            if _fd:
+                plog(f"Skeleton floor: dropped {_fd} of "
+                     f"{engine_log.get('fragments_in')} fragment(s) under "
+                     f"{engine_log.get('min_fragment_skeleton_coverage'):.2f} "
+                     f"coverage ({engine_log.get('frames_dropped_no_skeleton')} "
+                     "frames) before linking")
             plog(
                 f"Linker: fragments={engine_log.get('input_track_count')}"
                 f" -> after merge-split={engine_log.get('fragments_after_split')}"
@@ -473,9 +531,11 @@ def _process_one_video_crawling(
                 f" | merge episodes={engine_log.get('merge_episodes')}"
                 f" (frames dropped={engine_log.get('merge_frames_dropped')})"
             )
-            sidecar = per_video_dir / f"{condition}__{plate}_analysis_log.json"
+            sidecar = per_video_dir / f"{_pv_prefix(condition, plate, timepoint_h)}_analysis_log.json"
             sidecar.write_text(
-                _json.dumps({"video": video.name, **engine_log}, indent=2),
+                _json.dumps({"video": video.name,
+                             "timepoint_h": timepoint_h,
+                             **engine_log}, indent=2),
                 encoding="utf-8",
             )
 
@@ -522,11 +582,12 @@ def _process_one_video_crawling(
         )
 
         if want_tracked or want_sidebyside or want_path_traces:
+            stage("Rendering diagnostic video")
             from analysis.render_video import render_tracked, render_sidebyside
             from analysis.crawling_render import render_path_traces
             skeletons_hdf5 = cache_dir / "Results" / f"{video.stem}_skeletons.hdf5"
             masked_hdf5 = cache_dir / "MaskedVideos" / f"{video.stem}.hdf5"
-            prefix = f"{condition}__{plate}"
+            prefix = _pv_prefix(condition, plate, timepoint_h)
             if want_tracked and skeletons_hdf5.exists() and avi.exists():
                 render_tracked(
                     avi, skeletons_hdf5,
@@ -557,6 +618,10 @@ def _process_one_video_crawling(
     elapsed = time.monotonic() - t0
     plog(f"FINISH on {thread_name} in {elapsed:.1f}s "
          f"({'ok' if status_str == 'ok' else 'FAILED'})")
+    # Clear this video's phase whatever happened above, including the error
+    # path: a failed video that leaves "Tierpsy: Calculating skeletons" in the
+    # dialog makes a stalled run look like a working one.
+    stage("")
 
     return {
         "video": video,
@@ -583,6 +648,12 @@ class CrawlingSnapshot:
     total: int
     current_basename: str
     current_stage: str
+    # What the pool is doing RIGHT NOW, e.g. "3x Calculating skeletons ·
+    # 2x Compressing video · 1x Transcoding". Empty when nothing is running.
+    # Separate from current_stage, which counts finished videos: a count tells
+    # you how far along a 20-hour run is and says nothing about whether it is
+    # still moving, which is the question anyone actually watching it has.
+    stage_detail: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +677,9 @@ class CrawlingStatus:
         self._total = 0
         self._current_basename = ""
         self._current_stage = ""
+        # Live per-video phases. Its own lock, so worker threads never contend
+        # with this object's — see analysis/stage_tracker.py.
+        self.stages = StageTracker()
         self._completed_result: Optional[dict] = None
 
     def update(
@@ -642,6 +716,7 @@ class CrawlingStatus:
             self._label = "Analysis failed — see log"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": True,
                 "error": error,
@@ -657,6 +732,7 @@ class CrawlingStatus:
             self._label = f"Analysis complete: {n_ok}/{n_ok + n_fail} videos"
             self._running = False
             self._current_stage = ""
+            self.stages.clear()
             self._completed_result = {
                 "failed": False,
                 "n_ok": n_ok,
@@ -674,6 +750,7 @@ class CrawlingStatus:
                 total=self._total,
                 current_basename=self._current_basename,
                 current_stage=self._current_stage,
+                stage_detail=self.stages.summary(),
             )
 
     def is_running(self) -> bool:
@@ -1046,6 +1123,8 @@ class CrawlingAgent(threading.Thread):
                                 per_video_dir=per_video_dir,
                                 ffmpeg_threads=ff_threads,
                                 cancel_event=self._cancel,
+                                timepoint_h=tp,
+                                report_stage=self.status.stages.reporter(video.name),
                             )
                             futures[fut] = video
 
@@ -1120,9 +1199,19 @@ class CrawlingAgent(threading.Thread):
                           f"({', '.join(f'{t:g} h' for t in timepoints)})")
 
         # ---- Build output: per_worm + per_condition sheets, CSV mirrors per_condition ----
-        per_worm_df = (pd.DataFrame(all_worm_rows, columns=PER_WORM_COLS).round(4)
+        # The sheet carries the same columns as per_worm_rows.csv, timecourse
+        # ones included. It used to project onto PER_WORM_COLS alone, so
+        # source_folder and timepoint_h — the two columns that say WHICH DAY a
+        # worm came from — existed in the CSV and were absent from the workbook
+        # everyone actually opens. Mirrors run_cache.write_rows deliberately:
+        # the two views of one table must not differ in their columns.
+        sheet_cols = list(PER_WORM_COLS)
+        for extra in ("source_folder", "timepoint_h"):
+            if any(extra in r for r in all_worm_rows) and extra not in sheet_cols:
+                sheet_cols.append(extra)
+        per_worm_df = (pd.DataFrame(all_worm_rows, columns=sheet_cols).round(4)
                        if all_worm_rows
-                       else pd.DataFrame(columns=PER_WORM_COLS))
+                       else pd.DataFrame(columns=sheet_cols))
         by_tp = len(timepoints) > 1
         per_condition_rows = aggregate_per_condition(
             all_worm_rows, min_span_s=min_span_s, by_timepoint=by_tp)
@@ -1140,9 +1229,12 @@ class CrawlingAgent(threading.Thread):
             per_condition_df.to_excel(xw, sheet_name="per_condition", index=False)
             try:
                 import assay_reports
+                from analysis.crawling_metrics import (
+                    MIN_FRAGMENT_SKELETON_COVERAGE)
                 assay_reports.crawling_report(
                     xw.book, all_worm_rows, out_dir, write_log,
-                    min_span_s=min_span_s, by_timepoint=by_tp)
+                    min_span_s=min_span_s, by_timepoint=by_tp,
+                    min_fragment_coverage=MIN_FRAGMENT_SKELETON_COVERAGE)
             except Exception as exc:                              # noqa: BLE001
                 log.warning("crawling: report layer failed", exc_info=True)
                 write_log(f"WARNING: the plate/condition sheets, the figures and "

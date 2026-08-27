@@ -41,6 +41,7 @@ import csv
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -226,21 +227,38 @@ def write_rows(path: Path, rows: list[dict], columns: list[str],
 
     Written for every run, not only multi-folder ones — a single-folder run
     today is the folder a timecourse reuses tomorrow.
+
+    WRITTEN VIA A TEMPORARY FILE AND THEN RENAMED. Opening the destination
+    with "w" truncates it first, so anything that stops the write half way —
+    a cancelled run, the process going away, a full disk — leaves a 0-byte
+    file exactly where hours of correct analysis used to be, and it is
+    indistinguishable from a run that produced nothing. Writing beside it and
+    renaming means the destination only ever holds a complete file: either the
+    new one or, if the write fails, the previous one untouched.
     """
     cols = list(columns)
     for extra in ("source_folder", "timepoint_h"):
         if extra not in cols:
             cols.append(extra)
+    tmp = path.with_name(path.name + ".partial")
     try:
-        with path.open("w", newline="", encoding="utf-8") as fh:
+        with tmp.open("w", newline="", encoding="utf-8") as fh:
             w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
             w.writeheader()
             for r in rows:
                 w.writerow(r)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)          # atomic on Windows and POSIX alike
     except OSError as exc:
         if write_log:
-            write_log(f"Could not write {path.name}: {exc}")
+            write_log(f"Could not write {path.name}: {exc}. The previous "
+                      f"{path.name}, if there was one, is untouched.")
         log.warning("could not write rows csv %s", path, exc_info=True)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def read_rows(path: Path, folder: Path,
