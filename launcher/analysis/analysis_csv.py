@@ -44,12 +44,19 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 # by eye. A swimming worm is a thin curve and fills little of its convex hull;
 # the edge fragment is a compact blob.
 #
-# The threshold sits at 0.55, above every real worm by 0.04 and below both
-# suspects by 0.07. It is deliberately NOT a motion test: at 30 J the animals
-# ARE paralysed, so "does not move" is the phenotype, not the artefact —
-# `601 30J plate 01` worm 2 has bpm 0.00 and speed 3.94 and must survive. It
-# does: its solidity is 0.475.
-DEBRIS_BLOB_SOLIDITY_MIN: float = 0.55       # rule 3: a blob, not a worm
+# The threshold sits at 0.58, near the centre of the empty band between the
+# highest real worm (0.512) and the lowest suspect (0.619). It is placed high
+# rather than low on purpose: keeping a piece of debris costs one row, deleting
+# a real animal costs a data point nobody knows is missing.
+#
+# It is deliberately NOT a motion test. At 30 J the animals ARE paralysed, so
+# "does not move" is the phenotype, not the artefact. The three worms David
+# checked on `601 30J plate 01` all clear it on shape alone:
+#   worm 1  solidity 0.297  (bpm 1.07, speed 1.11 — barely moving, and safe)
+#   worm 2  solidity 0.475  (bpm 0.00, speed 3.94 — the closest call in the set)
+#   worm 4  solidity 0.467  (also fails the speed and bpm terms independently)
+# Worm 2 is the one to watch: it is held out by shape and by nothing else.
+DEBRIS_BLOB_SOLIDITY_MIN: float = 0.58       # rule 3: a blob, not a worm
 
 
 # ---------------------------------------------------------------------------
