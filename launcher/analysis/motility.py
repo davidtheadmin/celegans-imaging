@@ -750,7 +750,7 @@ class MotilityAgent(threading.Thread):
         (analysis.run_cache) instead of re-analysed.
         """
         from analysis.ffmpeg_utils import find_videos
-        from analysis.analysis_csv import build_summary_row
+        from analysis.analysis_csv import build_summary_row, reuse_post_settings
         from analysis import run_cache
         from analysis.plots import make_overview_png
         from analysis.concurrency import resolve_workers, ffmpeg_threads_per_worker
@@ -818,7 +818,7 @@ class MotilityAgent(threading.Thread):
                                 or want_sidebyside or want_per_worm_traces)
             digest = run_cache.settings_digest(
                 "motility", self._params_template, flat_field,
-                {"threshold_s": threshold_s})
+                reuse_post_settings(threshold_s))
             reuse = run_cache.plan_reuse(
                 list(videos_by_folder), videos_by_folder, digest,
                 pipeline="motility", prefix=_ANALYSIS_PREFIX,

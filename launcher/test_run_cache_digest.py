@@ -16,6 +16,13 @@ with nothing in the log to say so.
 Neither failure raises. Both look exactly like a run that had nothing to do.
 So what is checked here is the property that makes them impossible: a change
 to anything that moves the per-worm rows must change the digest.
+
+Motility had the identical hole — it hashed `threshold_s` and nothing else,
+while every threshold in the tuning block at the top of analysis_csv.py could
+move the numbers. It is checked here too. Its one remaining gap is stated in
+`analysis_csv.reuse_post_settings`: motility's columns are the union of the
+keys its rows carry, so there is no column set to hash, and `row_schema` is
+kept by hand.
 """
 from __future__ import annotations
 
@@ -24,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+from analysis import analysis_csv as ac                          # noqa: E402
 from analysis import crawling_metrics as cm                      # noqa: E402
 from analysis.run_cache import settings_digest                   # noqa: E402
 
@@ -36,6 +44,12 @@ def check(ok: bool, what: str) -> None:
     print(("  PASS  " if ok else "  FAIL  ") + what)
     if not ok:
         FAILURES.append(what)
+
+
+def mdigest(threshold_s: float = 2.0, params: dict | None = None,
+            flat_field: bool = True) -> str:
+    return settings_digest("motility", PARAMS if params is None else params,
+                           flat_field, ac.reuse_post_settings(threshold_s))
 
 
 def digest(min_span_s: float = 20.0, threshold_s: float = 2.0,
@@ -114,12 +128,43 @@ def test_post_settings_shape() -> None:
           "every value is JSON-stable, so the hash is stable across runs")
 
 
+def test_motility_tuning() -> None:
+    print("\nmotility's tuning block — the same trap, and it was live until now")
+    base = mdigest()
+    check(base == mdigest(), "the same settings give the same digest")
+    check(mdigest(threshold_s=3.0) != base, "threshold_s changes it")
+    check(len(ac.tuning_constants()) == 11,
+          "all 11 constants in the tuning block are collected")
+    for name in ac.tuning_constants():
+        old = getattr(ac, name)
+        try:
+            setattr(ac, name, float(old) + 1.0)
+            moved = mdigest()
+        finally:
+            setattr(ac, name, old)
+        check(moved != base, f"{name} changes it")
+    check(mdigest() == base, "and restoring them all restores the digest")
+
+
+def test_motility_post_shape() -> None:
+    print("\nmotility's reuse_post_settings")
+    post = ac.reuse_post_settings(2.0)
+    check(set(post) == {"threshold_s", "row_schema", "tuning"},
+          "it carries the gate, the hand-kept row schema and the tuning hash")
+    check(all(isinstance(v, (float, int, str)) for v in post.values()),
+          "every value is JSON-stable, so the hash is stable across runs")
+    check(mdigest() != digest(),
+          "motility and crawling cannot collide on one digest")
+
+
 if __name__ == "__main__":
     test_gates()
     test_skeleton_floor()
     test_column_schema()
     test_headline_metrics_are_covered()
     test_post_settings_shape()
+    test_motility_tuning()
+    test_motility_post_shape()
     print()
     if FAILURES:
         print(f"{len(FAILURES)} FAILURE(S):")

@@ -5,6 +5,8 @@ Pipeline config
 ---------------
 All thresholds are starting defaults; tune after first run on validation videos.
 """
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import List
@@ -29,6 +31,51 @@ DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
 DEBRIS_LENGTH_CV_MIN: float = 0.10         # debris filter: flickery if length_cv exceeds this
 DEBRIS_SOLIDITY_MIN: float = 0.6           # debris filter: blob-shaped if solidity_median exceeds this
 DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real worm (safety gate)
+
+
+# ---------------------------------------------------------------------------
+# What the run cache is allowed to reuse. See run_cache.settings_digest.
+# ---------------------------------------------------------------------------
+def tuning_constants() -> dict:
+    """Every module-level tuning constant above, by name.
+
+    Collected from the module rather than listed by hand, so a threshold added
+    to the block above enters the reuse digest by existing. The scan takes
+    public UPPER_CASE ints and floats; anything else here that is not a
+    threshold would over-invalidate the cache, which is the safe direction.
+    """
+    return {k: float(v) for k, v in sorted(globals().items())
+            if k.isupper() and not k.startswith("_")
+            and isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
+def reuse_post_settings(threshold_s: float) -> dict:
+    """The post-Tierpsy half of motility's run-cache digest — the ONE spelling.
+
+    Mirrors crawling_metrics.reuse_post_settings. Until 27 Aug motility hashed
+    `{"threshold_s": …}` and nothing else, so every threshold in the block
+    above could be changed and a re-run would hand back the old rows and report
+    the change as having done nothing. That is exactly how the crawling
+    skeleton floor came to be measured as a no-op — see
+    claude/crawling-rerun-reuse-trap-2026-08-27.md.
+
+    KNOWN GAP, deliberate. Motility's per-worm columns are the union of the
+    keys the rows actually carry (`motility.py`, `_mot_cols`), not a static
+    list, so there is no column set to hash the way crawling hashes
+    PER_WORM_COLS. Adding a metric to a row therefore still does not
+    invalidate the cache by itself — it goes missing from a reused run's CSV
+    rather than arriving empty. Bump `row_schema` by hand when the row fields
+    change, or give motility a static column list and hash that.
+    """
+    return {
+        "threshold_s": float(threshold_s),
+        "row_schema": 1,
+        "tuning": hashlib.sha256(
+            json.dumps(tuning_constants(), sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:12],
+    }
+
 
 
 # ---------------------------------------------------------------------------
