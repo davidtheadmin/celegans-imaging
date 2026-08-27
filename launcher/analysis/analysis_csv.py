@@ -44,19 +44,21 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 # by eye. A swimming worm is a thin curve and fills little of its convex hull;
 # the edge fragment is a compact blob.
 #
-# The threshold sits at 0.58, near the centre of the empty band between the
-# highest real worm (0.512) and the lowest suspect (0.619). It is placed high
-# rather than low on purpose: keeping a piece of debris costs one row, deleting
-# a real animal costs a data point nobody knows is missing.
+# THIS FLAGS, IT DOES NOT DROP. Solidity looked like it separated the plate
+# edge from the animals until David identified `903 20J plate 03` worm 0 —
+# solidity 0.619, motionless — as a REAL worm. The only confirmed edge is
+# `601 0J plate 02` worm 0 at 0.793. One example on each side of a 0.17 gap is
+# not a threshold, it is a coin toss with a data point on it, so nothing is
+# deleted on shape until there is a population to fit against.
 #
-# It is deliberately NOT a motion test. At 30 J the animals ARE paralysed, so
-# "does not move" is the phenotype, not the artefact. The three worms David
-# checked on `601 30J plate 01` all clear it on shape alone:
-#   worm 1  solidity 0.297  (bpm 1.07, speed 1.11 — barely moving, and safe)
-#   worm 2  solidity 0.475  (bpm 0.00, speed 3.94 — the closest call in the set)
-#   worm 4  solidity 0.467  (also fails the speed and bpm terms independently)
-# Worm 2 is the one to watch: it is held out by shape and by nothing else.
-DEBRIS_BLOB_SOLIDITY_MIN: float = 0.58       # rule 3: a blob, not a worm
+# Whatever replaces this will probably need LENGTH, which is why length_median
+# is now recorded: a worm has a worm's length whether it is moving or not, and
+# a piece of plate edge has no reason to.
+#
+# The bar is low on purpose — this is a review set, not a verdict. It also
+# keeps the motion terms, because a fast swimmer is obviously an animal
+# whatever its solidity.
+EDGE_SUSPECT_SOLIDITY_MIN: float = 0.45      # flag only: worth a human look
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +97,7 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 2,   # 2: amplitude_deg, amplitude_cv, length_median
+        "row_schema": 3,   # 3: + edge_suspect (2: amplitude, length_median)
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -613,6 +615,7 @@ def read_fragments(
     # have, the plate-edge objects are compact blobs, not overlong arcs, so the
     # rule had nothing behind it. The column is kept so the next run can say
     # whether an overlong population exists at all.
+    edge_suspects: list[dict] = []
     _ref_lengths = [r["length_median"] for r in rows
                     if r.get("length_median") is not None]
     overlong_ref = (float(np.median(_ref_lengths))
@@ -631,23 +634,32 @@ def read_fragments(
             and sol is not None and sol == sol and sol > DEBRIS_SOLIDITY_MIN
             and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
         )
-        # Rule 3: a blob that does not swim — the plate edge. Rule 2 without
-        # the flicker requirement: debris does not have to shimmer to be
-        # debris, it only has to be the wrong shape and going nowhere. Shape
-        # carries this rule on purpose; see the note on the constant.
-        rule3 = (sol is not None and sol == sol
-                 and sol > DEBRIS_BLOB_SOLIDITY_MIN
-                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
-                 and r["bpm"] < DEBRIS_BPM_THRESHOLD)
+        # A blob that does not swim. NOT a drop — see EDGE_SUSPECT_SOLIDITY_MIN.
+        # The row is marked and listed in the log so the next run produces a
+        # labelled set instead of another argument from one example.
         lmed = r.get("length_median")
-        if rule1 or rule2 or rule3:
+        r["edge_suspect"] = bool(
+            sol is not None and sol == sol
+            and sol > EDGE_SUSPECT_SOLIDITY_MIN
+            and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
+            and r["bpm"] < DEBRIS_BPM_THRESHOLD)
+        if r["edge_suspect"]:
+            edge_suspects.append({
+                "tierpsy_id": r.get("repr_tierpsy_id", -1),
+                "worm_index": r.get("worm_index"),
+                "solidity_median": sol, "length_median": lmed,
+                "length_cv": lcv, "speed_median_abs": spd,
+                "bpm": round(r["bpm"], 3),
+                "displacement_px": round(r["displacement_px"], 3),
+                "duration_s": round(r["duration_s"], 3),
+            })
+        if rule1 or rule2:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
             dropped_tracks.append({
                 "tierpsy_id": tid,
                 "reason": "debris",
-                "debris_rule": ("rule1" if rule1 else "rule2" if rule2
-                                else "rule3"),
+                "debris_rule": "rule1" if rule1 else "rule2",
                 "longest_clean_duration_s": round(r["duration_s"], 3),
                 "total_flicker_frames": fl.get("total_flicker_frames", 0),
                 "n_fragments_in_group": r.get("fragment_count", 1),
@@ -693,9 +705,13 @@ def read_fragments(
             "debris_by_rule": debris_by_rule,
         },
         "plate_edge_filter": {
+            "note": ("flagged only, nothing dropped on shape — see "
+                     "EDGE_SUSPECT_SOLIDITY_MIN in analysis_csv.py"),
             "median_worm_length_px": (round(overlong_ref, 2)
                                       if overlong_ref is not None else None),
             "reference_worms": len(_ref_lengths),
+            "n_suspects": len(edge_suspects),
+            "suspects": edge_suspects,
         },
         "flicker_stats": {
             "total_flicker_frames": total_flicker_frames,
@@ -741,8 +757,11 @@ def _empty_log() -> dict:
             "debris_by_rule": {},
         },
         "plate_edge_filter": {
+            "note": "flagged only, nothing dropped on shape",
             "median_worm_length_px": None,
             "reference_worms": 0,
+            "n_suspects": 0,
+            "suspects": [],
         },
         "flicker_stats": {"total_flicker_frames": 0, "tracks_with_any_flicker": 0, "tracks_dropped_due_to_flicker": 0},
         "fragment_counts": {"distribution": {}},
