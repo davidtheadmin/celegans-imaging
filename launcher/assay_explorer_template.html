@@ -51,6 +51,8 @@ thead th{color:var(--mut);font-weight:600;font-size:11.5px;text-transform:upperc
 
 <div class="bar"><div class="ctrl"><b>Theme</b><span id="theme"></span>
 <span style="width:10px"></span><b>Layout</b><span id="lay"></span>
+<span style="width:10px"></span><b id="strainlab">Strain</b><span id="strainf"></span>
+<span style="width:10px"></span><b id="doselab">Dose</b><span id="dosef"></span>
 <span style="width:10px"></span><b id="fillab">Conditions</b><span id="filt"></span>
 <button id="allbtn" style="margin-left:4px">All</button></div></div>
 
@@ -146,6 +148,13 @@ const doseOf={}; D.cond.forEach(c=>doseOf[c.condition]=c.dose);
 const CCOL={}; CONDS.forEach((c,i)=>CCOL[c]=CAT[i%CAT.length]);
 
 let SEL=new Set(CONDS);                 /* which conditions are drawn */
+/* SEL is DERIVED. Three filters are ANDed into it: strain, dose, and the
+   per-condition mask. With twelve conditions the condition row alone makes
+   "only the 0 J plates" a dozen clicks, and getting it wrong by one chip is
+   invisible in the drawing. */
+let SELS=new Set(D.strains);            /* strains kept */
+let SELD=new Set(D.doses);              /* doses kept */
+let MASK=new Set(CONDS);                /* per-condition override */
 let LAYOUT=0;                           /* 0 facet by strain, 1 overlay in one axis */
 let MK=0;                               /* timecourse metric */
 let DRT=isTC?-1:null;                   /* dose-response timepoint, -1 = all */
@@ -673,13 +682,38 @@ function boot(){
    DISTOVR=i;press($('distk'),isTC?TPS.indexOf(DTT):0);redraw();}));
 
  $('fillab').textContent='Conditions';
+ /* Recompute SEL from the three filters and repaint the condition row. A
+    condition the group filters have excluded is dimmed rather than unpressed,
+    so the row still says what the per-condition mask holds. Returns false for
+    a combination that would draw nothing — the caller reverts, because an
+    empty panel looks identical to a broken one. */
+ const applyFilters=()=>{
+   const vis=c=>SELS.has(strainOf[c])&&(!D.has_dose||SELD.has(doseOf[c]));
+   const next=new Set(CONDS.filter(c=>MASK.has(c)&&vis(c)));
+   if(!next.size)return false;
+   SEL=next;
+   [...$('filt').querySelectorAll('button')].forEach((b,i)=>{
+     const c=CONDS[i];
+     b.setAttribute('aria-pressed',MASK.has(c)?'true':'false');
+     b.style.opacity=vis(c)?'':'.4';});
+   return true;};
+ const groupChip=(host,set,key,lab)=>chip(host,lab,true,b=>{
+   const had=set.has(key); had?set.delete(key):set.add(key);
+   if(!applyFilters()){had?set.add(key):set.delete(key);return;}
+   b.setAttribute('aria-pressed',set.has(key)?'true':'false');redraw();});
+ D.strains.forEach(x=>groupChip($('strainf'),SELS,x,x));
+ if(D.has_dose&&D.doses.length>1){D.doses.forEach(d=>groupChip($('dosef'),SELD,d,dl(d)));}
+ else{$('doselab').style.display='none';$('dosef').style.display='none';}
  CONDS.forEach(s=>chip($('filt'),s,true,b=>{
-   if(SEL.has(s)&&SEL.size>1)SEL.delete(s); else SEL.add(s);
-   b.setAttribute('aria-pressed',SEL.has(s)?'true':'false'); redraw();},v(CCOL[s])));
- $('allbtn').onclick=()=>{const on=SEL.size<CONDS.length;
-   SEL=new Set(on?CONDS:[CONDS[0]]);
-   [...$('filt').querySelectorAll('button')].forEach((b,i)=>
-     b.setAttribute('aria-pressed',SEL.has(CONDS[i])?'true':'false'));redraw();};
+   const had=MASK.has(s); had?MASK.delete(s):MASK.add(s);
+   if(!applyFilters()){had?MASK.add(s):MASK.delete(s);return;}
+   redraw();},v(CCOL[s])));
+ $('allbtn').onclick=()=>{
+   MASK=new Set(CONDS);SELS=new Set(D.strains);SELD=new Set(D.doses);applyFilters();
+   [...$('strainf').querySelectorAll('button')].forEach(b=>b.setAttribute('aria-pressed','true'));
+   [...$('dosef').querySelectorAll('button')].forEach(b=>b.setAttribute('aria-pressed','true'));
+   redraw();};
+ applyFilters();
 
  if(isTC){
   const drl=document.createElement('b');drl.textContent='Timepoint';$('drk').appendChild(drl);
