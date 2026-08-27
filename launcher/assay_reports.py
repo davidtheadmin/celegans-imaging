@@ -64,6 +64,17 @@ MOTILITY_METRICS = [
               note="Spread of the time between bends. A healthy swimmer is "
                    "rhythmic; an irregular one can share a bend rate with it "
                    "and not share a phenotype. NaN below three peaks."),
+    AC.Metric("amplitude_deg", "Bend amplitude", "deg", agg="mean",
+              note="Mean head-swing excursion from the detrended head-angle "
+                   "signal, in degrees. Bend RATE and bend AMPLITUDE come "
+                   "apart: an animal can keep its rhythm while the stroke "
+                   "shrinks, and that is a phenotype the rate alone hides. "
+                   "NaN below three peaks."),
+    AC.Metric("amplitude_cv", "Amplitude CV", "", agg="median", headline=False,
+              note="Spread of the per-peak amplitude, scale-free. High means "
+                   "an irregular stroke rather than a small one. Sits beside "
+                   "bend_interval_cv, which is the same idea in time. NaN "
+                   "below three peaks."),
     AC.Metric("speed_median_abs", "Median speed", "px/s", agg="median",
               note="Pixels, not microns — motility_params.json sets "
                    "microns_per_pixel to -1, so Tierpsy reports pixels and "

@@ -133,8 +133,12 @@ def test_motility_tuning() -> None:
     base = mdigest()
     check(base == mdigest(), "the same settings give the same digest")
     check(mdigest(threshold_s=3.0) != base, "threshold_s changes it")
-    check(len(ac.tuning_constants()) == 11,
-          "all 11 constants in the tuning block are collected")
+    names = set(ac.tuning_constants())
+    check(names >= {"DISTANCE_THRESHOLD_PIXELS", "TIME_GAP_THRESHOLD_SECONDS",
+                    "MIN_OBSERVATION_TIME_SECONDS", "COLLISION_WORM_COUNT_CAP",
+                    "DEBRIS_DISPLACEMENT_PIXELS", "DEBRIS_SPEED_MAX",
+                    "DEBRIS_STATIC_DISPLACEMENT_PX", "DEBRIS_OVERLONG_FACTOR"},
+          "the tuning block is collected by scanning, not by a hand-kept list")
     for name in ac.tuning_constants():
         old = getattr(ac, name)
         try:

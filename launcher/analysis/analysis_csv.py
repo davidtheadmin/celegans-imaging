@@ -31,6 +31,16 @@ DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
 DEBRIS_LENGTH_CV_MIN: float = 0.10         # debris filter: flickery if length_cv exceeds this
 DEBRIS_SOLIDITY_MIN: float = 0.6           # debris filter: blob-shaped if solidity_median exceeds this
 DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real worm (safety gate)
+# Plate-edge / rigid-structure debris. Flat-field correction lifted the
+# periphery enough that the plate edge now segments as an object, and it falls
+# between the first two rules: rule 1 misses it because skeleton flicker along
+# a static arc fakes a bend rate, and rule 2 misses it because a thin arc has
+# LOW solidity where that rule requires high.
+DEBRIS_STATIC_DISPLACEMENT_PX: float = 3.0   # rule 3: does not move at all
+DEBRIS_RIGID_LENGTH_CV_MAX: float = 0.03     # rule 3: shape never changes
+DEBRIS_RIGID_SOLIDITY_MAX: float = 0.35      # rule 3: thin arc, not a blob
+DEBRIS_OVERLONG_FACTOR: float = 1.8          # rule 4: x the video's median worm length
+DEBRIS_OVERLONG_MIN_REFERENCE: int = 5       # rule 4: worms needed before that median is trusted
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +79,7 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 1,
+        "row_schema": 2,   # 2: amplitude_deg, amplitude_cv, length_median
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -187,6 +197,28 @@ def bend_interval_cv(all_peak_frames: np.ndarray, fps: float) -> float:
     return float(np.std(intervals) / mean_interval)
 
 
+def bend_amplitude(peak_heights_rad: np.ndarray) -> "tuple[float, float]":
+    """
+    (mean head-swing amplitude in DEGREES, its coefficient of variation).
+
+    `peak_heights_rad` is the detrended head angle at each detected peak. The
+    sign is dropped: a positive and a negative peak of the same size are the
+    same excursion in opposite directions, and both are amplitude.
+
+    Degrees because this is read off a figure; the CV is scale-free either way.
+    NaN below three peaks, matching bend_interval_cv — with two you can compute
+    a spread but you cannot believe it.
+    """
+    h = np.asarray(peak_heights_rad, dtype=float)
+    h = np.abs(h[np.isfinite(h)])
+    if len(h) < 3:
+        return float("nan"), float("nan")
+    mean_rad = float(np.mean(h))
+    if mean_rad < 1e-9:
+        return float("nan"), float("nan")
+    return float(np.degrees(mean_rad)), float(np.std(h) / mean_rad)
+
+
 # ---------------------------------------------------------------------------
 # Displacement helper
 # ---------------------------------------------------------------------------
@@ -234,10 +266,15 @@ def _shape_metrics(
     blob_feats: "pd.DataFrame | None",
 ) -> "tuple[float, float, float]":
     """
-    Compute (length_cv, solidity_median, speed_median_abs) for a worm group.
-    Returns NaN for any metric with insufficient data.
+    Compute (length_cv, length_median, solidity_median, speed_median_abs) for
+    a worm group. Returns NaN for any metric with insufficient data.
+
+    length_median is the reference rule 4 compares against: the plate edge is
+    far longer than any worm on the plate, and that is the most worm-shaped
+    thing about a worm that an arc cannot fake.
     """
     length_cv = float("nan")
+    length_median = float("nan")
     speed_median_abs = float("nan")
     solidity_median = float("nan")
 
@@ -248,6 +285,7 @@ def _shape_metrics(
             lengths = lengths[np.isfinite(lengths)]
             if len(lengths) >= 10 and np.mean(lengths) > 0:
                 length_cv = float(np.std(lengths) / np.mean(lengths))
+                length_median = float(np.median(lengths))
         if "speed" in ts_sub.columns:
             speeds = np.abs(ts_sub["speed"].values.astype(float))
             speeds = speeds[np.isfinite(speeds)]
@@ -262,7 +300,7 @@ def _shape_metrics(
         if len(solids) > 0:
             solidity_median = float(np.median(solids))
 
-    return length_cv, solidity_median, speed_median_abs
+    return length_cv, length_median, solidity_median, speed_median_abs
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +539,8 @@ def read_fragments(
                 total_frames, long_threshold_s, head_angle_prominence, condition, plate,
             )
             if row is not None:
-                lcv, sol, spd = _shape_metrics(group.track_ids, traj, timeseries_df, blob_feats)
+                lcv, lmed, sol, spd = _shape_metrics(group.track_ids, traj, timeseries_df, blob_feats)
+                row["length_median"] = round(lmed, 2) if np.isfinite(lmed) else None
                 row["length_cv"] = round(lcv, 4) if np.isfinite(lcv) else None
                 row["solidity_median"] = round(sol, 4) if np.isfinite(sol) else None
                 row["speed_median_abs"] = round(spd, 2) if np.isfinite(spd) else None
@@ -535,7 +574,8 @@ def read_fragments(
                 if row is not None:
                     st_tids = (list(st["worm_index_joined"].unique())
                                if "worm_index_joined" in st.columns else [])
-                    lcv, sol, spd = _shape_metrics(st_tids, traj, timeseries_df, blob_feats)
+                    lcv, lmed, sol, spd = _shape_metrics(st_tids, traj, timeseries_df, blob_feats)
+                    row["length_median"] = round(lmed, 2) if np.isfinite(lmed) else None
                     row["length_cv"] = round(lcv, 4) if np.isfinite(lcv) else None
                     row["solidity_median"] = round(sol, 4) if np.isfinite(sol) else None
                     row["speed_median_abs"] = round(spd, 2) if np.isfinite(spd) else None
@@ -552,6 +592,15 @@ def read_fragments(
             rows.extend(group_rows)
 
     # ---- Debris filter (applied after multi-collision expansion) ----
+    # Rule 4 needs the video's OWN worm-length distribution. With too few
+    # objects the median is not a population, it is one of the suspects, so the
+    # rule is skipped and the skip is recorded — the same guard the crawling
+    # skeleton floor uses when every fragment would be dropped.
+    _ref_lengths = [r["length_median"] for r in rows
+                    if r.get("length_median") is not None]
+    overlong_ref = (float(np.median(_ref_lengths))
+                    if len(_ref_lengths) >= DEBRIS_OVERLONG_MIN_REFERENCE
+                    else None)
     keep_rows: list[dict] = []
     for r in rows:
         # Rule 1: stationary debris (curl_count guard removed)
@@ -566,13 +615,30 @@ def read_fragments(
             and sol is not None and sol == sol and sol > DEBRIS_SOLIDITY_MIN
             and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
         )
-        if rule1 or rule2:
+        # Rule 3: a rigid, static structure — the plate edge. It does not
+        # move, its shape does not change, and it is thin. A paralysed worm
+        # survives all three: a soft body's skeleton length still varies frame
+        # to frame, and a worm fills far more of its convex hull than an arc.
+        rule3 = (r["displacement_px"] < DEBRIS_STATIC_DISPLACEMENT_PX
+                 and lcv is not None and lcv == lcv
+                 and lcv < DEBRIS_RIGID_LENGTH_CV_MAX
+                 and sol is not None and sol == sol
+                 and sol < DEBRIS_RIGID_SOLIDITY_MAX)
+        # Rule 4: far longer than any worm on this plate, and going nowhere.
+        # Length is the one worm-shaped property an arc cannot fake.
+        lmed = r.get("length_median")
+        rule4 = (overlong_ref is not None
+                 and lmed is not None and lmed == lmed
+                 and lmed > overlong_ref * DEBRIS_OVERLONG_FACTOR
+                 and r["displacement_px"] < DEBRIS_DISPLACEMENT_PIXELS)
+        if rule1 or rule2 or rule3 or rule4:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
             dropped_tracks.append({
                 "tierpsy_id": tid,
                 "reason": "debris",
-                "debris_rule": "rule1" if rule1 else "rule2",
+                "debris_rule": ("rule1" if rule1 else "rule2" if rule2
+                                else "rule3" if rule3 else "rule4"),
                 "longest_clean_duration_s": round(r["duration_s"], 3),
                 "total_flicker_frames": fl.get("total_flicker_frames", 0),
                 "n_fragments_in_group": r.get("fragment_count", 1),
@@ -582,12 +648,18 @@ def read_fragments(
                 "length_cv": lcv,
                 "solidity_median": sol,
                 "speed_median_abs": spd,
+                "length_median": lmed,
             })
         else:
             keep_rows.append(r)
 
     rows = keep_rows
     dropped_debris = sum(1 for entry in dropped_tracks if entry["reason"] == "debris")
+    debris_by_rule: dict[str, int] = {}
+    for _e in dropped_tracks:
+        if _e["reason"] == "debris":
+            _k = str(_e.get("debris_rule", "unknown"))
+            debris_by_rule[_k] = debris_by_rule.get(_k, 0) + 1
 
     # ---- Build analysis log ----
     dropped_total = (
@@ -609,6 +681,13 @@ def read_fragments(
                 "flicker_killed_track": tracks_dropped_flicker,
                 "debris": dropped_debris,
             },
+            "debris_by_rule": debris_by_rule,
+        },
+        "plate_edge_filter": {
+            "overlong_reference_px": (round(overlong_ref, 2)
+                                      if overlong_ref is not None else None),
+            "skipped_no_reference": overlong_ref is None,
+            "reference_worms": len(_ref_lengths),
         },
         "flicker_stats": {
             "total_flicker_frames": total_flicker_frames,
@@ -651,6 +730,12 @@ def _empty_log() -> dict:
                 "flicker_killed_track": 0,
                 "debris": 0,
             },
+            "debris_by_rule": {},
+        },
+        "plate_edge_filter": {
+            "overlong_reference_px": None,
+            "skipped_no_reference": True,
+            "reference_worms": 0,
         },
         "flicker_stats": {"total_flicker_frames": 0, "tracks_with_any_flicker": 0, "tracks_dropped_due_to_flicker": 0},
         "fragment_counts": {"distribution": {}},
@@ -693,6 +778,7 @@ def _metrics_curl(
     # Run bend counter on each clean sub-track independently; sum bends
     bend_count = 0
     all_peak_frames: list[int] = []
+    all_peak_heights: list[float] = []
     for st in all_clean_subtracks:
         sig = compute_head_angle_signal(st, skel_all, fps, head_angle_prominence)
         if sig is None:
@@ -701,8 +787,12 @@ def _metrics_curl(
         fns = sig["frame_nums"]
         all_peak_frames.extend(fns[sig["pos_peaks"]].tolist())
         all_peak_frames.extend(fns[sig["neg_peaks"]].tolist())
+        _det = sig["detrended"]
+        all_peak_heights.extend(_det[sig["pos_peaks"]].tolist())
+        all_peak_heights.extend(_det[sig["neg_peaks"]].tolist())
     bend_count = bend_count / 2.0  # half-bends → bends
     cv = bend_interval_cv(np.array(all_peak_frames, dtype=float), fps)
+    amp_deg, amp_cv = bend_amplitude(np.array(all_peak_heights, dtype=float))
 
     duration_min = total_clean_s / 60.0
     bpm = bend_count / duration_min if duration_min > 1e-9 else 0.0
@@ -722,6 +812,8 @@ def _metrics_curl(
         "duration_s": round(total_obs_s, 3),
         "bpm": round(float(bpm), 2),
         "bend_interval_cv": cv,
+        "amplitude_deg": round(amp_deg, 2) if amp_deg == amp_deg else None,
+        "amplitude_cv": round(amp_cv, 4) if amp_cv == amp_cv else None,
         "is_long": total_obs_s >= long_threshold_s,
         "coverage_pct": coverage_pct,
         "fps_used": fps,
@@ -760,6 +852,10 @@ def _metrics_one_collision_subtrack(
         sig["frame_nums"][sig["neg_peaks"]],
     ]).astype(float)
     cv = bend_interval_cv(peak_frames, fps)
+    amp_deg, amp_cv = bend_amplitude(np.concatenate([
+        sig["detrended"][sig["pos_peaks"]],
+        sig["detrended"][sig["neg_peaks"]],
+    ]).astype(float))
     displacement = _displacement_px([repr_st])
     coverage_pct = round(repr_len / total_frames * 100, 1)
 
@@ -778,6 +874,8 @@ def _metrics_one_collision_subtrack(
         "duration_s": round(total_obs_s, 3),
         "bpm": round(float(bpm), 2),
         "bend_interval_cv": cv,
+        "amplitude_deg": round(amp_deg, 2) if amp_deg == amp_deg else None,
+        "amplitude_cv": round(amp_cv, 4) if amp_cv == amp_cv else None,
         "is_long": total_obs_s >= long_threshold_s,
         "coverage_pct": coverage_pct,
         "fps_used": fps,
