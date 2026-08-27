@@ -55,10 +55,40 @@ function Test-Engine ($cmd) {
     } catch { return $false }
 }
 
+function Repair-DockerContext {
+    <#
+        A machine that once had Docker Desktop keeps a "desktop-linux" context,
+        and the docker CLI goes on using it after Docker Desktop is gone. Every
+        call then fails with
+
+            cannot find the file ... pipe/dockerDesktopLinuxEngine
+
+        which looks exactly like "no engine installed" even though Rancher is
+        running perfectly on the standard pipe. Switch to the default context
+        and re-test before believing there is nothing here.
+    #>
+    try {
+        $current = (& docker context show 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $current) { return $false }
+        if ($current.Trim() -eq 'default') { return $false }
+        Say "  the docker CLI is pointed at the '$($current.Trim())' context, which is not"
+        Say "  answering. Trying the default context..."
+        & docker context use default *> $null
+        if ($LASTEXITCODE -ne 0) { return $false }
+        if (Test-Engine 'docker') {
+            Good "Switched the docker CLI to the default context."
+            return $true
+        }
+        & docker context use $current.Trim() *> $null   # put it back
+        return $false
+    } catch { return $false }
+}
+
 function Find-Engine {
     foreach ($c in 'docker', 'podman', 'nerdctl') {
         if (Test-Engine $c) { return $c }
     }
+    if (Repair-DockerContext) { return 'docker' }
     return $null
 }
 
@@ -196,6 +226,32 @@ if ($engine) {
         & winget install --id SUSE.RancherDesktop --exact `
             --accept-package-agreements --accept-source-agreements
         $wingetCode = $LASTEXITCODE
+
+        # winget returns non-zero for "it is already installed and there is
+        # nothing newer" (-1978335189 UPDATE_NOT_APPLICABLE, and friends). That
+        # is the state we WANT, and treating it as a failure sent people off to
+        # install Podman they did not need. Rather than chase winget's exit-code
+        # list, ask the only question that matters: is Rancher Desktop actually
+        # on this machine now?
+        if ($wingetCode -ne 0) {
+            $rdInstalled = $false
+            foreach ($probe in @(
+                "$env:ProgramFiles\Rancher Desktop\Rancher Desktop.exe",
+                "$env:LOCALAPPDATA\Programs\Rancher Desktop\Rancher Desktop.exe")) {
+                if (Test-Path $probe) { $rdInstalled = $true; break }
+            }
+            if (-not $rdInstalled) {
+                try {
+                    & winget list --id SUSE.RancherDesktop --exact *> $null
+                    $rdInstalled = ($LASTEXITCODE -eq 0)
+                } catch { }
+            }
+            if ($rdInstalled) {
+                Write-Host ""
+                Good "Rancher Desktop is already installed (winget had nothing to do)."
+                $wingetCode = 0
+            }
+        }
 
         if ($wingetCode -ne 0) {
             Write-Host ""
