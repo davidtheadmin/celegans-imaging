@@ -44,21 +44,24 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 # by eye. A swimming worm is a thin curve and fills little of its convex hull;
 # the edge fragment is a compact blob.
 #
-# THIS FLAGS, IT DOES NOT DROP. Solidity looked like it separated the plate
-# edge from the animals until David identified `903 20J plate 03` worm 0 —
-# solidity 0.619, motionless — as a REAL worm. The only confirmed edge is
-# `601 0J plate 02` worm 0 at 0.793. One example on each side of a 0.17 gap is
-# not a threshold, it is a coin toss with a data point on it, so nothing is
-# deleted on shape until there is a population to fit against.
+# Rule 3 — a NON-MOVING, EDGE-SHAPED object. Solidity was the wrong measure:
+# David identified `903 20J plate 03` worm 0 (solidity 0.619, motionless) as a
+# real worm, so compactness cannot carry this. Thickness can.
 #
-# Whatever replaces this will probably need LENGTH, which is why length_median
-# is now recorded: a worm has a worm's length whether it is moving or not, and
-# a piece of plate edge has no reason to.
+# MEASURED from the Tierpsy features of all 142 worms of the 27 Aug run:
 #
-# The bar is low on purpose — this is a review set, not a verdict. It also
-# keeps the motion terms, because a fast swimmer is obviously an animal
-# whatever its solidity.
-EDGE_SUSPECT_SOLIDITY_MIN: float = 0.45      # flag only: worth a human look
+#                        minor_axis        major/minor
+#   plate edge (601 0J p02 w0)   1.87           46.84
+#   thinnest real worm           6.54            ...
+#   real worm population    6.54 - 35.8     2.21 - 9.63
+#
+# The edge is a two-pixel line. A worm — swimming, curled or paralysed — has a
+# body 6.5 to 36 px thick. Both gaps are enormous: the thresholds below sit
+# 1.6x clear of the nearest real worm on each axis and 2-3x clear of the edge.
+# Both are required, and so is stillness, because a moving object is an animal
+# whatever its shape.
+EDGE_ASPECT_MIN: float = 15.0                # rule 3: major/minor, worms top out at 9.6
+EDGE_MINOR_AXIS_MAX: float = 4.0             # rule 3: px, the thinnest real worm is 6.5
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +100,7 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 3,   # 3: + edge_suspect (2: amplitude, length_median)
+        "row_schema": 4,   # 4: + minor_axis_median, aspect_median
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -284,8 +287,9 @@ def _shape_metrics(
     blob_feats: "pd.DataFrame | None",
 ) -> "tuple[float, float, float]":
     """
-    Compute (length_cv, length_median, solidity_median, speed_median_abs) for
-    a worm group. Returns NaN for any metric with insufficient data.
+    Compute (length_cv, length_median, solidity_median, speed_median_abs,
+    minor_axis_median, aspect_median) for a worm group. NaN for any metric with
+    insufficient data.
 
     length_median is the reference rule 4 compares against: the plate edge is
     far longer than any worm on the plate, and that is the most worm-shaped
@@ -293,6 +297,8 @@ def _shape_metrics(
     """
     length_cv = float("nan")
     length_median = float("nan")
+    minor_axis_median = float("nan")
+    aspect_median = float("nan")
     speed_median_abs = float("nan")
     solidity_median = float("nan")
 
@@ -304,6 +310,13 @@ def _shape_metrics(
             if len(lengths) >= 10 and np.mean(lengths) > 0:
                 length_cv = float(np.std(lengths) / np.mean(lengths))
                 length_median = float(np.median(lengths))
+        if "minor_axis" in ts_sub.columns and "major_axis" in ts_sub.columns:
+            mi = ts_sub["minor_axis"].values.astype(float)
+            ma = ts_sub["major_axis"].values.astype(float)
+            ok = np.isfinite(mi) & np.isfinite(ma) & (mi > 1e-6)
+            if ok.sum() >= 10:
+                minor_axis_median = float(np.median(mi[ok]))
+                aspect_median = float(np.median(ma[ok] / mi[ok]))
         if "speed" in ts_sub.columns:
             speeds = np.abs(ts_sub["speed"].values.astype(float))
             speeds = speeds[np.isfinite(speeds)]
@@ -318,7 +331,8 @@ def _shape_metrics(
         if len(solids) > 0:
             solidity_median = float(np.median(solids))
 
-    return length_cv, length_median, solidity_median, speed_median_abs
+    return (length_cv, length_median, solidity_median, speed_median_abs,
+            minor_axis_median, aspect_median)
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +571,9 @@ def read_fragments(
                 total_frames, long_threshold_s, head_angle_prominence, condition, plate,
             )
             if row is not None:
-                lcv, lmed, sol, spd = _shape_metrics(group.track_ids, traj, timeseries_df, blob_feats)
+                lcv, lmed, sol, spd, mnr, asp = _shape_metrics(group.track_ids, traj, timeseries_df, blob_feats)
+                row["minor_axis_median"] = round(mnr, 3) if np.isfinite(mnr) else None
+                row["aspect_median"] = round(asp, 2) if np.isfinite(asp) else None
                 row["length_median"] = round(lmed, 2) if np.isfinite(lmed) else None
                 row["length_cv"] = round(lcv, 4) if np.isfinite(lcv) else None
                 row["solidity_median"] = round(sol, 4) if np.isfinite(sol) else None
@@ -592,7 +608,9 @@ def read_fragments(
                 if row is not None:
                     st_tids = (list(st["worm_index_joined"].unique())
                                if "worm_index_joined" in st.columns else [])
-                    lcv, lmed, sol, spd = _shape_metrics(st_tids, traj, timeseries_df, blob_feats)
+                    lcv, lmed, sol, spd, mnr, asp = _shape_metrics(st_tids, traj, timeseries_df, blob_feats)
+                    row["minor_axis_median"] = round(mnr, 3) if np.isfinite(mnr) else None
+                    row["aspect_median"] = round(asp, 2) if np.isfinite(asp) else None
                     row["length_median"] = round(lmed, 2) if np.isfinite(lmed) else None
                     row["length_cv"] = round(lcv, 4) if np.isfinite(lcv) else None
                     row["solidity_median"] = round(sol, 4) if np.isfinite(sol) else None
@@ -615,7 +633,6 @@ def read_fragments(
     # have, the plate-edge objects are compact blobs, not overlong arcs, so the
     # rule had nothing behind it. The column is kept so the next run can say
     # whether an overlong population exists at all.
-    edge_suspects: list[dict] = []
     _ref_lengths = [r["length_median"] for r in rows
                     if r.get("length_median") is not None]
     overlong_ref = (float(np.median(_ref_lengths))
@@ -634,32 +651,25 @@ def read_fragments(
             and sol is not None and sol == sol and sol > DEBRIS_SOLIDITY_MIN
             and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
         )
-        # A blob that does not swim. NOT a drop — see EDGE_SUSPECT_SOLIDITY_MIN.
-        # The row is marked and listed in the log so the next run produces a
-        # labelled set instead of another argument from one example.
+        # Rule 3: a non-moving, edge-shaped object — see EDGE_ASPECT_MIN.
+        # Thin AND elongated AND going nowhere AND not bending. Every term has
+        # to hold; any one of them alone describes some real worm in the set.
         lmed = r.get("length_median")
-        r["edge_suspect"] = bool(
-            sol is not None and sol == sol
-            and sol > EDGE_SUSPECT_SOLIDITY_MIN
-            and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
-            and r["bpm"] < DEBRIS_BPM_THRESHOLD)
-        if r["edge_suspect"]:
-            edge_suspects.append({
-                "tierpsy_id": r.get("repr_tierpsy_id", -1),
-                "worm_index": r.get("worm_index"),
-                "solidity_median": sol, "length_median": lmed,
-                "length_cv": lcv, "speed_median_abs": spd,
-                "bpm": round(r["bpm"], 3),
-                "displacement_px": round(r["displacement_px"], 3),
-                "duration_s": round(r["duration_s"], 3),
-            })
-        if rule1 or rule2:
+        mnr, asp = r.get("minor_axis_median"), r.get("aspect_median")
+        rule3 = (mnr is not None and mnr == mnr and mnr < EDGE_MINOR_AXIS_MAX
+                 and asp is not None and asp == asp and asp > EDGE_ASPECT_MIN
+                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
+                 and r["bpm"] < DEBRIS_BPM_THRESHOLD)
+        if rule1 or rule2 or rule3:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
             dropped_tracks.append({
                 "tierpsy_id": tid,
                 "reason": "debris",
-                "debris_rule": "rule1" if rule1 else "rule2",
+                "debris_rule": ("rule1" if rule1 else "rule2" if rule2
+                                else "rule3"),
+                "minor_axis_median": mnr,
+                "aspect_median": asp,
                 "longest_clean_duration_s": round(r["duration_s"], 3),
                 "total_flicker_frames": fl.get("total_flicker_frames", 0),
                 "n_fragments_in_group": r.get("fragment_count", 1),
@@ -705,13 +715,11 @@ def read_fragments(
             "debris_by_rule": debris_by_rule,
         },
         "plate_edge_filter": {
-            "note": ("flagged only, nothing dropped on shape — see "
-                     "EDGE_SUSPECT_SOLIDITY_MIN in analysis_csv.py"),
+            "note": ("rule 3 drops non-moving edge-shaped objects — see "
+                     "EDGE_ASPECT_MIN in analysis_csv.py"),
             "median_worm_length_px": (round(overlong_ref, 2)
                                       if overlong_ref is not None else None),
             "reference_worms": len(_ref_lengths),
-            "n_suspects": len(edge_suspects),
-            "suspects": edge_suspects,
         },
         "flicker_stats": {
             "total_flicker_frames": total_flicker_frames,
@@ -757,11 +765,9 @@ def _empty_log() -> dict:
             "debris_by_rule": {},
         },
         "plate_edge_filter": {
-            "note": "flagged only, nothing dropped on shape",
+            "note": "rule 3 drops non-moving edge-shaped objects",
             "median_worm_length_px": None,
             "reference_worms": 0,
-            "n_suspects": 0,
-            "suspects": [],
         },
         "flicker_stats": {"total_flicker_frames": 0, "tracks_with_any_flicker": 0, "tracks_dropped_due_to_flicker": 0},
         "fragment_counts": {"distribution": {}},
