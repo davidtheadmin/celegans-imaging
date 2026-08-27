@@ -88,6 +88,7 @@ import pandas as pd                                               # noqa: E402
 import h5py                                                       # noqa: E402
 from analysis.docker_utils import run_tierpsy                      # noqa: E402
 from analysis.motility import _WORMSCAN_ONLY_KEYS                  # noqa: E402
+from analysis.render_video import render_tracked                   # noqa: E402
 
 FIELDS = ["cell", "traj_min_area", "mask_min_area", "worm_bw_thresh_factor",
           "n_tracks", "n_specks", "n_long", "n_wormlike", "n_good",
@@ -193,6 +194,18 @@ def run_cell(cell: dict, avi: Path, base: dict, outdir: Path, args) -> dict:
                                                          errors="replace")
         row.update(measure(d / "Results", args.min_dur, args.area_min,
                            args.area_max, args.fps))
+        if args.render and row.get("status") == "ok":
+            # Every tracked object, drawn — no kept_ids and no worm_index_map,
+            # because the question here is what Tierpsy segmented, not what
+            # survived our filters. The numbers say which cell won; the video
+            # says whether it won for the right reason.
+            skel = sorted((d / "Results").glob("*_skeletons.hdf5"))
+            if skel:
+                mp4 = outdir / f"cell_{cell['cell']}_tracked.mp4"
+                render_tracked(d / avi.name, skel[0], mp4, args.fps)
+                log(f"  [{cell['cell']}] rendered {mp4.name}")
+            else:
+                log(f"  [{cell['cell']}] no skeletons hdf5 — nothing to render")
     except Exception as exc:                                       # noqa: BLE001
         # The whole message goes to a file — a truncated traceback in a
         # terminal is how the first failure of this script stayed a mystery
@@ -234,6 +247,10 @@ def main() -> int:
     p.add_argument("--image", default="docker.io/tierpsy/tierpsy-tracker:latest")
     p.add_argument("--docker", default="docker")
     p.add_argument("--keep", action="store_true", help="keep each cell's HDF5s")
+    p.add_argument("--render", action="store_true",
+                   help="also write cell_NNN_tracked.mp4 per cell — every "
+                        "tracked object drawn, so the winning numbers can be "
+                        "checked by eye. Roughly doubles the time per cell.")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
