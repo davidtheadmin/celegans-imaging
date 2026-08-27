@@ -20,6 +20,17 @@ the binarisation knob. The other three motility/crawling differences are
 deliberate; crawling's `filt_min_displacement = 100` would delete every
 swimmer, so they are not swept.
 
+THE DEFAULT GRID IS 12 CELLS, and the axes are not equally interesting.
+`worm_bw_thresh_factor` gets three levels (1.05 baseline, 0.98, 0.92 crawling)
+because it is the only one that changes what is segmented, and therefore the
+only one that can make a worm skeletonise that did not before. `mask_min_area`
+gets two (50, 500) because it decides what reaches the mask at all.
+`traj_min_area` gets two (25, 250) and is expected to be INERT on the
+objective: it filters trajectories after masking, so it should remove specks
+without touching a real worm's skeletons. Two levels is enough to confirm that
+rather than assume it. Widen any axis with its flag if the results argue for
+it.
+
 WHAT IT SCORES
 --------------
 NOT overall skeleton coverage — the specks dominate it and a parameter set that
@@ -189,8 +200,8 @@ def main() -> int:
     p.add_argument("--params", type=Path,
                    default=REPO / "launcher" / "motility_params.json",
                    help="base parameter file the grid overrides")
-    p.add_argument("--traj-min-area", type=float, nargs="+", default=[25, 100, 250, 500])
-    p.add_argument("--mask-min-area", type=float, nargs="+", default=[50, 250, 500])
+    p.add_argument("--traj-min-area", type=float, nargs="+", default=[25, 250])
+    p.add_argument("--mask-min-area", type=float, nargs="+", default=[50, 500])
     p.add_argument("--bw", type=float, nargs="+", default=[1.05, 0.98, 0.92],
                    help="worm_bw_thresh_factor values")
     p.add_argument("--min-dur", type=float, default=10.0, help="s, worm-like track floor")
