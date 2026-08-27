@@ -29,6 +29,7 @@ Heavy third-party imports (numpy/pandas/h5py) live at runtime call sites so this
 module can be imported lazily by crawling.py, mirroring the other analysis
 modules.
 """
+import hashlib
 import logging
 from pathlib import Path
 
@@ -219,6 +220,55 @@ QUALITY_COL: str = "passed_filter"
 PER_WORM_COLS: list[str] = _interleave_extra_cols(
     ID_COLS + ENGINE_COLS + METRIC_COLS + ACTIVITY_COLS
 ) + [QUALITY_COL]
+
+
+def per_worm_schema_digest() -> str:
+    """Short hash of the per-worm column set.
+
+    This goes into the run-cache digest, so a run whose metric columns differ
+    from a cached run's cannot reuse that run's rows.
+
+    Why it has to be here and not a hand-maintained version number: on 27 Aug a
+    re-run reused rows written before `directionality`, `is_immobile` and
+    `reversal_rate_moving_per_min` existed, and wrote all three EMPTY for all
+    3173 worms and all 30 conditions — two of the four headline metrics blank in
+    the workbook, the figures and the explorer, with nothing in the log to say
+    so. Deriving the hash from PER_WORM_COLS means adding a column invalidates
+    the cache by itself, with no step for anyone to forget.
+
+    Names only. A column whose MEANING changes while its name does not is still
+    invisible here — that case needs the constant to be in the digest too, the
+    way MIN_FRAGMENT_SKELETON_COVERAGE now is.
+    """
+    blob = "\x1f".join(PER_WORM_COLS)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def reuse_post_settings(min_span_s: float, threshold_s: float) -> dict:
+    """The post-Tierpsy half of the run-cache digest — the ONE spelling.
+
+    `run_cache.settings_digest` hashes this alongside the Tierpsy parameters
+    and the flat-field flag to decide whether a previously analysed folder can
+    be reused instead of re-analysed. Everything in here must be something that
+    changes the per-worm rows; anything that changes them and is NOT in here is
+    a silent wrong answer, not a crash.
+
+    That is not hypothetical. MIN_FRAGMENT_SKELETON_COVERAGE was added on
+    27 Aug and left out of the digest, so the run meant to measure it reused
+    the pre-floor rows of the run before it and reported the floor's effect as
+    nil — see claude/crawling-rerun-reuse-trap-2026-08-27.md.
+
+    Callers pass their own values for the two gates; the floor and the column
+    schema are properties of this module and are read from it, so a pipeline
+    cannot disagree with the metrics it is about to compute.
+    """
+    return {
+        "min_span_s": float(min_span_s),
+        "threshold_s": float(threshold_s),
+        "min_fragment_skeleton_coverage": float(MIN_FRAGMENT_SKELETON_COVERAGE),
+        "per_worm_schema": per_worm_schema_digest(),
+    }
+
 
 # Fraction of the video-wide median |speed| below which a frame counts as paused.
 _PAUSED_FRACTION_OF_MEDIAN = 0.10   # legacy, only the no-length fallback

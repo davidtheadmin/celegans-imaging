@@ -923,7 +923,7 @@ class CrawlingAgent(threading.Thread):
         """
         from analysis.ffmpeg_utils import find_videos
         from analysis.crawling_metrics import (
-            aggregate_per_condition, PER_WORM_COLS,
+            aggregate_per_condition, PER_WORM_COLS, reuse_post_settings,
         )
         from analysis import run_cache
         from analysis.concurrency import resolve_workers, ffmpeg_threads_per_worker
@@ -991,7 +991,7 @@ class CrawlingAgent(threading.Thread):
             want_renders = bool(want_tracked or want_sidebyside or want_path_traces)
             digest = run_cache.settings_digest(
                 "crawling", self._params_template, flat_field,
-                {"min_span_s": min_span_s, "threshold_s": threshold_s})
+                reuse_post_settings(min_span_s, threshold_s))
             reuse = run_cache.plan_reuse(
                 list(videos_by_folder), videos_by_folder, digest,
                 pipeline="crawling", prefix=_ANALYSIS_PREFIX,

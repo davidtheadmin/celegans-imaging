@@ -19,7 +19,10 @@ What makes a folder reusable
 ----------------------------
 1. A previous run's manifest lists it,
 2. under the same `digest` — every setting that changes the numbers: the
-   Tierpsy parameters, the flat-field flag, and the post-processing thresholds,
+   Tierpsy parameters, the flat-field flag, the post-processing thresholds
+   (crawling's are min_span_s, threshold_s and
+   MIN_FRAGMENT_SKELETON_COVERAGE), and a hash of the per-worm column set,
+   so that adding a metric cannot be reused away into an empty column,
 3. with the same set of videos, by name, size and mtime,
 4. and that run's per-worm CSV is still on disk and still contains its rows.
 
