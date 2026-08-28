@@ -24,7 +24,17 @@ DISTANCE_THRESHOLD_PIXELS: float = 50       # max centroid gap for fragment adja
 TIME_GAP_THRESHOLD_SECONDS: float = 5.0     # max wall-clock gap for adjacency (generous; covers most curls)
 FLICKER_WINDOW_SECONDS: float = 0.5         # rolling-std window for skeleton-length flicker detection
 FLICKER_STD_THRESHOLD_PIXELS: float = 20    # rolling-std ceiling; expect to tighten after first run
-MIN_OBSERVATION_TIME_SECONDS: float = 10.0  # drop worm if total clean observation time is below this
+# Least clean observation time a worm may have and still be measured. This
+# USED to be a hard-coded 10.0 while the launcher's "Min fragment length" box
+# set something else entirely (threshold_s -> is_long, applied much later), so
+# a user who asked for 5 s still silently lost everything under 10. On
+# `601 0J plate 01` that cost two moving animals with 8.3 s and 5.1 s of clean
+# signal — they showed as grey dots in the render with no way to tell why.
+#
+# The floor now follows the user's number; this constant is the hard lower
+# bound it cannot go under, because a bend rate needs enough swings to mean
+# anything (3 s at a healthy ~90 bpm is about four bends).
+MIN_OBSERVATION_FLOOR_S: float = 3.0
 COLLISION_WORM_COUNT_CAP: int = 3           # max worms extracted from one collision cluster
 DEBRIS_DISPLACEMENT_PIXELS: float = 8.0    # debris filter: max displacement
 DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
@@ -63,7 +73,7 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 EDGE_ASPECT_MIN: float = 15.0                # rule 3: major/minor, worms top out at 9.6
 EDGE_MINOR_AXIS_MAX: float = 4.0             # rule 3: px, the thinnest real worm is 6.5
 
-# Rule 4 — a NON-MOVING object with a worm's AREA but nothing like a worm's
+# Rule 4 — a SLOW object with a worm's AREA but nothing like a worm's
 # LENGTH. David identified worm 7 of `601 10J plate 02` as debris; measured
 # under the adopted parameters it is the clearest separation in the file:
 #
@@ -76,6 +86,15 @@ EDGE_MINOR_AXIS_MAX: float = 4.0             # rule 3: px, the thinnest real wor
 # absolute pixel count, because every absolute threshold in this file has had
 # to be refitted each time the binarisation moved. A ratio does not.
 # The debris sits at 0.38 of the median; the real worms at 0.92-1.03.
+#
+# IT DELIBERATELY DOES NOT TEST BEND RATE. It did, and it therefore fired on
+# nothing: `601 20J plate 01` worm 4 reads 25.6 bpm and `903 0J plate 01` worm
+# 4 reads 16.9, because a flickering skeleton on a stationary blob fakes a bend
+# rate. That is the same way the plate edge got past rule 1. Motion is what
+# debris can imitate; shape is not. Speed stays, because it is what separates a
+# small real worm (swimming at 14-32 px/s) from a blob (1-2 px/s) — over the
+# 170 worms of the 28 Aug run, length+speed drops 6 and all 6 are blobs, while
+# length alone would also take five animals swimming at 59-129 bpm.
 DEBRIS_SHORT_LENGTH_FRAC: float = 0.55       # rule 4: x the video's median worm length
 
 
@@ -115,7 +134,8 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 5,   # 5: rule 4 changes which rows survive
+        "row_schema": 6,   # 6: rule 4 without bpm; the observation floor
+                           #    follows threshold_s (was a hard-coded 10 s)
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -452,6 +472,7 @@ def read_fragments(
     plate: str,
     long_threshold_s: float = 5.0,
     head_angle_prominence: float = 0.30,
+    min_observation_s: "float | None" = None,
     distance_threshold_px: float = DISTANCE_THRESHOLD_PIXELS,
     time_gap_threshold_s: float = TIME_GAP_THRESHOLD_SECONDS,
 ) -> "tuple[list[dict], dict]":
@@ -459,6 +480,10 @@ def read_fragments(
     Run the full fragment-grouping + flicker-filter pipeline on one _featuresN.hdf5.
 
     Returns (per_worm_rows, analysis_log).
+
+    ``min_observation_s`` is the least clean observation time a worm may have
+    and still be measured. None means follow ``long_threshold_s`` — the number
+    the user set — clamped up to MIN_OBSERVATION_FLOOR_S.
 
     Per-worm rows contain all previous columns plus:
         curl_count, fragment_count, valid_frac, group_classification, repr_tierpsy_id
@@ -470,6 +495,11 @@ def read_fragments(
     from analysis.fragment_grouping import group_fragments
     from analysis.flicker_filter import filter_track
     import h5py
+
+    # The user's number, floored. See MIN_OBSERVATION_FLOOR_S.
+    min_obs_s = (float(long_threshold_s) if min_observation_s is None
+                 else float(min_observation_s))
+    min_obs_s = max(MIN_OBSERVATION_FLOOR_S, min_obs_s)
 
     # ---- load HDF5 ----
     try:
@@ -567,7 +597,7 @@ def read_fragments(
 
         # ---- Steps 4+5: drop short worms and compute metrics ----
         if group.classification == "curl":
-            if total_clean_s < MIN_OBSERVATION_TIME_SECONDS:
+            if total_clean_s < min_obs_s:
                 if total_clean_frames == 0:
                     tracks_dropped_flicker += 1
                     drop_reason = "flicker_killed_track"
@@ -610,7 +640,7 @@ def read_fragments(
             selected_sts = _select_collision_subtracks(all_clean_subtracks, frame_col, N)
             group_rows: list[dict] = []
             for st in selected_sts:
-                if len(st) / fps < MIN_OBSERVATION_TIME_SECONDS:
+                if len(st) / fps < min_obs_s:
                     dropped_collision_too_short += 1
                     _log_drop(dropped_tracks, flicker_stats_by_tid,
                                _st_tierpsy_id(st, group), "collision_too_short", group,
@@ -683,8 +713,7 @@ def read_fragments(
         rule4 = (length_ref is not None
                  and lmed is not None and lmed == lmed
                  and lmed < length_ref * DEBRIS_SHORT_LENGTH_FRAC
-                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
-                 and r["bpm"] < DEBRIS_BPM_THRESHOLD)
+                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX)
         if rule1 or rule2 or rule3 or rule4:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
@@ -739,8 +768,9 @@ def read_fragments(
             },
             "debris_by_rule": debris_by_rule,
         },
+        "min_observation_s": round(min_obs_s, 3),
         "plate_edge_filter": {
-            "note": ("rules 3 and 4 drop non-moving objects that are not "
+            "note": ("rules 3 and 4 drop slow objects that are not "
                      "worm-shaped — see EDGE_ASPECT_MIN and "
                      "DEBRIS_SHORT_LENGTH_FRAC in analysis_csv.py"),
             "median_worm_length_px": (round(length_ref, 2)
@@ -792,8 +822,9 @@ def _empty_log() -> dict:
             },
             "debris_by_rule": {},
         },
+        "min_observation_s": None,
         "plate_edge_filter": {
-            "note": "rules 3 and 4 drop non-moving non-worm-shaped objects",
+            "note": "rules 3 and 4 drop slow non-worm-shaped objects",
             "median_worm_length_px": None,
             "short_object_cutoff_px": None,
             "reference_worms": 0,
