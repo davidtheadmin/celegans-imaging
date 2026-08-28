@@ -70,15 +70,16 @@ MOTILITY_METRICS = [
                    "apart: an animal can keep its rhythm while the stroke "
                    "shrinks, and that is a phenotype the rate alone hides. "
                    "NaN below three peaks."),
-    AC.Metric("amplitude_cv", "Amplitude CV", "", agg="median", headline=False,
+    AC.Metric("amplitude_cv", "Amplitude CV", "", agg="median",
               note="Spread of the per-peak amplitude, scale-free. High means "
                    "an irregular stroke rather than a small one. Sits beside "
                    "bend_interval_cv, which is the same idea in time. NaN "
                    "below three peaks."),
-    AC.Metric("speed_median_abs", "Median speed", "px/s", agg="median",
-              note="Pixels, not microns — motility_params.json sets "
-                   "microns_per_pixel to -1, so Tierpsy reports pixels and "
-                   "frames throughout."),
+    # Median speed was dropped from the metric set on David's call: a worm in
+    # a drop does not translate, so px/s measured how much the animal drifted
+    # rather than how hard it swam, and it took a panel that bend amplitude
+    # now uses. It is still on every per-worm row and still drives the debris
+    # rules — only the reporting layer stopped showing it.
     AC.Metric("duration_s", "Track duration", "s", agg="median",
               note="Clean observation time after the flicker filter, not video "
                    "length. Short tracks are the ones the quality gate drops."),
