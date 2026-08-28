@@ -290,6 +290,33 @@ def _run_tierpsy_instrumented(
 
 
 
+def _drop_stale_tierpsy(cache_dir: Path, plog) -> bool:
+    """Remove a cache entry's Tierpsy outputs so Tierpsy really re-runs.
+
+    Tierpsy SKIPS any stage whose output file already exists. So on a stamp
+    mismatch the old code logged "re-running Tierpsy", ran it, got nothing done
+    because MaskedVideos/ and Results/ were still there, and then stamped the
+    entry with the CURRENT fingerprint — certifying old results as new. It
+    happened on 27 Aug: eight videos were re-stamped as flat-field-corrected
+    while holding tracking from 19 Aug, and the only surviving evidence was
+    that the stamp was newer than the HDF5 beside it.
+
+    Only the pipeline's own cache directory is touched; the source video is
+    never in it. Returns True if anything was removed.
+    """
+    removed = False
+    for sub in ("MaskedVideos", "Results"):
+        d = cache_dir / sub
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+            removed = removed or not d.exists()
+    if removed:
+        plog("[CACHE] Removed the stale Tierpsy output so it is genuinely "
+             "recomputed; without this Tierpsy skips and the entry is "
+             "re-stamped over old results.")
+    return removed
+
+
 def _drop_stale_avi(avi: Path, flat_field: bool) -> bool:
     """
     Delete a cached AVI that was produced under a different flat-field setting.
@@ -440,6 +467,7 @@ def _process_one_video_crawling(
                 and _hdf5_cache_valid(candidate_hdf5)):
             plog(f"[CACHE MISS] A cached result exists but {stamp_why} — "
                  "re-running Tierpsy.")
+            _drop_stale_tierpsy(cache_dir, plog)
 
         if cache_hit:
             hdf5_path = candidate_hdf5

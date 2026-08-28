@@ -14,7 +14,7 @@
     "FEAT_INIT",
     "FEAT_TIERPSY"
   ],
-  "mask_min_area": 500,
+  "mask_min_area": 50,
   "mask_max_area": 100000000,
   "thresh_C": 10,
   "thresh_block_size": 61,
@@ -31,7 +31,7 @@
   "is_full_bgnd_subtraction": false,
   "worm_bw_thresh_factor": 0.98,
   "strel_size": 5,
-  "traj_min_area": 250,
+  "traj_min_area": 25,
   "traj_min_box_width": 5,
   "traj_max_allowed_dist": 100,
   "traj_max_frames_gap": 10,
