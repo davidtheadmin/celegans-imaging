@@ -297,8 +297,22 @@ def _draw_skeleton(
     """
     import cv2
 
-    pts = skel[row_idx].astype(np.int32).reshape(-1, 1, 2)  # (49, 1, 2)
-    cv2.polylines(frame, [pts], False, color, thickness, cv2.LINE_AA)
+    # Only the finite points, and only contiguous runs of them. A partly
+    # skeletonised frame used to be cast whole: NaN -> int32 is undefined, it
+    # lands on INT_MIN, and cv2 then drew a line from a real body point to a
+    # coordinate far off screen. numpy said so every time ("invalid value
+    # encountered in cast") and the warning was read as cosmetic.
+    raw = skel[row_idx]
+    finite = np.isfinite(raw).all(axis=1)
+    if not finite.any():
+        return
+    idx = np.flatnonzero(finite)
+    runs = np.split(idx, np.flatnonzero(np.diff(idx) != 1) + 1)
+    for run in runs:
+        if len(run) < 2:
+            continue
+        pts = raw[run].astype(np.int32).reshape(-1, 1, 2)
+        cv2.polylines(frame, [pts], False, color, thickness, cv2.LINE_AA)
     if label:
         head_pt = skel[row_idx, 0]
         if np.isfinite(head_pt).all():
