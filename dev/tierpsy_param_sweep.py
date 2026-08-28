@@ -161,6 +161,12 @@ def measure(results_dir: Path, min_dur: float, area_min: float,
                  & (g["area"] <= area_max)]
     cov = wormlike["cov"].values
     return {
+        # The ids the score is computed over. The render draws these with a
+        # colour and a number and everything else as a faint dot, so the video
+        # and the table agree about what counts. Without it every speck and
+        # every re-numbered fragment of a dead worm gets a label, which reads
+        # as though the pipeline intends to keep it.
+        "_kept_ids": set(int(i) for i in wormlike.index),
         "n_tracks": int(len(g)),
         "n_specks": int((g["area"] < 100).sum()),
         "n_long": int((g["dur"] >= min_dur).sum()),
@@ -219,7 +225,8 @@ def run_cell(cell: dict, avi: Path, base: dict, outdir: Path, args) -> dict:
             skel = sorted((d / "Results").glob("*_skeletons.hdf5"))
             if skel:
                 mp4 = outdir / f"cell_{cell['cell']}_tracked.mp4"
-                render_tracked(d / avi.name, skel[0], mp4, args.fps)
+                render_tracked(d / avi.name, skel[0], mp4, args.fps,
+                               kept_ids=row.get("_kept_ids"))
                 log(f"  [{cell['cell']}] rendered {mp4.name}")
             else:
                 log(f"  [{cell['cell']}] no skeletons hdf5 — nothing to render")
@@ -232,6 +239,7 @@ def run_cell(cell: dict, avi: Path, base: dict, outdir: Path, args) -> dict:
             txt, encoding="utf-8", errors="replace")
         first = next((ln for ln in reversed(txt.splitlines()) if ln.strip()), "")
         row["status"] = f"FAILED: {first}"[:200]
+    row.pop("_kept_ids", None)
     row["seconds"] = round(time.time() - t0, 1)
     if not args.keep:
         shutil.rmtree(d, ignore_errors=True)
