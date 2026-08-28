@@ -24,17 +24,22 @@ DISTANCE_THRESHOLD_PIXELS: float = 50       # max centroid gap for fragment adja
 TIME_GAP_THRESHOLD_SECONDS: float = 5.0     # max wall-clock gap for adjacency (generous; covers most curls)
 FLICKER_WINDOW_SECONDS: float = 0.5         # rolling-std window for skeleton-length flicker detection
 FLICKER_STD_THRESHOLD_PIXELS: float = 20    # rolling-std ceiling; expect to tighten after first run
-# Least clean observation time a worm may have and still be measured. This
-# USED to be a hard-coded 10.0 while the launcher's "Min fragment length" box
-# set something else entirely (threshold_s -> is_long, applied much later), so
-# a user who asked for 5 s still silently lost everything under 10. On
-# `601 0J plate 01` that cost two moving animals with 8.3 s and 5.1 s of clean
-# signal — they showed as grey dots in the render with no way to tell why.
-#
-# The floor now follows the user's number; this constant is the hard lower
-# bound it cannot go under, because a bend rate needs enough swings to mean
+# The shortest PIECE of uninterrupted skeleton that is worth measuring at all.
+# Bends are counted inside a piece and never across a gap, so a piece is the
+# measurement unit; below about three seconds it holds too few swings to say
 # anything (3 s at a healthy ~90 bpm is about four bends).
-MIN_OBSERVATION_FLOOR_S: float = 3.0
+#
+# This is NOT the gate on the worm. That is the number set in the launcher,
+# and it applies to the SUM of a worm's surviving pieces: how much good signal
+# must exist in total before the animal counts. Two thresholds, two jobs —
+# "how short may one piece be" and "how much must they add up to".
+#
+# It used to be one hard-coded 10.0 applied to the total, while the launcher's
+# box set something else entirely (threshold_s -> is_long, applied much later),
+# so a user who asked for 5 s still silently lost everything under 10. On
+# `601 0J plate 01` that cost two moving animals with 8.3 s and 5.1 s of clean
+# signal, shown as grey dots with no way to tell why.
+MIN_PIECE_S: float = 3.0
 COLLISION_WORM_COUNT_CAP: int = 3           # max worms extracted from one collision cluster
 DEBRIS_DISPLACEMENT_PIXELS: float = 8.0    # debris filter: max displacement
 DEBRIS_BPM_THRESHOLD: float = 5.0          # debris filter: max BPM
@@ -134,8 +139,8 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 6,   # 6: rule 4 without bpm; the observation floor
-                           #    follows threshold_s (was a hard-coded 10 s)
+        "row_schema": 7,   # 7: per-piece floor + the user's number on the
+                           #    sum; bend intervals no longer span gaps
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -251,6 +256,29 @@ def bend_interval_cv(all_peak_frames: np.ndarray, fps: float) -> float:
     if mean_interval < 1e-9:
         return float("nan")
     return float(np.std(intervals) / mean_interval)
+
+
+def bend_interval_cv_pieces(intervals) -> float:
+    """CV of inter-peak intervals that were each measured INSIDE one piece.
+
+    The old code pooled peak TIMES from every clean sub-track into one array
+    and diffed it, so the dropout between two pieces became an inter-bend
+    interval: a worm with 5 s of signal, a 10 s loss and 5 s more contributed
+    one ~10 s "interval" to a distribution whose real values are near 0.7 s.
+    The mean rose, the SD rose much further, and the metric whose whole job is
+    to say whether a rhythm is regular reported an artefact of tracking.
+
+    Bends are never counted across a gap; neither are the gaps between them.
+    Two intervals minimum, matching the three-peak minimum it replaces.
+    """
+    iv = np.asarray(list(intervals), dtype=float)
+    iv = iv[np.isfinite(iv)]
+    if len(iv) < 2:
+        return float("nan")
+    mean_iv = float(np.mean(iv))
+    if mean_iv < 1e-9:
+        return float("nan")
+    return float(np.std(iv) / mean_iv)
 
 
 def bend_amplitude(peak_heights_rad: np.ndarray) -> "tuple[float, float]":
@@ -496,10 +524,13 @@ def read_fragments(
     from analysis.flicker_filter import filter_track
     import h5py
 
-    # The user's number, floored. See MIN_OBSERVATION_FLOOR_S.
-    min_obs_s = (float(long_threshold_s) if min_observation_s is None
-                 else float(min_observation_s))
-    min_obs_s = max(MIN_OBSERVATION_FLOOR_S, min_obs_s)
+    # Two thresholds, two jobs — see MIN_PIECE_S. `min_piece_s` discards a
+    # fragment too short to measure; `min_total_s` is the user's number and
+    # gates the worm on what its surviving fragments add up to.
+    min_piece_s = MIN_PIECE_S
+    min_total_s = (float(long_threshold_s) if min_observation_s is None
+                   else float(min_observation_s))
+    min_total_s = max(min_piece_s, min_total_s)
 
     # ---- load HDF5 ----
     try:
@@ -545,6 +576,7 @@ def read_fragments(
     tracks_with_any_flicker = 0
     tracks_dropped_flicker = 0
     dropped_curl_too_short = 0
+    pieces_dropped_short = 0
     dropped_collision_too_short = 0
     fragment_count_dist: dict[int, int] = {}
     multi_worm_clusters = 0
@@ -592,12 +624,18 @@ def read_fragments(
         for tid in group.track_ids:
             all_clean_subtracks.extend(per_track_filtered[tid]["clean_subtracks"])
 
+        # A fragment shorter than min_piece_s carries no usable rhythm, so it
+        # is not a measurement and must not pad the total either.
+        _short = [st for st in all_clean_subtracks if len(st) / fps < min_piece_s]
+        all_clean_subtracks = [st for st in all_clean_subtracks
+                               if len(st) / fps >= min_piece_s]
+        pieces_dropped_short += len(_short)
         total_clean_frames = sum(len(st) for st in all_clean_subtracks)
         total_clean_s = total_clean_frames / fps
 
         # ---- Steps 4+5: drop short worms and compute metrics ----
         if group.classification == "curl":
-            if total_clean_s < min_obs_s:
+            if total_clean_s < min_total_s:
                 if total_clean_frames == 0:
                     tracks_dropped_flicker += 1
                     drop_reason = "flicker_killed_track"
@@ -640,7 +678,7 @@ def read_fragments(
             selected_sts = _select_collision_subtracks(all_clean_subtracks, frame_col, N)
             group_rows: list[dict] = []
             for st in selected_sts:
-                if len(st) / fps < min_obs_s:
+                if len(st) / fps < min_total_s:
                     dropped_collision_too_short += 1
                     _log_drop(dropped_tracks, flicker_stats_by_tid,
                                _st_tierpsy_id(st, group), "collision_too_short", group,
@@ -768,7 +806,9 @@ def read_fragments(
             },
             "debris_by_rule": debris_by_rule,
         },
-        "min_observation_s": round(min_obs_s, 3),
+        "min_piece_s": round(min_piece_s, 3),
+        "min_total_s": round(min_total_s, 3),
+        "pieces_dropped_too_short": pieces_dropped_short,
         "plate_edge_filter": {
             "note": ("rules 3 and 4 drop slow objects that are not "
                      "worm-shaped — see EDGE_ASPECT_MIN and "
@@ -822,7 +862,9 @@ def _empty_log() -> dict:
             },
             "debris_by_rule": {},
         },
-        "min_observation_s": None,
+        "min_piece_s": None,
+        "min_total_s": None,
+        "pieces_dropped_too_short": 0,
         "plate_edge_filter": {
             "note": "rules 3 and 4 drop slow non-worm-shaped objects",
             "median_worm_length_px": None,
@@ -869,7 +911,7 @@ def _metrics_curl(
 
     # Run bend counter on each clean sub-track independently; sum bends
     bend_count = 0
-    all_peak_frames: list[int] = []
+    all_intervals: list[float] = []
     all_peak_heights: list[float] = []
     for st in all_clean_subtracks:
         sig = compute_head_angle_signal(st, skel_all, fps, head_angle_prominence)
@@ -877,13 +919,16 @@ def _metrics_curl(
             continue
         bend_count += len(sig["pos_peaks"]) + len(sig["neg_peaks"])
         fns = sig["frame_nums"]
-        all_peak_frames.extend(fns[sig["pos_peaks"]].tolist())
-        all_peak_frames.extend(fns[sig["neg_peaks"]].tolist())
+        # Intervals WITHIN this piece only — never across the gap to the next.
+        _pk = np.sort(np.concatenate([
+            fns[sig["pos_peaks"]], fns[sig["neg_peaks"]]]).astype(float))
+        if len(_pk) >= 2:
+            all_intervals.extend((np.diff(_pk) / fps).tolist())
         _det = sig["detrended"]
         all_peak_heights.extend(_det[sig["pos_peaks"]].tolist())
         all_peak_heights.extend(_det[sig["neg_peaks"]].tolist())
     bend_count = bend_count / 2.0  # half-bends → bends
-    cv = bend_interval_cv(np.array(all_peak_frames, dtype=float), fps)
+    cv = bend_interval_cv_pieces(all_intervals)
     amp_deg, amp_cv = bend_amplitude(np.array(all_peak_heights, dtype=float))
 
     duration_min = total_clean_s / 60.0

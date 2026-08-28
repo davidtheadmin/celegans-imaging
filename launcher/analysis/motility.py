@@ -425,6 +425,13 @@ def _process_one_video_motility(
             # out and the renders mark them faintly (Phase 3).
             worm_index_map: dict[int, int] = {}
             for r in fragment_rows:
+                # Only worms that clear EVERY filter, the reporting gate
+                # included. A coloured number in the render now means "this
+                # object is in the workbook"; anything short of that is a
+                # faint dot. It used to label every surviving row, so a worm
+                # dropped later for having too little signal still looked kept.
+                if not r.get("is_long"):
+                    continue
                 wi = r.get("worm_index")
                 if wi is None:
                     continue
