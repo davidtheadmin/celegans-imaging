@@ -82,12 +82,26 @@ def wait_for(agent, status, label: str, heartbeat: int) -> dict | None:
 
 
 def report(label: str, result: dict | None) -> bool:
+    """True only if the job really succeeded.
+
+    The status object reports a CRASH as completed with n_ok=0, n_fail=0 and
+    failed=True. Reading only the counts turns "the agent died" into "done —
+    ok=0 failed=0", which is exactly the line you do not want to find in an
+    overnight log. `failed` is checked first.
+    """
     if not result:
         say(f"{label}: finished but reported no result — check its log.txt")
         return False
-    ok = result.get("n_videos_ok", result.get("n_ok"))
-    bad = result.get("n_videos_failed", result.get("n_fail"))
+    if result.get("failed"):
+        say(f"{label}: FAILED — {result.get('error') or 'no error recorded'}")
+        say(f"{label}: output dir was {result.get('out_dir','?')}")
+        return False
+    ok = result.get("n_ok", 0)
+    bad = result.get("n_fail", 0)
     say(f"{label}: done — ok={ok} failed={bad} out={result.get('out_dir','?')}")
+    if ok == 0:
+        say(f"{label}: WARNING — zero videos succeeded")
+        return False
     return not bad
 
 

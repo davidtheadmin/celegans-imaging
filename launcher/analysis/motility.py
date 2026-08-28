@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import paths
+from analysis import engine as engine_mod
 from analysis.stage_tracker import StageTracker
 
 log = logging.getLogger(__name__)
