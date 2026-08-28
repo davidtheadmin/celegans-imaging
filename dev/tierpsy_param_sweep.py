@@ -89,6 +89,7 @@ import h5py                                                       # noqa: E402
 from analysis.docker_utils import run_tierpsy                      # noqa: E402
 from analysis.motility import _WORMSCAN_ONLY_KEYS                  # noqa: E402
 from analysis.render_video import render_tracked                   # noqa: E402
+from analysis.ffmpeg_utils import convert_to_avi                   # noqa: E402
 
 FIELDS = ["cell", "traj_min_area", "mask_min_area", "worm_bw_thresh_factor",
           "n_tracks", "n_specks", "n_long", "n_wormlike", "n_good",
@@ -103,17 +104,33 @@ def log(msg: str) -> None:
         print(msg, flush=True)
 
 
-def find_avi(plate: Path) -> Path:
-    """The flat-fielded AVI the pipeline already made, so we sweep Tierpsy alone."""
+def find_avi(plate: Path, outdir: Path, flat_field: bool = True) -> Path:
+    """The AVI every cell is fed, made once so the grid varies only Tierpsy.
+
+    Prefers the one the pipeline already cached. If the cache has been cleared
+    — which is the normal state right after a parameter change — it transcodes
+    the plate's MP4 itself, with the same flat-field pass the pipeline uses, so
+    the sweep does not depend on having run the pipeline first.
+    """
     hits = sorted(plate.glob("_wormscan_cache/*/*.avi"))
-    if not hits:
-        raise SystemExit(
-            f"No cached AVI under {plate}\\_wormscan_cache.\n"
-            "Run the motility pipeline on this folder once first, or pass "
-            "--avi with a path to one.")
-    if len(hits) > 1:
-        log(f"note: {len(hits)} AVIs found, using {hits[0].name}")
-    return hits[0]
+    if hits:
+        if len(hits) > 1:
+            log(f"note: {len(hits)} cached AVIs, using {hits[0].name}")
+        return hits[0]
+    mp4s = sorted(plate.glob("*.mp4"))
+    if not mp4s:
+        raise SystemExit(f"No .mp4 and no cached AVI under {plate}")
+    if len(mp4s) > 1:
+        log(f"note: {len(mp4s)} MP4s, using {mp4s[0].name}")
+    outdir.mkdir(parents=True, exist_ok=True)
+    avi = outdir / (mp4s[0].stem + ".avi")
+    if avi.exists():
+        log(f"reusing {avi.name} from a previous sweep")
+        return avi
+    log(f"no cached AVI — transcoding {mp4s[0].name} "
+        f"(flat_field={'on' if flat_field else 'off'}), once for the whole grid")
+    convert_to_avi(mp4s[0], avi, flat_field=flat_field)
+    return avi
 
 
 def measure(results_dir: Path, min_dur: float, area_min: float,
@@ -251,12 +268,16 @@ def main() -> int:
                    help="also write cell_NNN_tracked.mp4 per cell — every "
                         "tracked object drawn, so the winning numbers can be "
                         "checked by eye. Roughly doubles the time per cell.")
+    p.add_argument("--no-flat-field", action="store_true",
+                   help="transcode without the flat-field pass (only relevant "
+                        "when no cached AVI exists and one has to be made)")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
     if not args.avi and not args.plate:
         p.error("give --plate or --avi")
-    avi = args.avi if args.avi else find_avi(args.plate)
+    avi = args.avi if args.avi else find_avi(args.plate, args.out,
+                                             flat_field=not args.no_flat_field)
     base = json.loads(Path(args.params).read_text(encoding="utf-8"))
 
     grid = []
