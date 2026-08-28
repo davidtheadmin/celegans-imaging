@@ -13,7 +13,9 @@ config.load(). Nothing about the analysis differs from a GUI run.
 
 WHAT IT DOES NOT DO
 -------------------
-No renders, unless asked. `clear_cache` is False and there is no flag for it:
+Renders are off unless asked; `--renders tracked` gives just the overlay you
+evaluate a filter with, `--renders all` everything each pipeline can draw.
+`clear_cache` is False and there is no flag for it:
 the whole point of an unattended run is that you decided what the cache holds
 BEFORE going to bed, and a stray --clear-cache would silently turn a 40-minute
 job into a 16-hour one. Clear it by hand first if that is what you want.
@@ -117,8 +119,11 @@ def main() -> int:
                    help="repeat once per day folder")
     p.add_argument("--crawling-min-span-s", type=float, default=20.0)
     p.add_argument("--crawling-threshold-s", type=float, default=5.0)
-    p.add_argument("--renders", action="store_true",
-                   help="also write tracked/side-by-side videos (much slower)")
+    p.add_argument("--renders", choices=("none", "tracked", "all"), default="none",
+                   help="none (default); tracked = the tracked overlay only, "
+                        "which is the one you evaluate a filter with; all = "
+                        "every artefact each pipeline can draw, including "
+                        "motility's per-worm traces, which are the slow part")
     p.add_argument("--heartbeat", type=int, default=60, help="s between progress lines")
     p.add_argument("--log", type=Path, help="also write this transcript to a file")
     p.add_argument("--crawling-first", action="store_true")
@@ -146,8 +151,10 @@ def main() -> int:
 
     settings = config.load()
     t0 = time.time()
+    tracked = args.renders in ("tracked", "all")
+    every = args.renders == "all"
     say(f"start — motility={args.motility or 'skipped'} "
-        f"crawling={len(plans)} folder(s) renders={'on' if args.renders else 'off'}")
+        f"crawling={len(plans)} folder(s) renders={args.renders}")
 
     def do_motility() -> bool:
         if not args.motility:
@@ -161,10 +168,10 @@ def main() -> int:
                         method="single folder", detail="single folder")],
             threshold_s=args.motility_threshold_s,
             clear_cache=False,
-            want_tracked=args.renders,
-            want_curvature=args.renders,
-            want_sidebyside=args.renders,
-            want_per_worm_traces=args.renders,
+            want_tracked=tracked,
+            want_curvature=every,
+            want_sidebyside=every,
+            want_per_worm_traces=every,
         )
         return report("motility", wait_for(ag, st, "motility", args.heartbeat))
 
@@ -181,9 +188,9 @@ def main() -> int:
             plans,
             threshold_s=args.crawling_threshold_s,
             clear_cache=False,
-            want_tracked=args.renders,
-            want_sidebyside=args.renders,
-            want_path_traces=args.renders,
+            want_tracked=tracked,
+            want_sidebyside=every,
+            want_path_traces=every,
             min_span_s=args.crawling_min_span_s,
         )
         return report("crawling", wait_for(ag, st, "crawling", args.heartbeat))
