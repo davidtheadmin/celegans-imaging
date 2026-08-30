@@ -75,8 +75,14 @@ DEBRIS_SPEED_MAX: float = 10.0             # debris filter: high speed = real wo
 # 1.6x clear of the nearest real worm on each axis and 2-3x clear of the edge.
 # Both are required, and so is stillness, because a moving object is an animal
 # whatever its shape.
-EDGE_ASPECT_MIN: float = 15.0                # rule 3: major/minor, worms top out at 9.6
-EDGE_MINOR_AXIS_MAX: float = 4.0             # rule 3: px, the thinnest real worm is 6.5
+# Thickness was dropped from this rule. It was fitted to one plate edge that
+# happened to be 1.87 px across, and a 4.0 px ceiling then missed the next one:
+# `601 0J plate 02` worm 4 on the 28 Aug run is 454 px long at aspect 58.7 —
+# unmistakably a hair or an edge — but 7.6 px across, so it sailed through.
+# Elongation alone separates it and separates it hugely: over all 182 worms the
+# aspect ratio runs to 8.6 at its highest and then jumps to 58.7. A threshold
+# at 15 sits 1.7x above every real animal and 3.9x below the artefact.
+EDGE_ASPECT_MIN: float = 15.0                # rule 3: major/minor, worms top out at 8.6
 
 # Rule 4 — a SLOW object with a worm's AREA but nothing like a worm's
 # LENGTH. David identified worm 7 of `601 10J plate 02` as debris; measured
@@ -101,6 +107,17 @@ EDGE_MINOR_AXIS_MAX: float = 4.0             # rule 3: px, the thinnest real wor
 # 170 worms of the 28 Aug run, length+speed drops 6 and all 6 are blobs, while
 # length alone would also take five animals swimming at 59-129 bpm.
 DEBRIS_SHORT_LENGTH_FRAC: float = 0.55       # rule 4: x the video's median worm length
+# Rule 4's second half. Debris is short AND it does not behave like an animal,
+# but there are two ways not to: a blob sits still (speed 1-2 px/s), and a hair
+# DRIFTS — `903 0J plate 02` worm 1 is 0.41 of its plate's median length and
+# travels at 14.8 px/s, above the speed gate, while bending 1.5 times a minute.
+# So either failure qualifies.
+#
+# 40 bpm is chosen with room on both sides: the fake bend rates flicker
+# produces on debris measured 1.5 to 28.6, and the genuinely small worms on
+# these plates swim at 60 to 129. Across all 182 worms the pair of terms takes
+# exactly one object, the hair.
+DEBRIS_DRIFT_BPM_MAX: float = 40.0           # rule 4: below this it is not swimming
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +156,8 @@ def reuse_post_settings(threshold_s: float) -> dict:
     """
     return {
         "threshold_s": float(threshold_s),
-        "row_schema": 7,   # 7: per-piece floor + the user's number on the
-                           #    sum; bend intervals no longer span gaps
+        "row_schema": 8,   # 8: rule 3 on elongation alone, rule 4 also
+                           #    catches a drifting hair
         "tuning": hashlib.sha256(
             json.dumps(tuning_constants(), sort_keys=True,
                        separators=(",", ":")).encode("utf-8")
@@ -740,8 +757,7 @@ def read_fragments(
         # to hold; any one of them alone describes some real worm in the set.
         lmed = r.get("length_median")
         mnr, asp = r.get("minor_axis_median"), r.get("aspect_median")
-        rule3 = (mnr is not None and mnr == mnr and mnr < EDGE_MINOR_AXIS_MAX
-                 and asp is not None and asp == asp and asp > EDGE_ASPECT_MIN
+        rule3 = (asp is not None and asp == asp and asp > EDGE_ASPECT_MIN
                  and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX
                  and r["bpm"] < DEBRIS_BPM_THRESHOLD)
         # Rule 4: a worm's area, nothing like a worm's length, and going
@@ -751,7 +767,8 @@ def read_fragments(
         rule4 = (length_ref is not None
                  and lmed is not None and lmed == lmed
                  and lmed < length_ref * DEBRIS_SHORT_LENGTH_FRAC
-                 and spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX)
+                 and ((spd is not None and spd == spd and spd < DEBRIS_SPEED_MAX)
+                      or r["bpm"] < DEBRIS_DRIFT_BPM_MAX))
         if rule1 or rule2 or rule3 or rule4:
             tid = r.get("repr_tierpsy_id", -1)
             fl = flicker_stats_by_tid.get(tid, {})
