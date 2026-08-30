@@ -178,6 +178,29 @@ def _finite(values: Iterable) -> list:
     return out
 
 
+def _n_finite(values) -> int:
+    """How many values actually contributed — the denominator of the SEM."""
+    return len(_finite(values))
+
+
+def sem(values) -> Optional[float]:
+    """Standard error of the mean over the ITEMS (worms), sd / sqrt(n).
+
+    The honest reading: how well the mean of these animals is pinned down by
+    this many of them. NOT how much the number would move if the experiment
+    were repeated — worms in one experiment share a plate, a day and a
+    handling, so they are not fully independent and this is an optimistic
+    bound on precision. It is reported because it answers the question extra
+    plates are actually run to improve, and captioned so it cannot be mistaken
+    for replicate error.
+    """
+    v = _finite(values)
+    if len(v) < 2:
+        return None
+    s = sd(v)
+    return None if s is None else s / (len(v) ** 0.5)
+
+
 def mean(values) -> Optional[float]:
     v = _finite(values)
     return sum(v) / len(v) if v else None
@@ -228,6 +251,23 @@ class Aggregation:
     # single-folder run leaves this empty rather than putting [0.0] in it, so
     # downstream code can ask "is this a timecourse?" with a plain truth test.
     timepoints: list = field(default_factory=list)
+    # The items that passed the gate, each carrying its parsed strain / dose /
+    # unit / timepoint alongside its metric columns. Kept because the
+    # normalisation helpers below have to divide worms by a control, not plate
+    # means by a control, and they cannot re-derive the items from the plate
+    # rows. Empty when the item IS the plate (colony survival), and the
+    # helpers fall back to per_plate in that case — see `_units`.
+    items: list = field(default_factory=list)
+
+
+def _units(agg: "Aggregation") -> list:
+    """The rows a normalisation should be pooled over.
+
+    The kept items when there are any, otherwise the plate rows. That fallback
+    is not a degradation: colony survival measures a whole well, so its plate
+    row IS its item row and pooling over per_plate is pooling over items.
+    """
+    return list(getattr(agg, "items", None) or agg.per_plate)
 
 
 def _tp_of(r: dict) -> Optional[float]:
@@ -255,9 +295,12 @@ def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
     Per-plate rows carry, for each metric, the plate's own summary
     (``<key>``, by the metric's ``agg``) and its ``n_<key>``.
 
-    Per-condition rows carry ``<key>_mean`` / ``<key>_sd`` ACROSS PLATE MEANS —
-    n_plates is the n — plus ``<key>_pooled_median`` over every item in the
-    condition, for comparison with the pre-existing worm-pooled numbers.
+    Per-condition rows carry ``<key>_mean`` / ``<key>_sd`` / ``<key>_sem``
+    POOLED OVER ITEMS, with ``<key>_n`` as the n and ``<key>_pooled_median``
+    as the robust companion. The plates of a condition are not replicates of
+    each other, so their means are not averaged; ``<key>_plate_spread_sd`` —
+    the SD across plate means, which is what this used to report as the error
+    bar — is kept beside them purely so a rogue dish stays visible.
 
     ``by_timepoint`` adds the timepoint to both grouping keys, so a multi-folder
     timecourse yields one plate row per (timepoint, condition, plate) and one
@@ -343,18 +386,51 @@ def aggregate(items: Sequence[dict], metrics: Sequence[Metric],
         if by_timepoint:
             out = {"timepoint_h": tp, **out}
         for m in metrics:
-            plate_vals = [p[m.key] for p in plates]
-            out[f"{m.key}_mean"] = mean(plate_vals)
-            out[f"{m.key}_sd"] = sd(plate_vals)
-            out[f"{m.key}_pooled_median"] = median([r.get(m.key)
-                                                    for r in pooled])
+            # POOLED OVER WORMS, not averaged over plates.
+            #
+            # Several plates of one condition at one timepoint are not
+            # replicates. They are more worms from the same experiment, split
+            # across dishes so more animals could be imaged. Averaging the
+            # plate means made a plate of 3 worms count as much as a plate of
+            # 30, and the SD across those means was drawn as an error bar —
+            # which measured how unevenly worms were distributed between
+            # dishes, and read as biological replication.
+            #
+            # `_sem` is what the figures draw: the spread of the WORMS divided
+            # by the root of how many there were. It says how well this number
+            # is known given the animals actually imaged, and it shrinks when
+            # an extra plate adds worms, which is what the extra plate is for.
+            # It is not replicate error and must never be captioned as such —
+            # one experiment cannot produce that.
+            vals = [r.get(m.key) for r in pooled]
+            out[f"{m.key}_mean"] = mean(vals)
+            out[f"{m.key}_sd"] = sd(vals)
+            out[f"{m.key}_sem"] = sem(vals)
+            out[f"{m.key}_n"] = _n_finite(vals)
+            out[f"{m.key}_pooled_median"] = median(vals)
+            # Kept for QC: how the plates of this condition sat relative to one
+            # another. A rogue dish is worth being able to see; it is simply
+            # not an error bar.
+            out[f"{m.key}_plate_spread_sd"] = sd([p[m.key] for p in plates])
         per_condition.append(out)
 
     tps = sorted({t for t in (_tp_of(r) for r in items) if t is not None}) \
         if by_timepoint else []
+    # The kept items, each stamped with its parsed condition so the
+    # normalisation helpers can group them the same way the plate rows are
+    # grouped. Shallow copies: the caller's rows are not touched.
+    kept_items = []
+    for r in items:
+        if not keep(r):
+            continue
+        info = split_condition(str(r.get("condition", "")))
+        kept_items.append({**r, "strain": info["strain"], "dose": info["dose"],
+                           "unit": info["unit"],
+                           "plate": str(r.get("plate", "")),
+                           "timepoint_h": _tp_of(r)})
     return Aggregation(per_plate=per_plate, per_condition=per_condition,
                        metrics=list(metrics), n_items=n_items, n_kept=n_kept,
-                       timepoints=tps)
+                       timepoints=tps, items=kept_items)
 
 
 def survival_series(agg: "Aggregation", metric_key: str,
@@ -367,28 +443,37 @@ def survival_series(agg: "Aggregation", metric_key: str,
     condition grammar lives here rather than in each assay.
 
     NORMALISATION IS PER STRAIN, AND ONLY EVER AGAINST ITS OWN CONTROL. Each
-    plate is divided by the mean of that strain's own untreated plates, and the
-    condition mean and SD are taken across those normalised plates. So the
+    ITEM is divided by the mean of that strain's own untreated items, and the
+    condition mean, SD and SEM are pooled over those normalised items. So the
     control sits at 100% by construction and still carries the spread of the
-    control plates themselves: a control that disagrees with itself has to look
-    like one. A strain with no untreated condition falls back to its lowest
-    dose and says so in ``notes``; a strain whose control is zero or
-    unmeasured is dropped entirely rather than normalised against another
-    strain's control, because that number would not be survival.
+    control itself: a control that disagrees with itself has to look like one.
+    A strain with no untreated condition falls back to its lowest dose and says
+    so in ``notes``; a strain whose control is zero or unmeasured is dropped
+    entirely rather than normalised against another strain's control, because
+    that number would not be survival.
+
+    ``pts`` carries ``mean`` / ``sd`` / ``sem`` / ``n`` over the items and
+    ``vals`` over the PLATES, because the plate dots are QC — a rogue dish has
+    to stay visible — while the marker and its bar are the pooled item
+    statistic. For colony survival the two sets are the same rows: a well is
+    one measurement, so its plate row is its item row.
     """
     log_ = write_log or (lambda _m: None)
     plates = [p for p in agg.per_plate
               if p.get("dose") is not None and p.get(metric_key) is not None]
-    if not plates:
+    units = [r for r in _units(agg)
+             if r.get("dose") is not None and r.get(metric_key) is not None]
+    if not plates or not units:
         log_(f"survival: no dosed plates carrying {metric_key}.")
         return None
     unit = dose_unit_of(agg.per_condition)
     series, notes = [], []
     for s in sorted({p["strain"] for p in plates}, key=strain_sort_key):
         rows = [p for p in plates if p["strain"] == s]
+        urows = [r for r in units if r["strain"] == s]
         doses = sorted({p["dose"] for p in rows})
         ctrl = 0 if 0 in doses else doses[0]
-        base = mean([p[metric_key] for p in rows if p["dose"] == ctrl])
+        base = mean([r[metric_key] for r in urows if r["dose"] == ctrl])
         if not base or base <= 0:
             log_(f"survival: {s} has no usable control at {ctrl} {unit} — "
                  "strain dropped.")
@@ -399,8 +484,11 @@ def survival_series(agg: "Aggregation", metric_key: str,
         for d in doses:
             vals = [100.0 * p[metric_key] / base
                     for p in rows if p["dose"] == d]
-            pts.append({"dose": d, "vals": vals, "mean": mean(vals),
-                        "sd": sd(vals) or 0.0,
+            uvals = [100.0 * r[metric_key] / base
+                     for r in urows if r["dose"] == d]
+            pts.append({"dose": d, "vals": vals, "mean": mean(uvals),
+                        "sd": sd(uvals) or 0.0,
+                        "sem": sem(uvals) or 0.0, "n": _n_finite(uvals),
                         "plates": [p["plate"] for p in rows if p["dose"] == d]})
         series.append({"strain": s, "ctrl_dose": ctrl, "base": base,
                        "pts": pts})
@@ -448,6 +536,13 @@ def normalised_series(agg: "Aggregation", metric_key: str,
     which its mean first crosses 50% of control, linearly interpolated between
     the two timepoints that bracket the crossing. t_half is None when the curve
     never crosses — which is a result, not a gap, and the caller says so.
+
+    The denominator and the marker are both POOLED OVER ITEMS: the base is the
+    mean of the control's worms at that timepoint, and each point is the mean
+    of the treated worms over it with ±1 SEM. The plates are still carried, as
+    ``vals``, so the figure can scatter them for QC — but they are not what the
+    bar measures, because the plates of a condition are not replicates of each
+    other.
     """
     log_ = write_log or (lambda _m: None)
     tps = list(getattr(agg, "timepoints", []) or [])
@@ -457,13 +552,17 @@ def normalised_series(agg: "Aggregation", metric_key: str,
     plates = [p for p in agg.per_plate
               if p.get("dose") is not None and p.get(metric_key) is not None
               and p.get("timepoint_h") is not None]
-    if not plates:
+    units = [r for r in _units(agg)
+             if r.get("dose") is not None and r.get(metric_key) is not None
+             and r.get("timepoint_h") is not None]
+    if not plates or not units:
         log_(f"normalised {metric_key}: no dosed plates carrying the metric.")
         return None
     unit = dose_unit_of(agg.per_condition)
     series, notes = [], []
     for s in sorted({p["strain"] for p in plates}, key=strain_sort_key):
         rows = [p for p in plates if p["strain"] == s]
+        urows = [r for r in units if r["strain"] == s]
         doses = sorted({p["dose"] for p in rows})
         ctrl = 0 if 0 in doses else doses[0]
         if len(doses) < 2:
@@ -476,8 +575,8 @@ def normalised_series(agg: "Aggregation", metric_key: str,
         # day's base, which would silently compare across a day.
         base_at = {}
         for t in tps:
-            b = mean([p[metric_key] for p in rows
-                      if p["dose"] == ctrl and p["timepoint_h"] == t])
+            b = mean([r[metric_key] for r in urows
+                      if r["dose"] == ctrl and r["timepoint_h"] == t])
             if b and b > 0:
                 base_at[t] = b
         missing = [t for t in tps if t not in base_at]
@@ -499,11 +598,20 @@ def normalised_series(agg: "Aggregation", metric_key: str,
                     continue
                 here = [p for p in rows
                         if p["dose"] == d and p["timepoint_h"] == t]
+                uhere = [r for r in urows
+                         if r["dose"] == d and r["timepoint_h"] == t]
                 vals = [100.0 * p[metric_key] / b for p in here]
-                if not vals:
+                uvals = [100.0 * r[metric_key] / b for r in uhere]
+                if not uvals:
                     continue
-                pts.append({"tp": t, "vals": vals, "mean": mean(vals),
-                            "sd": sd(vals), "base": b,
+                # `vals` are the PLATES (the old QC dots, still carried
+                # for the workbook and for colony survival) and `wvals` are
+                # the individual animals, which is what the page scatters when
+                # the reader asks for points.
+                pts.append({"tp": t, "vals": vals, "wvals": uvals,
+                            "mean": mean(uvals),
+                            "sd": sd(uvals), "sem": sem(uvals),
+                            "n": _n_finite(uvals), "base": b,
                             "plates": [p["plate"] for p in here]})
             if not pts:
                 continue
@@ -580,10 +688,23 @@ def aggregate_from_plates(plate_rows: Sequence[dict], metrics: Sequence[Metric],
                "n_items": sum(p["n_items"] for p in plates),
                "n_kept": sum(p["n_kept"] for p in plates)}
         for m in metrics:
+            # Here the well IS the item: one well yields one number, so there
+            # is no within-plate averaging step to skip and this mean was
+            # already pooled over items. What it was missing is `_sem`, which
+            # the figures and the explorer now draw — without it a counting
+            # run would silently lose every error bar.
+            #
+            # `_plate_spread_sd` is emitted equal to `_sd` rather than blank:
+            # its definition is the SD across plate means, and with one number
+            # per plate that is exactly the SD across items. The two agreeing
+            # is the honest answer for this assay, not a placeholder.
             vals = [p[m.key] for p in plates]
             out[f"{m.key}_mean"] = mean(vals)
             out[f"{m.key}_sd"] = sd(vals)
+            out[f"{m.key}_sem"] = sem(vals)
+            out[f"{m.key}_n"] = _n_finite(vals)
             out[f"{m.key}_pooled_median"] = median(vals)
+            out[f"{m.key}_plate_spread_sd"] = sd(vals)
         per_condition.append(out)
 
     return Aggregation(per_plate=per_plate, per_condition=per_condition,

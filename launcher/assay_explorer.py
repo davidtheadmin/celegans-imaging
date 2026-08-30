@@ -84,7 +84,9 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
             "n_plates": c["n_plates"],
             "n_items": c["n_items"], "n_kept": c["n_kept"],
             "stats": {m.key: {"mean": _r(c.get(f"{m.key}_mean")),
-                              "sd": _r(c.get(f"{m.key}_sd")),
+                              "sd": _r(c.get(f"{m.key}_sem")),
+                              "worm_sd": _r(c.get(f"{m.key}_sd")),
+                              "n": c.get(f"{m.key}_n"),
                               "pooled": _r(c.get(f"{m.key}_pooled_median"))}
                       for m in metrics},
         })
@@ -97,6 +99,36 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
             "n_items": p["n_items"], "n_kept": p["n_kept"],
             "vals": {m.key: _r(p.get(m.key)) for m in metrics},
         })
+
+    # The individual animals, for the page's "worms" toggle — off by default,
+    # so this costs the reader nothing until they ask for it.
+    #
+    # Same shape and same grouping key as `plates`: one entry per (condition,
+    # timepoint), which the page filters exactly the way it filters plates.
+    # Keying by condition alone would put five days of worms behind one day's
+    # marker, the exact collision the timepoint column exists to stop, and a
+    # hand-built composite key would have to survive Python and JS formatting
+    # the same float the same way — which is a bug waiting rather than a
+    # design. Values only, no worm identity: the page scatters them and the
+    # workbook is where an individual animal is looked up.
+    #
+    # Empty for an assay whose item is its plate (colony survival): there the
+    # plate dots already ARE the animals, and a second identical layer would
+    # only imply there were two.
+    worms_out = []
+    if getattr(agg, "items", None):
+        buckets: dict = {}
+        for r in agg.items:
+            k = (str(r.get("condition", "")), _r(r.get("timepoint_h")))
+            g = buckets.get(k)
+            if g is None:
+                g = buckets[k] = {"condition": k[0], "tp": k[1],
+                                  "vals": {m.key: [] for m in metrics}}
+            for m in metrics:
+                fv = _r(r.get(m.key))
+                if fv is not None:
+                    g["vals"][m.key].append(fv)
+        worms_out = list(buckets.values())
 
     dist_out = None
     if dist:
@@ -121,8 +153,12 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                 "series": [
                     {"strain": s["strain"], "ctrl_dose": s["ctrl_dose"],
                      "base": _r(s["base"], 3),
+                     # `sd` is the drawn bar and carries SEM, matching the
+                     # condition payload above; the item SD rides along as
+                     # `item_sd` for the table.
                      "pts": [{"dose": q["dose"], "mean": _r(q["mean"], 3),
-                              "sd": _r(q["sd"], 3),
+                              "sd": _r(q.get("sem"), 3),
+                              "item_sd": _r(q["sd"], 3), "n": q.get("n"),
                               "vals": [_r(x, 3) for x in q["vals"]],
                               "plates": q["plates"]}
                              for q in s["pts"]]}
@@ -144,7 +180,12 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                      "ctrl_dose": s["ctrl_dose"],
                      "t_half": _r(s["t_half"], 1),
                      "pts": [{"tp": _r(q["tp"]), "mean": _r(q["mean"], 2),
-                              "sd": _r(q["sd"], 2),
+                              "sd": _r(q.get("sem"), 2),
+                              "item_sd": _r(q["sd"], 2), "n": q.get("n"),
+                              # The animals, for the "worms" toggle. `vals`
+                              # (the plates) stays for the table and for the
+                              # assays whose item is its plate.
+                              "wvals": [_r(x, 2) for x in q.get("wvals") or []],
                               "vals": [_r(x, 2) for x in q["vals"]],
                               "plates": q["plates"]}
                              for q in s["pts"]]}
@@ -165,7 +206,8 @@ def build_payload(*, title: str, subtitle: str, dr_caption: str,
                      "headline": bool(getattr(m, "headline", True)),
                      "log": bool(getattr(m, "log", False))}
                     for m in metrics],
-        "cond": cond_out, "plates": plates_out, "dist": dist_out,
+        "cond": cond_out, "plates": plates_out, "worms": worms_out,
+        "dist": dist_out,
         "meta": meta or {},
     }
 

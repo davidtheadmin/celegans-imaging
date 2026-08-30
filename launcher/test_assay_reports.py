@@ -18,6 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import assay_common as AC          # noqa: E402
 import assay_reports as AR         # noqa: E402
+import assay_explorer as AE        # noqa: E402
+import assay_figures as AF         # noqa: E402
 
 FAILURES: list[str] = []
 
@@ -51,24 +53,131 @@ def test_grammar():
 
 
 def test_plate_first():
-    print("\nthe replication unit is the plate")
+    """The plate is NOT a replicate.
+
+    Several plates of one condition at one timepoint are more worms from the
+    same experiment, split across dishes. Averaging the plate means let two
+    worms outvote a hundred, and the SD across those means was drawn as an
+    error bar — measuring how unevenly worms were spread between dishes and
+    reading as biological replication. Both are asserted against here.
+    """
+    print("\nthe plate is not a replicate — conditions pool over worms")
     m = [AC.Metric("bpm", "Bend rate", "bends/min")]
     items = ([{"condition": "601 20J", "plate": "p1", "bpm": 10.0, "keep": True}] * 100
              + [{"condition": "601 20J", "plate": "p2", "bpm": 100.0, "keep": True}] * 2)
     agg = AC.aggregate(items, m, keep=lambda r: r["keep"])
     c = agg.per_condition[0]
-    check(near(c["bpm_mean"], 55.0),
-          f"a 100-worm plate does not outvote a 2-worm one (mean {c['bpm_mean']})")
+    # 100 worms at 10 and 2 at 100 -> (1000 + 200) / 102
+    check(near(c["bpm_mean"], 1200.0 / 102.0),
+          f"the mean is pooled over worms, so two do not outvote a hundred "
+          f"({c['bpm_mean']:.3f}, not 55.0)")
     check(near(c["bpm_pooled_median"], 10.0),
-          "the pooled median is kept alongside, and differs (10.0)")
+          "the pooled median agrees with the pooled mean's population (10.0)")
     check(c["n_plates"] == 2 and c["n_kept"] == 102,
           "n_plates is 2 and n_kept is 102 — both are reported")
-    check(near(c["bpm_sd"], 63.6396, 1e-3),
-          "SD is across the two plate means, not across worms")
+    check(c["bpm_n"] == 102, "the SEM denominator is worms, not plates (102)")
+    check(near(c["bpm_sd"], AC.sd([10.0] * 100 + [100.0] * 2)),
+          "SD is across WORMS now, not across the two plate means")
+    check(near(c["bpm_sem"], c["bpm_sd"] / (102 ** 0.5)),
+          "SEM is that SD over root n, and it is what the figures draw")
+    check(near(c["bpm_plate_spread_sd"], 63.6396, 1e-3),
+          "the old across-plate-means number survives as _plate_spread_sd, for QC")
 
     one = AC.aggregate([{"condition": "N2 0J", "plate": "p1", "bpm": 5.0}], m)
     check(one.per_condition[0]["bpm_sd"] is None,
           "a single plate has no SD — blank, not 0.0")
+
+
+def test_normalisation_pools_items():
+    """The % - of - control curves divide WORMS by a control, not plate means.
+
+    Both helpers used to take the base from the control's plate means and then
+    take the mean and SD across the treated plates' normalised means. That is
+    the same pseudo-replication as the dose-response had, one layer down, and
+    it survived the first pass of the fix because these two functions build
+    their own statistics instead of reading the per-condition row.
+
+    The rig makes the two answers differ on purpose: the control has one plate
+    of 1 worm at 100 and one plate of 9 worms at 20, so the plate-mean base is
+    60 while the pooled base is 28. Anything still averaging plate means lands
+    on the wrong denominator and is caught here.
+    """
+    print("\nnormalisation pools over worms, not plate means")
+    m = [AC.Metric("bpm", "Bend rate", "bends/min")]
+    items = ([{"condition": "601 0J", "plate": "p1", "bpm": 100.0}]
+             + [{"condition": "601 0J", "plate": "p2", "bpm": 20.0}] * 9
+             + [{"condition": "601 20J", "plate": "p1", "bpm": 14.0}] * 4)
+    agg = AC.aggregate(items, m)
+    check(len(agg.items) == 14,
+          "the kept items ride along on the Aggregation (14)")
+    built = AC.survival_series(agg, "bpm")
+    s0 = built["series"][0]
+    check(near(s0["base"], 28.0),
+          f"the base is the mean of the control WORMS (28.0, not the "
+          f"plate-mean 60.0) — got {s0['base']:.3f}")
+    pt = [q for q in s0["pts"] if q["dose"] == 20][0]
+    check(near(pt["mean"], 50.0),
+          "14 of 28 is 50% of control, pooled over the treated worms")
+    check(pt["n"] == 4, "n is the worms, not the plates (4)")
+    check("sem" in pt and pt["sem"] is not None,
+          "…and the point carries a SEM for the figure to draw")
+
+    # Same again with a timepoint dimension, which is the other helper.
+    for r in items:
+        r["timepoint_h"] = 0.0
+    later = [dict(r, timepoint_h=24.0) for r in items]
+    agg2 = AC.aggregate(items + later, m, by_timepoint=True)
+    nb = AC.normalised_series(agg2, "bpm")
+    q = nb["series"][0]["pts"][0]
+    check(near(q["base"], 28.0),
+          "the timecourse base is the same-day control WORMS, not its plates")
+    check(near(q["mean"], 50.0) and q["n"] == 4,
+          "…and its point is pooled over worms too")
+    check(len(q["vals"]) == 1,
+          "the faint dots stay PLATES — one here — so a rogue dish is visible")
+
+
+def test_worm_dots_payload():
+    """The explorer's worm dots are grouped by (condition, TIMEPOINT).
+
+    Keyed by condition alone, a five-day run would pile every day's animals
+    behind one day's marker — the same collision the timepoint column exists
+    to prevent, and invisible until someone counts the dots. The grouping is
+    also what the page filters on, so it has to match the condition rows.
+
+    The static figures draw no scatter at all: the plate dot was the last
+    thing presenting the dish as a unit. Colony survival is the exception —
+    its well IS its item — and that default is asserted here too, because a
+    counting run losing its only data points would look like a rendering bug
+    rather than a contract change.
+    """
+    print("\nworm dots: grouped per timepoint, off by default")
+    m = [AC.Metric("bpm", "Bend rate", "bends/min")]
+    items = ([{"condition": "601 0J", "plate": "p1", "bpm": 10.0, "timepoint_h": 0.0}] * 3
+             + [{"condition": "601 0J", "plate": "p1", "bpm": 90.0, "timepoint_h": 24.0}] * 5)
+    agg = AC.aggregate(items, m, by_timepoint=True)
+    pay = AE.build_payload(title="t", subtitle="", dr_caption="", agg=agg,
+                           metrics=m)
+    w = pay["worms"]
+    check(len(w) == 2, f"two (condition, timepoint) groups, not one (got {len(w)})")
+    by_tp = {g["tp"]: g["vals"]["bpm"] for g in w}
+    check(by_tp.get(0.0) == [10.0, 10.0, 10.0],
+          "hour 0 carries its own three worms")
+    check(by_tp.get(24.0) == [90.0] * 5,
+          "hour 24 carries its own five — the days are not merged")
+    check(all(g["condition"] == "601 0J" for g in w),
+          "…and each group names the condition the page filters on")
+
+    check(AF.SCATTER_NONE == "none" and AF.SCATTER_PLATE == "plate",
+          "the two scatter modes are spelled the way the reports pass them")
+    import inspect
+    for fn in (AF.fig_dose_response, AF.fig_timecourse, AF.fig_normalised):
+        d = inspect.signature(fn).parameters["scatter"].default
+        check(d == AF.SCATTER_NONE,
+              f"{fn.__name__} draws nothing behind the markers by default")
+    src = inspect.getsource(AR.counting_report)
+    check("SCATTER_PLATE" in src,
+          "colony survival still draws its wells — there the well IS the item")
 
 
 def test_gate():
@@ -372,6 +481,8 @@ if __name__ == "__main__":
         tmp = Path(t)
         test_grammar()
         test_plate_first()
+        test_normalisation_pools_items()
+        test_worm_dots_payload()
         test_gate()
         test_motility(tmp)
         test_crawling(tmp)

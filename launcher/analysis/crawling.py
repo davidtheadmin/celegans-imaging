@@ -1252,11 +1252,13 @@ class CrawlingAgent(threading.Thread):
 
         with pd.ExcelWriter(out_dir / "crawling_results.xlsx", engine="openpyxl") as xw:
             per_worm_df.to_excel(xw, sheet_name="per_worm", index=False)
-            # per_condition pools WORMS across plates — kept exactly as it was,
-            # so older numbers stay reproducible. condition_summary, added by
-            # the report layer below, aggregates PLATES instead and is what the
-            # figures and the explorer use. The workbook README explains which
-            # answers which question.
+            # per_condition pools WORMS across plates — kept exactly as it
+            # was, so older numbers stay reproducible. condition_summary,
+            # added by the report layer below, ALSO pools worms now (it used
+            # to average plate means, which made two worms outvote a hundred)
+            # and is what the figures and the explorer use. It carries the
+            # SEM, the n and the plate spread beside the mean. The workbook
+            # README explains which answers which question.
             per_condition_df.to_excel(xw, sheet_name="per_condition", index=False)
             try:
                 import assay_reports

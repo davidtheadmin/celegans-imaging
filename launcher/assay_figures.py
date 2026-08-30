@@ -87,12 +87,30 @@ def _log_ticks(lo: float, hi: float) -> list:
     return out
 
 
+# What, if anything, is scattered behind the markers.
+#
+# "none" is the default and what motility and crawling use. A dot per plate was
+# the last thing in these figures still presenting the dish as a unit of
+# anything, and it invited exactly the reading the SEM change removed — three
+# dots in a row look like three replicates whatever the caption says. The
+# per-worm points are in the explorer instead, where they can be switched on
+# for a look and switched off again, and in the distribution figure, which is
+# what a picture of the spread is for.
+#
+# "plate" is for colony survival, where the well IS the item: its dots are its
+# data, not a second layer of aggregation, so they stay.
+SCATTER_NONE = "none"
+SCATTER_PLATE = "plate"
+
+
 def fig_dose_response(out_png: Path, agg: AC.Aggregation,
                       metrics: Sequence[AC.Metric], title: str,
-                      write_log: Callable[[str], None]) -> Optional[Path]:
-    """Grid of metric x strain. Condition mean ± SD across plates, plus a dot
-    per plate — a condition whose plates disagree has to look different from one
-    whose plates agree.
+                      write_log: Callable[[str], None],
+                      scatter: str = SCATTER_NONE) -> Optional[Path]:
+    """Grid of metric x strain. Condition mean POOLED OVER ITEMS ± 1 SEM.
+
+    ``scatter`` says what sits behind the markers — see SCATTER_NONE above.
+    Nothing, for the worm assays; a dot per well for colony survival.
 
     IN A TIMECOURSE THIS DRAWS ONE LINE PER TIMEPOINT. It used to key the
     condition rows by dose alone; with a timepoint dimension that dict keeps
@@ -154,24 +172,26 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
                         c = keyed.get(x)
                         if c is None:
                             continue
-                        for p in _plates_of(c, t):
-                            y = p.get(m.key)
-                            if y is None:
-                                continue
-                            # Jitter is in CATEGORY units, so it has to stay
-                            # small: with two doses the axis spans 0..1 and
-                            # what looks like a modest nudge throws a plate
-                            # dot a tenth of the panel away from its tick.
-                            ax.plot([xi + (hash(p["plate"]) % 5 - 2) * 0.012],
-                                    [y], marker="o", markersize=2.4,
-                                    color=col, alpha=0.28,
-                                    linestyle="none", zorder=2)
+                        if scatter == SCATTER_PLATE:
+                            for p in _plates_of(c, t):
+                                y = p.get(m.key)
+                                if y is None:
+                                    continue
+                                # Jitter is in CATEGORY units, so it has to
+                                # stay small: with two doses the axis spans
+                                # 0..1 and what looks like a modest nudge
+                                # throws a dot a tenth of the panel from its
+                                # tick.
+                                ax.plot([xi + (hash(p["plate"]) % 5 - 2) * 0.012],
+                                        [y], marker="o", markersize=2.4,
+                                        color=col, alpha=0.28,
+                                        linestyle="none", zorder=2)
                         mu = c.get(f"{m.key}_mean")
                         if mu is None:
                             continue
                         X.append(xi)
                         mus.append(mu)
-                        errs.append(c.get(f"{m.key}_sd") or 0.0)
+                        errs.append(c.get(f"{m.key}_sem") or 0.0)
                     if X:
                         ax.errorbar(X, mus, yerr=errs, marker="o",
                                     markersize=4.0, linewidth=1.6, capsize=2.5,
@@ -191,11 +211,20 @@ def fig_dose_response(out_png: Path, agg: AC.Aggregation,
                     ax.set_xlabel(f"Dose ({unit})" if unit else "Dose",
                                   fontsize=8, color=_MUT)
         fig.suptitle(title, fontsize=13, y=0.995, color=_INK)
-        cap = ("Marker is the condition mean across plates, bars are ±1 SD "
-               "(sample SD, blank at one plate); faint dots are individual "
-               "plates. The y-axis is shared across each row, so columns can "
-               "be compared directly. n is the number of plates, not the "
-               "number of animals.")
+        cap = ("Marker is the condition mean POOLED OVER ITEMS, bars are ±1 "
+               "SEM (blank at one item). The bar says how well the mean is "
+               "pinned by the animals imaged, not how far it would move if "
+               "the experiment were repeated, which one experiment cannot "
+               "tell you. The y-axis is shared across each row, so columns "
+               "can be compared directly. n is the number of items, not the "
+               "number of plates."
+               + (" Faint dots are individual wells — one well is one "
+                  "measurement here, so they are the data."
+                  if scatter == SCATTER_PLATE else
+                  " The individual animals are not drawn here: switch them on "
+                  "in the explorer, or read the distribution figure. A plate "
+                  "dot is deliberately absent — the plates of a condition are "
+                  "more animals from one experiment, not replicates."))
         if len(series) > 1:
             cap += (" One line per timepoint, light to dark with time — no "
                     "quantity here is averaged across days.")
@@ -426,12 +455,17 @@ def _draw_survival(ax, series, *, logscale: bool, floor: float, top: float,
             if mu is None or (logscale and mu <= 0):
                 continue
             X.append(p["dose"])
+            # SEM, not SD: the wells of a condition are not replicates of each
+            # other, so the bar is how well this mean is pinned by the wells
+            # counted. `sd` stays in the payload for the explorer's table.
+            e = p.get("sem")
+            e = p["sd"] if e is None else e
             Y.append(mu)
-            ehi.append(p["sd"])
+            ehi.append(e)
             room = max(mu - base_y * (1.02 if logscale else 1.0), 0.0)
-            if p["sd"] > room:
+            if e > room:
                 n_clip += 1
-            elo.append(min(p["sd"], room))
+            elo.append(min(e, room))
         if not X:
             continue
         ax.errorbar(X, Y, yerr=[elo, ehi], marker="o", markersize=5.4,
@@ -533,16 +567,15 @@ def fig_survival(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
                           color=_MUT)
         fig.suptitle(title, fontsize=13, y=0.985, color=_INK)
 
-        cap = ("Each plate's " + metric.label.lower() + " as a percentage of "
-               "the mean of that strain's untreated plates. Markers are the "
-               "condition mean across plates, bars ±1 SD across those "
-               "normalised plates, faint dots the plates themselves. The "
+        cap = ("Each item's " + metric.label.lower() + " as a percentage of "
+               "the mean of that strain's untreated items. Markers are the "
+               "condition mean POOLED OVER ITEMS, bars ±1 SEM, faint dots the "
+               "plates themselves — kept for QC, not as replicates. The "
                "untreated point is 100% by construction; its bar is the spread "
                "of the controls. Same numbers in both panels.")
         if n_clip:
             cap += (" A bar that reaches the bottom of a panel is one whose "
-                    "mean minus SD is at or below zero — those plates disagree "
-                    "by more than their own mean.")
+                    "mean minus SEM is at or below zero.")
         if n_zero:
             cap += (f" {n_zero} plate(s) scored zero: a real point at 0% on the "
                     "left, and on the right an open triangle on the axis floor "
@@ -568,15 +601,16 @@ def fig_survival(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
         return None
 
 
-def fig_timecourse(out_png: Path, agg: AC.Aggregation,
+def fig_timecourse(out_png: Path, agg: AC.Aggregation,  # noqa: C901
                    metrics: Sequence[AC.Metric], title: str,
-                   write_log: Callable[[str], None]) -> Optional[Path]:
+                   write_log: Callable[[str], None],
+                   scatter: str = SCATTER_NONE) -> Optional[Path]:
     """Metric against time, one line per condition — the timecourse headline.
 
     One row per metric, one column per strain, so the doses of a strain sit
     together and can be read against each other. x is the timepoint in hours,
-    y is the condition mean across plates with +/-1 SD, and a faint dot per
-    plate sits behind it. A condition missing at one timepoint leaves a GAP in
+    y is the condition mean pooled over items with +/-1 SEM. Nothing is
+    scattered behind it unless ``scatter`` asks for it — see SCATTER_NONE. A condition missing at one timepoint leaves a GAP in
     its line rather than interpolating across it — an unimaged day is not a
     measurement, and a straight line through it would claim otherwise.
 
@@ -637,17 +671,18 @@ def fig_timecourse(out_png: Path, agg: AC.Aggregation,
                             continue
                         xs.append(tp)
                         ys.append(v)
-                        e = row.get(f"{m.key}_sd")
+                        e = row.get(f"{m.key}_sem")
                         es.append(e if e is not None and np.isfinite(e) else 0.0)
-                        pv = [q.get(m.key) for q in plates
-                              if q.get("timepoint_h") == tp
-                              and q.get("condition") == cname
-                              and q.get(m.key) is not None
-                              and np.isfinite(q.get(m.key))]
-                        if pv:
-                            ax.plot([tp] * len(pv), pv, marker="o",
-                                    linestyle="none", markersize=2.6,
-                                    color=col, alpha=0.3, zorder=1)
+                        if scatter == SCATTER_PLATE:
+                            pv = [q.get(m.key) for q in plates
+                                  if q.get("timepoint_h") == tp
+                                  and q.get("condition") == cname
+                                  and q.get(m.key) is not None
+                                  and np.isfinite(q.get(m.key))]
+                            if pv:
+                                ax.plot([tp] * len(pv), pv, marker="o",
+                                        linestyle="none", markersize=2.6,
+                                        color=col, alpha=0.3, zorder=1)
                     if xs:
                         ax.errorbar(
                             xs, ys, yerr=es, color=col, marker="o",
@@ -692,8 +727,8 @@ def fig_timecourse(out_png: Path, agg: AC.Aggregation,
 
 
 def fig_normalised(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
-                   title: str, write_log: Callable[[str], None]
-                   ) -> Optional[Path]:
+                   title: str, write_log: Callable[[str], None],
+                   scatter: str = SCATTER_NONE) -> Optional[Path]:
     """One metric, every treated condition, as a percentage of ITS OWN control
     at the SAME timepoint — the sensitivity curve, and the one panel that puts
     the strains in a single axis.
@@ -741,11 +776,16 @@ def fig_normalised(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
             col = _CAT[i % len(_CAT)]
             xs = [q["tp"] for q in s["pts"] if q["mean"] is not None]
             ys = [q["mean"] for q in s["pts"] if q["mean"] is not None]
-            es = [(q["sd"] or 0.0) for q in s["pts"] if q["mean"] is not None]
-            for q in s["pts"]:
-                for val in q["vals"]:
-                    ax.plot([q["tp"]], [val], marker="o", markersize=2.4,
-                            color=col, alpha=0.30, linestyle="none", zorder=1)
+            # SEM over the normalised ITEMS. The faint dots below are the
+            # plates, which are QC and not what this bar measures.
+            es = [(q.get("sem") or 0.0) for q in s["pts"]
+                  if q["mean"] is not None]
+            if scatter == SCATTER_PLATE:
+                for q in s["pts"]:
+                    for val in q["vals"]:
+                        ax.plot([q["tp"]], [val], marker="o", markersize=2.4,
+                                color=col, alpha=0.30, linestyle="none",
+                                zorder=1)
             if xs:
                 ax.errorbar(xs, ys, yerr=es, color=col, marker="o",
                             markersize=4.4, linewidth=1.9, capsize=2.5,
@@ -778,11 +818,11 @@ def fig_normalised(out_png: Path, agg: AC.Aggregation, metric: AC.Metric,
                   + (f" at {s['t_half']:.0f} h" if s.get("t_half") is not None
                      else ": never")
                   for s in series]
-        cap = ("Each treated plate as a percentage of the mean of its own "
-               "strain's control plates FROM THE SAME DAY, so the decline of "
-               "the untreated plates themselves is divided out rather than "
-               "charged to the treatment. Marker is the mean across those "
-               "normalised plates, bar is ±1 SD, faint dots are the plates. "
+        cap = ("Each treated item as a percentage of the mean of its own "
+               "strain's control items FROM THE SAME DAY, so the decline of "
+               "the untreated animals themselves is divided out rather than "
+               "charged to the treatment. Marker is the mean POOLED OVER those "
+               "normalised items, bar is ±1 SEM. "
                "The dashed line at 100% is the control by construction. "
                "▼ marks where a curve first crosses 50%, interpolated between "
                "timepoints — " + "; ".join(halves) + ".")

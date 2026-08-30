@@ -131,6 +131,25 @@ const K=(a,b)=>a+SEP+(b===null||b===undefined?'null':b);
 const CIX={}; D.cond.forEach(c=>{CIX[K(c.condition,c.tp)]=c;});
 const condAt=(name,tp)=>CIX[K(name,isTC?tp:null)];
 const platesAt=(name,tp)=>D.plates.filter(p=>p.condition===name&&(!isTC||p.tp===tp));
+/* The individual animals behind a marker. Same filter as platesAt, on the same
+   (condition, timepoint) key, so a five-day run cannot pile every day's worms
+   behind one day's point. Returns the values only — the workbook is where an
+   individual worm is looked up. */
+const wormsAt=(name,tp)=>(D.worms||[]).filter(w=>w.condition===name&&(!isTC||w.tp===tp));
+const wormVals=(name,tp,key)=>{const out=[];
+ wormsAt(name,tp).forEach(w=>{const a=w.vals[key]; if(a)a.forEach(x=>{
+  if(x!==null&&x!==undefined&&isFinite(x))out.push(x);});});
+ return out;};
+const HAS_WORMS=(D.worms||[]).length>0;
+/* Off by default. A dot per plate used to sit here and presented the dish as a
+   unit of something — three dots in a row read as three replicates whatever
+   the caption said. The animals are the honest scatter, and they are a lot of
+   ink, so the reader asks for them. */
+let DOTS=false;
+const DOTBTNS=[];
+function setDots(on){DOTS=!!on;
+ DOTBTNS.forEach(b=>b.setAttribute('aria-pressed',DOTS?'true':'false'));
+ drawTC();drawDR();drawNorm();}
 const DIX={};
 if(D.dist&&D.dist.group_meta)for(const k in D.dist.group_meta){const g=D.dist.group_meta[k];
  DIX[[g.strain,g.dose,g.tp].join(SEP)]=k;}
@@ -199,7 +218,7 @@ function drawTC(){
  const all=[];
  S.forEach(c=>TPS.forEach(t=>{const r=condAt(c,t); if(!r)return;
   const st=r.stats[m.key]||{}; if(st.mean!==null&&isFinite(st.mean)){all.push(st.mean-(st.sd||0));all.push(st.mean+(st.sd||0));}
-  platesAt(c,t).forEach(p=>all.push(p.vals[m.key]));}));
+  if(DOTS)wormVals(c,t,m.key).forEach(y=>all.push(y));}));
  const [lo,hi]=yRange(all);
  const tmin=TPS[0],tmax=TPS[TPS.length-1],tspan=(tmax-tmin)||1;
  const labs=[];
@@ -222,12 +241,12 @@ function drawTC(){
    const pts=[];
    TPS.forEach(t=>{
     const r=condAt(cname,t); if(!r)return;
-    platesAt(cname,t).forEach(p=>{const y=p.vals[m.key];
-     if(y===null||y===undefined||!isFinite(y))return;
-     const dot=E('circle',{cx:X(t),cy:Y(y),r:2,fill:col,opacity:.32});
-     hov(dot,'<b>'+p.plate+'</b> · '+cname+' · '+th(t)+'<br>'+m.label+' '+num(y,3)+(m.unit?' '+m.unit:'')+
-         '<br>'+p.n_kept+' of '+p.n_items+' kept');
-     svg.appendChild(dot);});
+    if(DOTS){const wv=wormVals(cname,t,m.key);
+     /* Spread across a few pixels so a hundred animals at one hour are a
+        cloud and not a single overdrawn dot. Deterministic, so the picture
+        does not change between redraws. */
+     wv.forEach((y,wi)=>svg.appendChild(E('circle',
+      {cx:X(t)+(((wi*7)%9)-4)*1.15,cy:Y(y),r:1.5,fill:col,opacity:.28})));}
     const st=r.stats[m.key]||{};
     if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
     pts.push([X(t),Y(st.mean)]);
@@ -259,7 +278,8 @@ function drawTC(){
  $('tclg').innerHTML=(LAYOUT
    ? shown().map(c=>'<span><i style="background:'+v(CCOL[c])+'"></i>'+c+'</span>').join('')
    : doses.map((d,i)=>'<span><i style="background:'+v(ramp(i,doses.length))+'"></i>'+dl(d)+'</span>').join(''))
-  +'<span style="color:var(--mut)">marker: condition mean across plates ±1 SD · faint dots: plates</span>'
+  +'<span style="color:var(--mut)">marker: condition mean pooled over items ±1 SEM'
+   +(DOTS?' · faint dots: one worm':'')+'</span>'
   +'<span style="color:var(--mut)">a gap means that day was not imaged, not that nothing happened</span>';
  $('tcnote').innerHTML=(m.note?'<b>'+m.label+'</b> — '+m.note:'');
 }
@@ -275,7 +295,11 @@ function drawNorm(){
  if(!S.length){$('norm').innerHTML='<p class="note">Nothing selected.</p>';$('normlg').innerHTML='';return;}
  const slot={}; P.series.forEach((s,i)=>slot[s.strain+'|'+s.dose]=i);
  const tps=TPS, tmin=tps[0],tmax=tps[tps.length-1],tspan=(tmax-tmin)||1;
- const every=[100]; S.forEach(s=>s.pts.forEach(q=>(q.vals||[]).forEach(x=>{if(isFinite(x))every.push(x)})));
+ /* The axis is set by whatever is actually drawn: with the worms hidden,
+    one outlier animal must not flatten every curve into the floor. */
+ const every=[100]; S.forEach(s=>s.pts.forEach(q=>{
+  if(DOTS)(q.wvals||[]).forEach(x=>{if(isFinite(x))every.push(x)});
+  const m=q.mean, e=q.sd||0; if(m!==null&&isFinite(m))every.push(m+e);}));
  const top=Math.max(115,Math.max(...every)*1.06);
  const padL=70,padT=14,padB=52,pw=690,ph=290,labw=96;
  const W=padL+pw+labw,H=padT+ph+padB;
@@ -294,10 +318,9 @@ function drawNorm(){
   const col=v(CAT[slot[s.strain+'|'+s.dose]%CAT.length]);
   const pts=[];
   (s.pts||[]).forEach(q=>{
-   (q.vals||[]).forEach(val=>{if(val===null||!isFinite(val))return;
-    const dot=E('circle',{cx:X(q.tp),cy:Y(val),r:2.2,fill:col,opacity:.4});
-    hov(dot,'<b>'+s.strain+' '+dl(s.dose)+' · '+th(q.tp)+'</b><br>'+num(val,1)+'% of same-day control');
-    svg.appendChild(dot);});
+   if(DOTS)(q.wvals||[]).forEach((val,wi)=>{if(val===null||!isFinite(val))return;
+    svg.appendChild(E('circle',{cx:X(q.tp)+(((wi*7)%9)-4)*1.15,cy:Y(val),r:1.5,
+      fill:col,opacity:.26}));});
    if(q.mean===null||!isFinite(q.mean))return;
    pts.push([X(q.tp),Y(q.mean)]);
    if(q.sd)svg.appendChild(E('path',{d:'M'+X(q.tp)+' '+Y(q.mean+q.sd)+'V'+Y(Math.max(q.mean-q.sd,0)),
@@ -453,7 +476,7 @@ function drawDR(){
    const name=D.has_dose?condNameOf(cl,x):x; if(!name)return;
    const c=condAt(name,t); if(!c)return;
    const st=c.stats[m.key]||{}; if(st.mean!==null&&isFinite(st.mean)){all.push(st.mean-(st.sd||0));all.push(st.mean+(st.sd||0));}
-   platesAt(name,t).forEach(p=>all.push(p.vals[m.key]));})));
+   if(DOTS)wormVals(name,t,m.key).forEach(y=>all.push(y));})));
   const [lo,hi]=yRange(all);
   cols.forEach((cl,ci)=>{
    const ox=padL+ci*(pw+gapC), oy=padT+ri*(ph+gapR);
@@ -473,12 +496,8 @@ function drawDR(){
     xs.forEach((x,xi)=>{
      const name=D.has_dose?condNameOf(cl,x):x; if(!name)return;
      const c=condAt(name,t); if(!c)return;
-     platesAt(name,t).forEach((p,pi)=>{const y=p.vals[m.key];
-      if(y===null||y===undefined||!isFinite(y))return;
-      const dot=E('circle',{cx:X(xi)+((pi%5)-2)*2.6,cy:Y(y),r:2,fill:col,opacity:.3});
-      hov(dot,'<b>'+p.plate+'</b>'+(t===null?'':' · '+th(t))+'<br>'+m.label+' '+num(y,3)+(m.unit?' '+m.unit:'')+
-          '<br>'+p.n_kept+' of '+p.n_items+' kept');
-      svg.appendChild(dot);});
+     if(DOTS)wormVals(name,t,m.key).forEach((y,wi)=>svg.appendChild(E('circle',
+      {cx:X(xi)+(((wi*7)%9)-4)*1.15,cy:Y(y),r:1.5,fill:col,opacity:.26})));
      const st=c.stats[m.key]||{};
      if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
      pts.push([X(xi),Y(st.mean)]);
@@ -501,8 +520,8 @@ function drawDR(){
  $('dr').innerHTML='';$('dr').appendChild(svg);
  $('drlg').innerHTML=(isTC&&DRT===-1
    ? TPS.map((t,i)=>'<span><i style="background:'+v(ramp(i,TPS.length))+'"></i>'+th(t)+'</span>').join('')
-   : '<span><i style="background:'+v('--s1')+'"></i>condition mean ± SD across plates</span>')
-  +'<span style="color:var(--mut)">faint dots: one plate</span>'
+   : '<span><i style="background:'+v('--s1')+'"></i>condition mean pooled over items ±1 SEM</span>')
+  +(DOTS?'<span style="color:var(--mut)">faint dots: one worm</span>':'')
   +'<span style="color:var(--mut)">y is shared across a row, so columns compare directly</span>';
  $('drnote').innerHTML=M.filter(m=>m.note).map(m=>'<b>'+m.label+'</b> — '+m.note).join('<br>');
 }
@@ -636,7 +655,7 @@ function chip(host,label,pressed,onclick,swatch){const b=document.createElement(
  b.textContent=label;b.setAttribute('aria-pressed',pressed?'true':'false');
  if(swatch){b.className='sw';b.style.setProperty('--swc',swatch);}
  b.onclick=()=>{onclick(b);};host.appendChild(b);return b;}
-function press(host,i){[...host.querySelectorAll('button')].forEach((c,j)=>
+function press(host,i){[...host.querySelectorAll('button:not([data-toggle])')].forEach((c,j)=>
  c.setAttribute('aria-pressed',j===i?'true':'false'));}
 
 function boot(){
@@ -647,24 +666,28 @@ function boot(){
  $('drcap').innerHTML=(D.dr_caption||'')+(isTC?' Only the headline metrics take a row here; every '
    +'metric is available in the panel above and in the table below.':'');
  $('tccap').innerHTML='The measurement. Pick a metric; pick which conditions are drawn with the chips '
-  +'at the top. <b>Facet</b> gives one axis per strain so the doses of a strain sit together; '
+  +(HAS_WORMS?'at the top. <b>Points \u2192 Worms</b> puts every animal behind its marker \u2014 off by '
+    +'default because the plates of a condition are not replicates and a dot per plate said otherwise. ':'at the top. ')
+  +'<b>Facet</b> gives one axis per strain so the doses of a strain sit together; '
   +'<b>Overlay</b> puts every selected condition in one axis, which is the comparison the facets '
-  +'cannot make. Marker is the condition mean across plates at that hour with ±1 SD, faint dots are '
-  +'the plates themselves. Nothing here is averaged across days.';
+  +'cannot make. Marker is the condition mean pooled over worms at that hour with ±1 SEM, so the bar '
+  +'is the precision of that mean and not replicate error — the plates of one condition are more '
+  +'animals from the same experiment, not repeats of it. Nothing here is averaged across days.';
  if(D.dist){$('distt').textContent=D.dist.title||'Distribution';
   $('distcap').innerHTML=(D.dist.caption||'')+(isTC?' One hour at a time — pooling the days would '
     +'make a shape none of them had.':'');}
  if(D.normalised){$('normt').textContent=D.normalised.label+' relative to same-day control';
-  $('normcap').innerHTML='Every treated plate as a percentage of the mean of its own strain’s control '
-   +'plates <b>from the same day</b>, so the decline of the untreated plates themselves is divided out '
-   +'rather than charged to the treatment. ▼ marks where a curve first crosses half of its control, '
-   +'interpolated between timepoints. This is the panel that says which strain lost more, and when.';}
+  $('normcap').innerHTML='Every treated worm as a percentage of the mean of its own strain’s control '
+   +'worms <b>from the same day</b>, so the decline of the untreated animals themselves is divided out '
+   +'rather than charged to the treatment. Marker is that mean with ±1 SEM. ▼ marks where a curve '
+   +'first crosses half of its control, interpolated between timepoints. This is the panel that says '
+   +'which strain lost more, and when.';}
  else $('normcard').style.display='none';
  if(D.survival){$('survcap').innerHTML=D.survival.caption||'';
   ['Linear','Log'].forEach((lab,i)=>chip($('survk'),lab,i===0,b=>{SLOG=i;press($('survk'),i);drawSurv();}));}
  else $('survcard').style.display='none';
- $('tblcap').innerHTML='Every number behind the panels. Condition rows are mean ± SD across plates; '
-  +'plate rows are that plate’s own summary.'+(isTC?' One row per condition <i>per timepoint</i>.':'');
+ $('tblcap').innerHTML='Every number behind the panels. Condition rows are the mean pooled over items \u00b1 1 SEM; '
+  +'plate rows are that plate’s own summary. The plates of a condition are not replicates of each other.'+(isTC?' One row per condition <i>per timepoint</i>.':'');
 
  /* metric chips: headline first, then the rest */
  const order=D.metrics.map((m,i)=>i).sort((a,b)=>
@@ -714,6 +737,15 @@ function boot(){
    [...$('dosef').querySelectorAll('button')].forEach(b=>b.setAttribute('aria-pressed','true'));
    redraw();};
  applyFilters();
+
+ if(HAS_WORMS){
+  /* The "Over time" card is hidden on a single-timepoint run, and a toggle
+     inside a hidden card is a button nobody can press. */
+  (isTC?['tcm','drk']:['drk']).forEach(host=>{
+   const lb=document.createElement('b');lb.textContent='Points';$(host).appendChild(lb);
+   const b=chip($(host),'Worms',false,()=>{setDots(!DOTS);});
+   b.setAttribute('data-toggle','1');DOTBTNS.push(b);});
+ }
 
  if(isTC){
   const drl=document.createElement('b');drl.textContent='Timepoint';$('drk').appendChild(drl);

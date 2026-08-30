@@ -55,6 +55,18 @@ def _safe_log(write_log: Optional[Callable[[str], None]]) -> Callable[[str], Non
 # Metric declarations
 # ---------------------------------------------------------------------------
 
+# One experiment gives one number per condition per timepoint. The plates of a
+# condition are not replicates of each other; they exist so more worms could be
+# imaged. Said once here and reused, so no figure can drift out of step with it.
+CAPTION_POOLED = (
+    "Marker is the condition mean POOLED OVER WORMS with ±1 SEM. The bar says "
+    "how well the mean is pinned by the animals imaged, not how far it would "
+    "move if the experiment were repeated, which one experiment cannot tell "
+    "you. Nothing is scattered behind it by default: a dot per plate presented "
+    "the dish as a unit and read as three replicates however it was captioned. "
+    "Switch on \u201cworms\u201d to put every animal behind its marker. "
+)
+
 MOTILITY_METRICS = [
     AC.Metric("bpm", "Bend rate", "bends/min", agg="mean",
               note="Head-swing angle peaks, counted by head_angle_peaks_v2 — "
@@ -180,8 +192,15 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
             keep_note: str, unit_note: str,
             write_log: Callable[[str], None],
             survival_metric: Optional[AC.Metric] = None,
-            norm_metric: Optional[AC.Metric] = None) -> list:
-    """The half of every report that is identical: sheets, figures, explorer."""
+            norm_metric: Optional[AC.Metric] = None,
+            scatter: str = AF.SCATTER_NONE) -> list:
+    """The half of every report that is identical: sheets, figures, explorer.
+
+    ``scatter`` is what the static figures draw behind their markers. The worm
+    assays pass nothing and offer the individual animals in the explorer
+    instead, where they can be toggled; colony survival passes SCATTER_PLATE
+    because a well is one measurement and its dots are its data.
+    """
     write_log = _safe_log(write_log)
     tps = list(getattr(agg, "timepoints", []) or [])
     AX.write_readme(wb, assay,
@@ -196,17 +215,17 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
     written = []
     csv_path = out_dir / f"{stem}_condition_summary.csv"
     n = AX.write_condition_csv(csv_path, agg)
-    write_log(f"Wrote {csv_path} ({n} condition(s); the replication unit is the "
-              "plate — see the workbook README)")
+    write_log(f"Wrote {csv_path} ({n} condition(s); pooled over items with "
+              "SEM, not over plate means — see the workbook README)")
     written.append(csv_path)
     f = AF.fig_dose_response(out_dir / f"{stem}_dose_response.png", agg,
-                             metrics, title, write_log)
+                             metrics, title, write_log, scatter=scatter)
     if f:
         written.append(f)
     # The timecourse headline. Self-skipping below two timepoints, so this is
     # unconditional and a single-folder run is unaffected.
     f = AF.fig_timecourse(out_dir / f"{stem}_timecourse.png", agg, metrics,
-                          f"{title} over time", write_log)
+                          f"{title} over time", write_log, scatter=scatter)
     if f:
         written.append(f)
     # The sensitivity curve: every treated condition against its OWN control at
@@ -219,7 +238,7 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
         f = AF.fig_normalised(out_dir / f"{stem}_normalised.png", agg,
                               norm_metric,
                               f"{norm_metric.label} relative to same-day "
-                              "control", write_log)
+                              "control", write_log, scatter=scatter)
         if f:
             written.append(f)
     if survival_metric is not None:
@@ -246,10 +265,11 @@ def _finish(*, wb, agg, dist, metrics, out_dir: Path, stem: str, assay: str,
         survival_metric=survival_metric,
         norm_metric=norm_metric,
         survival_caption=(
-            "Every plate as a percentage of the mean of its own strain's "
-            "untreated plates, so strains that plated at different densities "
-            "can be compared. Marker is the condition mean across those "
-            "normalised plates, bar is ±1 SD, faint dots are the plates. The "
+            "Every item as a percentage of the mean of its own strain's "
+            "untreated items, so strains that plated at different densities "
+            "can be compared. Marker is the condition mean POOLED OVER those "
+            "normalised items, bar is ±1 SEM, faint dots are the plates — QC, "
+            "not replicates. The "
             "untreated point is 100% by construction and its bar is the spread "
             "of the controls themselves. Linear is how the number is spoken and "
             "is the only scale that can draw a zero; log is how a "
@@ -327,9 +347,8 @@ def motility_report(wb, worm_rows: Sequence[dict], out_dir: Path,
         subtitle=(f"{agg.n_kept:,} worms over the quality gate, of "
                   f"{agg.n_items:,} tracked, on {len(agg.per_plate)} plate(s) "
                   f"in {len(agg.per_condition)} condition(s)."),
-        dr_caption="Marker is the condition mean across plates with ±1 SD; grey "
-                   "dots are plates. The y-axis is shared across each row, so "
-                   "columns compare directly.",
+        dr_caption=CAPTION_POOLED + "The y-axis is shared across "
+                   "each row, so columns compare directly.",
         caveat="Every quantity here is in PIXELS or in bends and seconds — "
                "motility_params.json sets microns_per_pixel to -1, so nothing "
                "on this page is in physical distance units.",
@@ -398,10 +417,9 @@ def crawling_report(wb, worm_rows: Sequence[dict], out_dir: Path,
         subtitle=(f"{agg.n_kept:,} worms over the quality gate, of "
                   f"{agg.n_items:,} tracked, on {len(agg.per_plate)} plate(s) "
                   f"in {len(agg.per_condition)} condition(s)."),
-        dr_caption="Marker is the condition mean across plates with ±1 SD; "
-                   "faint dots are plates. The y-axis is shared across each "
-                   "row. In a timecourse there is one line per timepoint — "
-                   "nothing here is averaged across days.",
+        dr_caption=CAPTION_POOLED + "The y-axis is shared across "
+                   "each row. In a timecourse there is one line per timepoint "
+                   "— nothing here is averaged across days.",
         # No caveat banner. It said per_condition aggregates plates rather
         # than worms, which has been true since 26 Aug, is stated in the
         # workbook README where a reader meets those columns, and by now was
@@ -491,13 +509,20 @@ def counting_report(wb, plate_rows: Sequence[dict],
         wb=wb, agg=agg, dist=dist, metrics=metrics, out_dir=out_dir,
         stem="counting", assay="Colony survival (clonogenic, stained wells)",
         title="Colony survival",
+        # The well IS the item here, so its dots are the data, not a second
+        # layer of aggregation. The worm assays draw nothing.
+        scatter=AF.SCATTER_PLATE,
         subtitle=(f"{len(plate_rows)} well(s) in {len(agg.per_condition)} "
                   f"condition(s), {len(colony_rows):,} colonies measured"
                   + (f"; {n_confluent} well(s) flagged confluent."
                      if n_confluent else ".")),
-        dr_caption="Marker is the condition mean across wells with ±1 SD; grey "
-                   "dots are wells. Each well is one measurement, so the plate "
-                   "IS the item here — there is no within-plate averaging step.",
+        dr_caption="Marker is the condition mean across wells with ±1 SEM; "
+                   "grey dots are wells. Each well is one measurement, so the "
+                   "well IS the item here — there is no within-plate averaging "
+                   "step to skip. The wells of a condition are not replicates "
+                   "of each other either; they are more colonies from the same "
+                   "experiment, so the bar says how well the mean is pinned by "
+                   "the wells counted, not how far it would move on a repeat.",
         caveat=("{} well(s) are flagged confluent: their colonies have merged, "
                 "so the count is unreliable and the stained fraction is the "
                 "readout to use. They are included in every panel — excluding "

@@ -15,11 +15,13 @@ cell reference) that only exists because the formulas exist. These sheets carry
 computed values, and the CSV beside them is the same numbers, so a disagreement
 between two views of the same run is not possible here.
 
-WHAT n MEANS, EVERY TIME. condition_summary rows are mean ± SD ACROSS PLATES, and
-n_plates is the n. The per-item pooled median is carried alongside in its own
-column rather than mixed in, because the two answer different questions and a
-reader who does not know which one they are looking at is worse off than one who
-sees both.
+WHAT n MEANS, EVERY TIME. condition_summary rows are the mean POOLED OVER ITEMS
+with ±1 SEM, and <metric>_n is the n. The plates of a condition are not
+replicates of each other, so their means are not averaged; the old across-plate
+SD survives as <metric>_plate_spread_sd, a QC column and never an error bar. The
+pooled median is carried alongside in its own column rather than mixed in,
+because the two answer different questions and a reader who does not know which
+one they are looking at is worse off than one who sees both.
 """
 from __future__ import annotations
 
@@ -116,22 +118,30 @@ def readme_common(metrics: Sequence[AC.Metric], keep_note: str,
          "Renaming a sheet under someone's script would be worse than an extra "
          "sheet. Where both exist, these are the ones the figures and the "
          "explorer use."),
-        ("The replication unit is the PLATE",
-         "Items are averaged within a plate first, then per_condition takes mean "
-         "and SD ACROSS those plate means — n_plates is the n. This is how "
-         "development_results.xlsx computes mean stage index, so the assays "
-         "report n the same way. A plate with 200 animals does not outvote one "
-         "with 12."),
-        ("…and the pooled column",
-         "<metric>_pooled_median ignores plates and takes the median over every "
-         "item in the condition. It is here so the older per-item numbers stay "
-         "reproducible and so the gap between the two is visible. It is not the "
-         "headline: animals on one plate are not independent."),
-        ("SD, not SEM",
-         "<metric>_sd is the sample SD (ddof=1) across plate means. A condition "
-         "with one plate has no spread, so its SD is blank rather than 0.0 — a "
-         "zero would draw an error bar that claims a precision the run does not "
-         "have."),
+        ("The replication unit is the ITEM, not the plate",
+         "condition_summary pools every item of a condition at a timepoint and "
+         "takes the mean over them: <metric>_mean, with <metric>_n as the n. "
+         "The plates of one condition are not replicates of each other — they "
+         "exist so more animals could be imaged in one experiment — so their "
+         "means are not averaged. A plate with 200 animals now carries the "
+         "weight of 200, and adding a plate adds animals rather than a vote. "
+         "plate_summary still reports each plate on its own."),
+        ("SEM is the error bar, SD is the spread",
+         "<metric>_sd is the sample SD (ddof=1) over the items, i.e. how "
+         "different the animals were from each other. <metric>_sem is that SD "
+         "over the root of <metric>_n and is what the figures and the explorer "
+         "draw. SEM says how well this condition's mean is pinned by the "
+         "animals imaged; it is NOT replicate error and must not be read as "
+         "how far the number would move if the experiment were repeated — one "
+         "experiment cannot tell you that. A condition with a single item has "
+         "no spread, so its SD and SEM are blank rather than 0.0."),
+        ("…and the QC columns",
+         "<metric>_pooled_median is the median over the same pooled items — a "
+         "robust companion to the mean, and the number the older per-item "
+         "reports used. <metric>_plate_spread_sd is the SD ACROSS the plate "
+         "means, which is how this workbook used to compute its error bar. It "
+         "is kept so a rogue dish stays visible, and only for that: it is a QC "
+         "column, never an error bar."),
         ("Blank is not zero",
          "A blank cell means the quantity was not measured — no items, or none "
          "finite. Zero would be a claim about the plate. Non-finite values are "
@@ -185,15 +195,21 @@ def write_aggregate_sheets(wb, agg: AC.Aggregation) -> None:
     hdr = tp_h + ["condition", "strain", "dose", "dose_unit", "name_parsed",
                   "n_plates", "n_plates_with_data", "n_items", "n_kept"]
     for m in metrics:
-        hdr += [f"{m.key}_mean", f"{m.key}_sd", f"{m.key}_pooled_median"]
+        hdr += [f"{m.key}_mean", f"{m.key}_sd", f"{m.key}_sem",
+                f"{m.key}_n", f"{m.key}_pooled_median",
+                f"{m.key}_plate_spread_sd"]
     rows = []
     for c in agg.per_condition:
         row = _tp(c) + [c["condition"], c["strain"], c["dose"], c["unit"],
                         bool(c["parsed"]), c["n_plates"],
                         c["n_plates_with_data"], c["n_items"], c["n_kept"]]
         for m in metrics:
-            row += [_round(c.get(f"{m.key}_mean")), _round(c.get(f"{m.key}_sd")),
-                    _round(c.get(f"{m.key}_pooled_median"))]
+            row += [_round(c.get(f"{m.key}_mean")),
+                    _round(c.get(f"{m.key}_sd")),
+                    _round(c.get(f"{m.key}_sem")),
+                    c.get(f"{m.key}_n"),
+                    _round(c.get(f"{m.key}_pooled_median")),
+                    _round(c.get(f"{m.key}_plate_spread_sd"))]
         rows.append(row)
     _sheet(wb, "condition_summary", hdr, rows, {"condition": 22})
 
@@ -237,7 +253,9 @@ def write_condition_csv(path, agg: AC.Aggregation) -> int:
         "condition", "strain", "dose", "dose_unit", "name_parsed",
         "n_plates", "n_plates_with_data", "n_items", "n_kept"]
     for m in metrics:
-        hdr += [f"{m.key}_mean", f"{m.key}_sd", f"{m.key}_pooled_median"]
+        hdr += [f"{m.key}_mean", f"{m.key}_sd", f"{m.key}_sem",
+                f"{m.key}_n", f"{m.key}_pooled_median",
+                f"{m.key}_plate_spread_sd"]
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = _csv.writer(fh)
         w.writerow(hdr)
@@ -250,7 +268,10 @@ def write_condition_csv(path, agg: AC.Aggregation) -> int:
             for m in metrics:
                 row += [_blank(c.get(f"{m.key}_mean")),
                         _blank(c.get(f"{m.key}_sd")),
-                        _blank(c.get(f"{m.key}_pooled_median"))]
+                        _blank(c.get(f"{m.key}_sem")),
+                        _blank(c.get(f"{m.key}_n")),
+                        _blank(c.get(f"{m.key}_pooled_median")),
+                        _blank(c.get(f"{m.key}_plate_spread_sd"))]
             w.writerow(row)
     return len(agg.per_condition)
 
@@ -321,8 +342,9 @@ def run_info_common(assay: str, out_dir, n_conditions: int, n_plates: int,
         ("timestamp", datetime.now().isoformat(timespec="seconds")),
         ("assay", assay),
         ("output_dir", str(out_dir)),
-        ("replication_unit", "plate — per_condition is mean ± SD across plate "
-                             "means, n_plates is the n"),
+        ("replication_unit", "item (worm / colony / well) — condition_summary "
+                             "is the mean pooled over items with ±1 SEM, and "
+                             "<metric>_n is the n. Plates are not replicates"),
         ("n_conditions", n_conditions),
         ("n_plates", n_plates),
         ("n_items_measured", n_items),
