@@ -600,8 +600,11 @@ def _process_one_video_crawling(
                 "y": r.get("arrow_y"),
                 "vx": r.get("arrow_vx"),
                 "vy": r.get("arrow_vy"),
-                "reversal_event_frames": r.get("arrow_reversal_event_frames") or [],
-                "turn_event_frames": r.get("arrow_turn_event_frames") or [],
+                # Tierpsy's own events, the same ones the workbook counts:
+                # reversals from motion_mode, turns from its per-frame turn
+                # flag. The overlay and the numbers now agree by construction.
+                "reversal_event_frames": r.get("reversal_frames") or [],
+                "turn_event_frames": r.get("turn_frames") or [],
             }
         n_kept = sum(1 for r in worm_rows if r.get("passed_filter"))
         plog(

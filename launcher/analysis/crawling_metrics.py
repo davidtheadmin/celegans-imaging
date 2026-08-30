@@ -140,15 +140,14 @@ BL_COLS: list[str] = [
     "activity_fraction_above_0p20_bls",
 ]
 
-# Velocity-arrow reversal / turn columns (see ARROW_* constants and
-# _velocity_arrow_events). These sit immediately after reversal_rate_per_min for
-# side-by-side comparison with the motion_mode-based reversal_count, and are
+# Turn columns, from Tierpsy's own per-frame flag, plus the coverage that says
+# whether a zero reversal count means "did not reverse" or "was never
+# classified". These sit immediately after reversal_rate_per_min and are
 # aggregated per condition with a _median column only (like ACTIVITY_COLS).
 ARROW_COLS: list[str] = [
-    "arrow_reversal_count",
-    "arrow_reversal_rate_per_min",
     "turn_count",
     "turn_rate_per_min",
+    "motion_mode_coverage",
 ]
 
 # Per-worm columns inserted into the sheet immediately after an anchor column for
@@ -717,6 +716,46 @@ def _combined_centroid_track(
     return f0, x_dense, y_dense
 
 
+def _count_turn_events(turn_flag: np.ndarray) -> "tuple[float, list[int]]":
+    """Count turns as rising edges of Tierpsy's own per-frame `turn` flag.
+
+    `turn_flag` is indexed by frame over the worm's span: 1 while Tierpsy calls
+    the posture a turn, 0 while it does not, NaN where there is no measurement.
+    A turn is one event however long it lasts, so only the 0->1 edge counts.
+
+    NaN is not 0. A gap neither starts a turn nor ends one: the run either side
+    of it is judged on its own, and a worm with no measured frames at all
+    returns NaN rather than 0 — "we did not see it turn" and "it did not turn"
+    are different statements.
+
+    WHY TIERPSY'S FLAG AND NOT OUR OWN DETECTOR. Ours read heading changes of
+    the centroid path and fired twice on one reversal — once entering it, once
+    leaving — which is most of why it counted 2.4x the motion_mode reversals on
+    the 28 Aug run. Tierpsy derives this from body posture, which is what an
+    omega or upsilon turn actually is; centroid curvature also fires when a
+    worm merely rounds a corner. We already take speed, motion_mode, length and
+    the skeletons from Tierpsy, so this is the consistent choice as well as the
+    better-validated one.
+
+    The cost, stated: it needs skeletons. A worm Tierpsy could not skeletonise
+    has no turn data, where a centroid detector would have produced a number.
+    That number was a guess, and NaN is the honest form of it.
+    """
+    t = np.asarray(turn_flag, dtype=float)
+    fin = np.isfinite(t)
+    if not fin.any():
+        return float("nan"), []
+    edges: list[int] = []
+    prev = None                      # last MEASURED value, gaps skipped
+    for i in range(len(t)):
+        if not np.isfinite(t[i]):
+            continue
+        if t[i] >= 0.5 and (prev is None or prev < 0.5):
+            edges.append(i)
+        prev = t[i]
+    return float(len(edges)), edges
+
+
 def _velocity_arrow_events(x: np.ndarray, y: np.ndarray, fps: float,
                            plate_mean_length_px: float | None = None) -> dict:
     """
@@ -1150,6 +1189,9 @@ def compute_crawling_metrics(
         # and only becomes a real count once there is something to count.
         reversal_count: float = float("nan")
         reversal_frames: list[int] = []
+        turn_count: float = float("nan")
+        turn_frames: list[int] = []
+        motion_mode_coverage: float = float("nan")
         frames_ts = (g[ts_frame_col].values.astype(float)
                      if ts_frame_col in g.columns else np.array([], dtype=float))
         if has_motion_mode and "motion_mode" in g.columns:
@@ -1171,6 +1213,16 @@ def compute_crawling_metrics(
                 mm_frame, REVERSAL_PAUSE_TOLERANCE_FRAMES
             )
             reversal_frames = sorted(f0 + off for off in rev_offsets)
+            # Fraction of the span Tierpsy could classify at all, so a
+            # reversal_count of 0 can be told apart from a worm it never saw
+            # moving (below its speed threshold everything reads "paused").
+            motion_mode_coverage = float(np.isfinite(mm_frame).mean())
+            # Turns, from Tierpsy's own per-frame flag over the same span.
+            if "turn" in g.columns:
+                tn_frame = np.full(f1 - f0 + 1, np.nan)
+                tn_frame[fr - f0] = g["turn"].values.astype(float)[fin]
+                turn_count, turn_offsets = _count_turn_events(tn_frame)
+                turn_frames = sorted(f0 + off for off in turn_offsets)
 
         # --- track duration: group span over the skeletons member frames ---
         member_frames: list[np.ndarray] = []
@@ -1190,6 +1242,8 @@ def compute_crawling_metrics(
         observed_min = (n / fps / 60.0) if fps > 0 else 0.0
         reversal_rate_per_min = ((reversal_count / observed_min)
                                  if observed_min > 1e-9 else float("nan"))
+        turn_rate_per_min = ((turn_count / observed_min)
+                             if observed_min > 1e-9 else float("nan"))
 
         # --- centroid path geometry (combined, gap-aware) ---
         path_length_px, net_displacement_px, tortuosity = _combined_path_geometry(
@@ -1305,6 +1359,9 @@ def compute_crawling_metrics(
             "fraction_paused": fraction_paused,
             "reversal_count": reversal_count,
             "reversal_rate_per_min": reversal_rate_per_min,
+            "turn_count": turn_count,
+            "turn_rate_per_min": turn_rate_per_min,
+            "motion_mode_coverage": motion_mode_coverage,
             "reversal_rate_moving_per_min": reversal_rate_moving_per_min,
             "path_length_px": path_length_px,
             "net_displacement_px": net_displacement_px,
@@ -1333,6 +1390,7 @@ def compute_crawling_metrics(
             # arrow_* feed the velocity-arrow overlay + event markers. arrow_x/y/vx/vy
             # are dense per-frame arrays starting at frame arrow_f0.
             "reversal_frames": reversal_frames,
+            "turn_frames": turn_frames,
             "arrow_f0": arrow_f0,
             "arrow_x": arrow_x,
             "arrow_y": arrow_y,
@@ -1357,20 +1415,14 @@ def compute_crawling_metrics(
         # is known (BL-relative speed cutoff). vx/vy come from the same call and do
         # not depend on the cutoff. Offsets are indices into the dense centroid
         # track; add arrow_f0 for absolute frame numbers (consumed by the renderer).
+        # The velocity arrow is still drawn in the renders — it shows heading,
+        # which is worth seeing. It is no longer an EVENT DETECTOR: reversals
+        # come from Tierpsy's motion_mode and turns from Tierpsy's turn flag,
+        # both counted where the rest of the per-worm metrics are. See
+        # _count_turn_events for why.
         av = _velocity_arrow_events(r["arrow_x"], r["arrow_y"], fps, plate_mean_length_px)
-        af0 = r["arrow_f0"]
-        r["arrow_reversal_count"] = av["reversal_count"]
-        r["arrow_reversal_rate_per_min"] = av["reversal_rate_per_min"]
-        r["turn_count"] = av["turn_count"]
-        r["turn_rate_per_min"] = av["turn_rate_per_min"]
         r["arrow_vx"] = av["vx"]
         r["arrow_vy"] = av["vy"]
-        if af0 is not None:
-            r["arrow_reversal_event_frames"] = [af0 + o for o in av["reversal_offsets"]]
-            r["arrow_turn_event_frames"] = [af0 + o for o in av["turn_offsets"]]
-        else:
-            r["arrow_reversal_event_frames"] = []
-            r["arrow_turn_event_frames"] = []
         r["mean_speed_bls"] = _per_bodylength(r["mean_speed_pxs"], plate_mean_length_px)
         # Per-animal immobility flag, as a float — see IMMOBILE_BL_PER_S and the
         # is_immobile note in METRIC_COLS. NaN when the speed is unknown, never
