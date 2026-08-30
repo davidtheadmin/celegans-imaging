@@ -460,20 +460,45 @@ function drawSurv(){
  $('survnote').innerHTML=notes.join('<br>');
 }
 
-/* ---------- 4. dose-response, per timepoint ---------- */
+/* ---------- 4. dose-response, per timepoint ----------
+   Honours the Layout switch, like the timecourse does. Facet gives one panel
+   per strain; Overlay puts every strain in one axis, which is the only place
+   the strains can be read against each other at a dose.
+
+   Overlay used to be a toolbar control that this panel ignored. On a
+   single-timepoint run that made it a dead switch: the timecourse card is
+   hidden there, so the one panel Overlay drove was not on the page and
+   clicking it changed nothing but the distribution. ------------------- */
 function drawDR(){
- const cols=D.has_dose?shownStrains():shown(), M=D.metrics.filter(m=>m.headline!==false);
- if(!cols.length||!M.length){$('dr').innerHTML='<p class="note">Nothing selected.</p>';return;}
+ const M=D.metrics.filter(m=>m.headline!==false);
+ /* The groups that own a curve. With a dose axis a curve is a strain across
+    doses; without one there is no line to draw and Overlay has nothing to
+    collapse, so it stays in facet mode. */
+ const groups=D.has_dose?shownStrains():shown();
+ const OV=!!LAYOUT&&D.has_dose;
+ const cols=OV?[null]:groups;
+ if(!groups.length||!M.length){$('dr').innerHTML='<p class="note">Nothing selected.</p>';return;}
  const xs=D.has_dose?D.doses:shown();
  const series=isTC?(DRT===-1?TPS:[DRT]):[null];
- const pw=Math.max(120,Math.min(230,150)), ph=104, gapC=16, gapR=44, padL=92, padT=30, padB=34;
- const W=padL+cols.length*(pw+gapC), H=padT+M.length*(ph+gapR)+padB;
+ const pw=OV?Math.max(300,Math.min(620,110*xs.length+180)):Math.max(120,Math.min(230,150));
+ const ph=OV?190:104, gapC=16, gapR=OV?52:44, padL=92, padT=30, padB=34;
+ /* Overlay labels each curve at its right-hand end, but only while the labels
+    are still readable. Three strains across five hours is fifteen curves and
+    fifteen stacked labels — a column of text taller than the panel, naming
+    lines nobody can pick out anyway. Past six, the legend and the Timepoint
+    chip carry it and the tooltip names the point. */
+ const doLab=OV&&groups.length*series.length<=6;
+ const labw=doLab?118:0;
+ const W=padL+cols.length*(pw+gapC)+labw, H=padT+M.length*(ph+gapR)+padB;
  const svg=E('svg',{viewBox:'0 0 '+W+' '+H,width:W,role:'img','aria-label':'Dose-response'});
  svg.setAttribute('style','max-width:100%;height:auto');
  M.forEach((m,ri)=>{
+  /* One y-scale per metric row, over every group that will be drawn — not
+     over `cols`, which is a single null in overlay and would leave the axis
+     empty. */
   const all=[];
-  cols.forEach(cl=>xs.forEach(x=>series.forEach(t=>{
-   const name=D.has_dose?condNameOf(cl,x):x; if(!name)return;
+  groups.forEach(g=>xs.forEach(x=>series.forEach(t=>{
+   const name=D.has_dose?condNameOf(g,x):x; if(!name)return;
    const c=condAt(name,t); if(!c)return;
    const st=c.stats[m.key]||{}; if(st.mean!==null&&isFinite(st.mean)){all.push(st.mean-(st.sd||0));all.push(st.mean+(st.sd||0));}
    if(DOTS)wormVals(name,t,m.key).forEach(y=>all.push(y));})));
@@ -488,41 +513,60 @@ function drawDR(){
       [T(num(lo+(hi-lo)*g/3,(hi-lo)<3?3:(hi-lo)<40?1:0))]));}
    if(ci===0)svg.appendChild(E('text',{x:14,y:oy+ph/2,'text-anchor':'middle',fill:v('--ink'),
      'font-size':11,'font-weight':600,transform:'rotate(-90 14 '+(oy+ph/2)+')'},[T(m.label)]));
-   if(ri===0)svg.appendChild(E('text',{x:ox+pw/2,y:oy-12,'text-anchor':'middle',fill:v('--ink'),
+   if(ri===0&&cl!==null)svg.appendChild(E('text',{x:ox+pw/2,y:oy-12,'text-anchor':'middle',fill:v('--ink'),
      'font-size':12,'font-weight':700},[T(cl)]));
-   series.forEach((t,ti)=>{
-    const col=t===null?v('--s1'):v(ramp(ti,series.length));
-    const pts=[];
-    xs.forEach((x,xi)=>{
-     const name=D.has_dose?condNameOf(cl,x):x; if(!name)return;
-     const c=condAt(name,t); if(!c)return;
-     if(DOTS)wormVals(name,t,m.key).forEach((y,wi)=>svg.appendChild(E('circle',
-      {cx:X(xi)+(((wi*7)%9)-4)*1.15,cy:Y(y),r:1.5,fill:col,opacity:.26})));
-     const st=c.stats[m.key]||{};
-     if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
-     pts.push([X(xi),Y(st.mean)]);
-     if(st.sd)svg.appendChild(E('path',{d:'M'+X(xi)+' '+Y(st.mean+st.sd)+'V'+Y(st.mean-st.sd),
-       stroke:col,'stroke-width':1.2}));
-     const mk=E('circle',{cx:X(xi),cy:Y(st.mean),r:3.4,fill:col,stroke:v('--surface-1'),'stroke-width':1.5});
-     hov(mk,'<b>'+c.condition+(t===null?'':' · '+th(t))+'</b><br>'+m.label+' '+num(st.mean,3)+(m.unit?' '+m.unit:'')+
-         (st.sd?' ± '+num(st.sd,3):'')+'<br>'+c.n_plates+' plate(s), '+c.n_kept+' kept of '+c.n_items+
-         (m.note?'<br><i>'+m.note+'</i>':''));
-     svg.appendChild(mk);});
-    if(pts.length>1)svg.appendChild(E('path',{d:pts.map((p,i)=>(i?'L':'M')+p[0]+' '+p[1]).join(' '),
-      fill:'none',stroke:col,'stroke-width':1.8,'stroke-linejoin':'round'}));});
+   const here=OV?groups:[cl];
+   const labs=[];
+   here.forEach((gname,gi)=>{
+    series.forEach((t,ti)=>{
+     /* Overlay: hue is the strain, depth is the hour — the same grammar the
+        timecourse uses, so a reader who has looked at one can read the other.
+        Facet: the strain is the panel, so the ramp is free for the hour. */
+     const col=OV?v(CAT[gi%CAT.length]):(t===null?v('--s1'):v(ramp(ti,series.length)));
+     const op=(OV&&series.length>1)?(0.42+0.58*ti/(series.length-1)):1;
+     const pts=[];
+     xs.forEach((x,xi)=>{
+      const name=D.has_dose?condNameOf(gname,x):x; if(!name)return;
+      const c=condAt(name,t); if(!c)return;
+      if(DOTS)wormVals(name,t,m.key).forEach((y,wi)=>svg.appendChild(E('circle',
+       {cx:X(xi)+(((wi*7)%9)-4)*1.15,cy:Y(y),r:1.5,fill:col,opacity:.26*op})));
+      const st=c.stats[m.key]||{};
+      if(st.mean===null||st.mean===undefined||!isFinite(st.mean))return;
+      pts.push([X(xi),Y(st.mean)]);
+      if(st.sd)svg.appendChild(E('path',{d:'M'+X(xi)+' '+Y(st.mean+st.sd)+'V'+Y(st.mean-st.sd),
+        stroke:col,'stroke-width':1.2,opacity:op}));
+      const mk=E('circle',{cx:X(xi),cy:Y(st.mean),r:3.4,fill:col,stroke:v('--surface-1'),
+        'stroke-width':1.5,opacity:op});
+      hov(mk,'<b>'+c.condition+(t===null?'':' · '+th(t))+'</b><br>'+m.label+' '+num(st.mean,3)+(m.unit?' '+m.unit:'')+
+          (st.sd?' ± '+num(st.sd,3):'')+'<br>'+c.n_plates+' plate(s), '+c.n_kept+' kept of '+c.n_items+
+          (m.note?'<br><i>'+m.note+'</i>':''));
+      svg.appendChild(mk);});
+     if(pts.length>1)svg.appendChild(E('path',{d:pts.map((q,i)=>(i?'L':'M')+q[0]+' '+q[1]).join(' '),
+       fill:'none',stroke:col,'stroke-width':1.8,'stroke-linejoin':'round',opacity:op}));
+     if(doLab&&pts.length)labs.push({x:pts[pts.length-1][0],y:pts[pts.length-1][1],
+       txt:String(gname)+(series.length>1?' · '+th(t):''),col:col});});});
+   labs.sort((a,b)=>a.y-b.y);
+   for(let i=1;i<labs.length;i++)if(labs[i].y-labs[i-1].y<11)labs[i].y=labs[i-1].y+11;
+   labs.forEach(l=>svg.appendChild(E('text',{x:l.x+7,y:l.y+3.5,fill:l.col,'font-size':9.5,
+     'font-weight':700},[T(l.txt)])));
    svg.appendChild(E('line',{x1:ox,x2:ox+pw,y1:oy+ph,y2:oy+ph,stroke:v('--axis'),'stroke-width':1}));
    if(ri===M.length-1)xs.forEach((x,xi)=>svg.appendChild(E('text',{x:X(xi),y:oy+ph+15,
      'text-anchor':'middle',fill:v('--mut'),'font-size':9.5},[T(String(x))])));
   });
  });
- if(D.has_dose)svg.appendChild(E('text',{x:padL+(W-padL)/2,y:H-6,'text-anchor':'middle',
+ if(D.has_dose)svg.appendChild(E('text',{x:padL+(W-padL-labw)/2,y:H-6,'text-anchor':'middle',
    fill:v('--mut'),'font-size':10.5},[T('Dose'+(D.dose_unit?' ('+D.dose_unit+')':''))]));
  $('dr').innerHTML='';$('dr').appendChild(svg);
- $('drlg').innerHTML=(isTC&&DRT===-1
-   ? TPS.map((t,i)=>'<span><i style="background:'+v(ramp(i,TPS.length))+'"></i>'+th(t)+'</span>').join('')
-   : '<span><i style="background:'+v('--s1')+'"></i>condition mean pooled over items ±1 SEM</span>')
+ $('drlg').innerHTML=(OV
+   ? groups.map((g,i)=>'<span><i style="background:'+v(CAT[i%CAT.length])+'"></i>'+g+'</span>').join('')
+     +(series.length>1?'<span style="color:var(--mut)">paler to darker with time — pick one hour '
+       +'with the Timepoint chip to label the curves</span>':'')
+   : (isTC&&DRT===-1
+      ? TPS.map((t,i)=>'<span><i style="background:'+v(ramp(i,TPS.length))+'"></i>'+th(t)+'</span>').join('')
+      : '<span><i style="background:'+v('--s1')+'"></i>condition mean pooled over items ±1 SEM</span>'))
   +(DOTS?'<span style="color:var(--mut)">faint dots: one worm</span>':'')
-  +'<span style="color:var(--mut)">y is shared across a row, so columns compare directly</span>';
+  +'<span style="color:var(--mut)">'+(OV?'every strain in one axis, so they can be read against each other'
+    :'y is shared across a row, so columns compare directly')+'</span>';
  $('drnote').innerHTML=M.filter(m=>m.note).map(m=>'<b>'+m.label+'</b> — '+m.note).join('<br>');
 }
 const condNameOf=(strain,dose)=>{const c=D.cond.find(q=>q.strain===strain&&q.dose===dose);
@@ -663,7 +707,11 @@ function boot(){
  $('hdr').innerHTML=D.subtitle||'';
  if(D.caveat)$('caveat').innerHTML=D.caveat; else $('caveat').style.display='none';
  $('drt').textContent=D.has_dose?'Dose–response':'By condition';
- $('drcap').innerHTML=(D.dr_caption||'')+(isTC?' Only the headline metrics take a row here; every '
+ $('drcap').innerHTML=(D.dr_caption||'')
+  +(D.has_dose?' <b>Layout</b> at the top switches this panel too: <b>Facet</b> gives one axis per '
+    +'strain, <b>Overlay</b> puts them all in one so the strains can be read against each other at a '
+    +'dose.':'')
+  +(isTC?' Only the headline metrics take a row here; every '
    +'metric is available in the panel above and in the table below.':'');
  $('tccap').innerHTML='The measurement. Pick a metric; pick which conditions are drawn with the chips '
   +(HAS_WORMS?'at the top. <b>Points \u2192 Worms</b> puts every animal behind its marker \u2014 off by '
